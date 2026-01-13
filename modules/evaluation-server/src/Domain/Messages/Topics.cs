@@ -8,6 +8,7 @@ public static class Topics
     public const string DataChangePattern = "featbit-*-change";
     public const string FeatureFlagChange = "featbit-feature-flag-change";
     public const string SegmentChange = "featbit-segment-change";
+    public const string PushFullSyncChange = "featbit-push-full-sync-change";
 
     public const string Insights = "featbit-insights";
 
@@ -15,6 +16,7 @@ public static class Topics
     {
         FeatureFlagChange => "featbit_feature_flag_change_channel",
         SegmentChange => "featbit_segment_change_channel",
+        PushFullSyncChange => "featbit_push_full_sync_change_channel",
         _ => throw new ArgumentOutOfRangeException(nameof(topic), topic, "Unsupported topic")
     };
 }

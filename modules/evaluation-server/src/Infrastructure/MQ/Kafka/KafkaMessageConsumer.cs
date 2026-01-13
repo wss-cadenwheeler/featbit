@@ -33,11 +33,11 @@ public partial class KafkaMessageConsumer : BackgroundService
 
     private async Task StartConsumerLoop(CancellationToken cancellationToken)
     {
-        var topics = new[] { Topics.FeatureFlagChange, Topics.SegmentChange };
+        var topics = new[] { Topics.FeatureFlagChange, Topics.SegmentChange, Topics.PushFullSyncChange };
 
         _consumer.Subscribe(topics);
         _logger.LogInformation(
-            "Start consuming flag & segment change messages through topics: {Topics}.",
+            "Start consuming flag & segment change & push full sync change messages through topics: {Topics}.",
             string.Join(',', topics)
         );
 

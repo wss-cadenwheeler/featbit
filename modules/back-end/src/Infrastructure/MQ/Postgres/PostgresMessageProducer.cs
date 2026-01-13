@@ -15,7 +15,7 @@ public partial class PostgresMessageProducer(NpgsqlDataSource dataSource, ILogge
 
     public async Task PublishAsync<TMessage>(string topic, TMessage message) where TMessage : class
     {
-        var isNotificationTopic = topic is Topics.FeatureFlagChange or Topics.SegmentChange;
+        var isNotificationTopic = topic is Topics.FeatureFlagChange or Topics.SegmentChange or Topics.PushFullSyncChange;
 
         try
         {
