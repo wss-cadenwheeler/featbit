@@ -1,4 +1,6 @@
 using System.Text;
+using Domain.FeatureFlags;
+using Domain.Segments;
 using Domain.Shared;
 using Infrastructure.Caches.Redis;
 using StackExchange.Redis;
@@ -92,5 +94,30 @@ public class RedisStore(IRedisClient redisClient) : IDbStore
             Guid.Parse(entries[2].ToString()),
             entries[3].ToString()
         );
+    }
+
+    public async Task UpsertFlagAsync(FeatureFlag flag)
+    {
+        // upsert flag
+        var cache = RedisCaches.Flag(flag);
+        await Redis.StringSetAsync(cache.Key, cache.Value);
+
+        // upsert index
+        var index = RedisCaches.FlagIndex(flag);
+        await Redis.SortedSetAddAsync(index.Key, index.Member, index.Score);
+    }
+
+    public async Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment)
+    {
+        // upsert cache
+        var cache = RedisCaches.Segment(segment);
+        await Redis.StringSetAsync(cache.Key, cache.Value);
+
+        // upsert index
+        foreach (var envId in envIds)
+        {
+            var index = RedisCaches.SegmentIndex(envId, segment);
+            await Redis.SortedSetAddAsync(index.Key, index.Member, index.Score);
+        }
     }
 }

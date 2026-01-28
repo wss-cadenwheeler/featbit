@@ -1,3 +1,5 @@
+using Domain.FeatureFlags;
+using Domain.Segments;
 using Domain.Shared;
 using Infrastructure.Persistence.MongoDb;
 using MongoDB.Bson;
@@ -156,4 +158,8 @@ public class MongoDbStore : IDbStore
             document["env"]["key"].AsString
         );
     }
+
+    public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
+
+    public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 }

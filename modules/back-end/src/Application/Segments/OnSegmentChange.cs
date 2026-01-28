@@ -4,6 +4,7 @@ using Application.Caches;
 using Domain.AuditLogs;
 using Domain.Messages;
 using Domain.Segments;
+using Domain.Utils;
 
 namespace Application.Segments;
 
@@ -73,6 +74,9 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
 
         // update cache
         await _cache.UpsertSegmentAsync(envIds, segment);
+        
+        var segmentNonSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
+        var envIdsNode = JsonSerializer.SerializeToNode(envIds, ReusableJsonSerializerOptions.Web);
 
         foreach (var envId in envIds)
         {
@@ -102,7 +106,9 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
             JsonObject message = new()
             {
                 ["segment"] = segment.SerializeAsEnvironmentSpecific(envId),
-                ["affectedFlagIds"] = JsonSerializer.SerializeToNode(flagReferences.Select(x => x.Id))
+                ["affectedFlagIds"] = JsonSerializer.SerializeToNode(flagReferences.Select(x => x.Id)),
+                ["segmentNonSpecific"] = segmentNonSpecificNode,
+                ["envIds"] = envIdsNode
             };
 
             await _messageProducer.PublishAsync(Topics.SegmentChange, message);

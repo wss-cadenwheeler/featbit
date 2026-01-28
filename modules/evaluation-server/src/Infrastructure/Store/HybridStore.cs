@@ -1,3 +1,5 @@
+using Domain.FeatureFlags;
+using Domain.Segments;
 using Domain.Shared;
 using Microsoft.Extensions.Logging;
 
@@ -51,4 +53,20 @@ public class HybridStore : IStore
 
     public async Task<Secret?> GetSecretAsync(string secretString) =>
         await AvailableStore.GetSecretAsync(secretString);
+
+    public async Task UpsertFlagAsync(FeatureFlag flag)
+    {
+        if (AvailableStore is RedisStore)
+        {
+            await AvailableStore.UpsertFlagAsync(flag);
+        }
+    }
+
+    public async Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment)
+    {
+        if (AvailableStore is RedisStore)
+        {
+            await AvailableStore.UpsertSegmentAsync(envIds, segment);
+        }
+    }
 }

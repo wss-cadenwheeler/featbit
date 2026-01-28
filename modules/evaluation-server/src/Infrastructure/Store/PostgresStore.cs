@@ -1,5 +1,7 @@
 using System.Text.Json;
 using Dapper;
+using Domain.FeatureFlags;
+using Domain.Segments;
 using Domain.Shared;
 using Infrastructure.Utils;
 using Npgsql;
@@ -148,6 +150,10 @@ public class PostgresStore(NpgsqlDataSource dataSource) : IDbStore
         // no matching secret found
         return null;
     }
+
+    public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
+
+    public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 
     private static byte[] SerializeFlag(IDictionary<string, object> row)
     {

@@ -1,5 +1,8 @@
 using System.Text.Json;
 using Domain.Messages;
+using Domain.Segments;
+using Domain.Shared;
+using Infrastructure.Store;
 using Microsoft.Extensions.Logging;
 using Streaming.Connections;
 using Streaming.Protocol;
@@ -10,7 +13,8 @@ namespace Streaming.Consumers;
 public class SegmentChangeMessageConsumer(
     IConnectionManager connectionManager,
     IDataSyncService dataSyncService,
-    ILogger<SegmentChangeMessageConsumer> logger)
+    ILogger<SegmentChangeMessageConsumer> logger,
+    IStore store)
     : IMessageConsumer
 {
     public string Topic => Topics.SegmentChange;
@@ -27,6 +31,28 @@ public class SegmentChangeMessageConsumer(
 
         var envId = segment.GetProperty("envId").GetGuid();
         var flagIds = affectedFlagIds.Deserialize<string[]>()!;
+
+
+        if (store is HybridStore &&
+            root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) &&
+            root.TryGetProperty("envIds", out var envIds))
+        {
+            try
+            {
+                if (segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web) is { } segmentObj &&
+                    envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web) is { } envIdsCollection)
+                {
+                    await store.UpsertSegmentAsync(envIdsCollection, segmentObj).ConfigureAwait(false);
+                }
+            }
+            catch (JsonException ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Exception occurred deserializing segment change message."
+                );
+            }
+        }
 
         var connections = connectionManager.GetEnvConnections(envId);
         foreach (var connection in connections)

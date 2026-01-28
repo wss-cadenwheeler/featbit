@@ -1,3 +1,5 @@
+using Domain.FeatureFlags;
+using Domain.Segments;
 using Domain.Shared;
 
 namespace Infrastructure.Fakes;
@@ -35,6 +37,10 @@ public class FakeStore : IDbStore
     }
 
     public Task<Secret?> GetSecretAsync(string secretString) => Task.FromResult(TestData.GetSecret(secretString));
+    
+    public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
+
+    public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 
     public static SecretWithValue[] GetRpSecrets(string key) => FakeData.GetRpSecrets(key);
 }
