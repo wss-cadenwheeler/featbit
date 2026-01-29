@@ -2,7 +2,9 @@ using System.Text.Json;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Shared;
+using Infrastructure;
 using Infrastructure.Store;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Streaming.Connections;
 using Streaming.Protocol;
@@ -14,7 +16,8 @@ public class FeatureFlagChangeMessageConsumer(
     IConnectionManager connectionManager,
     IDataSyncService dataSyncService,
     ILogger<FeatureFlagChangeMessageConsumer> logger,
-    IStore store)
+    IStore store,
+    IConfiguration configuration)
     : IMessageConsumer
 {
     public string Topic => Topics.FeatureFlagChange;
@@ -27,7 +30,7 @@ public class FeatureFlagChangeMessageConsumer(
         var envId = flag.GetProperty("envId").GetGuid();
         
         
-        if (store is HybridStore)
+        if (configuration.GetRedisShouldUpsertState() && store is HybridStore)
         {
             try
             {

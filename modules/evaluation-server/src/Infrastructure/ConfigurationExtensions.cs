@@ -62,4 +62,11 @@ public static class ConfigurationExtensions
 
         return builder.ToString();
     }
+    
+    public static bool GetRedisShouldUpsertState(this IConfiguration configuration)
+    {
+        var isEnabled = configuration["Redis:ShouldUpsert"];
+
+        return bool.TryParse(isEnabled, out var result) && result;
+    }
 }

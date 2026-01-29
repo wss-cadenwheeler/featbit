@@ -2,11 +2,14 @@ using System.Text.Json;
 using Domain.Messages;
 using Domain.Segments;
 using Domain.Shared;
+using Infrastructure;
 using Infrastructure.Store;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Streaming.Connections;
 using Streaming.Protocol;
 using Streaming.Services;
+
 
 namespace Streaming.Consumers;
 
@@ -14,7 +17,8 @@ public class SegmentChangeMessageConsumer(
     IConnectionManager connectionManager,
     IDataSyncService dataSyncService,
     ILogger<SegmentChangeMessageConsumer> logger,
-    IStore store)
+    IStore store,
+    IConfiguration configuration)
     : IMessageConsumer
 {
     public string Topic => Topics.SegmentChange;
@@ -33,7 +37,7 @@ public class SegmentChangeMessageConsumer(
         var flagIds = affectedFlagIds.Deserialize<string[]>()!;
 
 
-        if (store is HybridStore &&
+        if (configuration.GetRedisShouldUpsertState() && store is HybridStore &&
             root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) &&
             root.TryGetProperty("envIds", out var envIds))
         {
