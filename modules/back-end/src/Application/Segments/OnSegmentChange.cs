@@ -75,7 +75,7 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         // update cache
         await _cache.UpsertSegmentAsync(envIds, segment);
         
-        var segmentNonSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
+        var segmentNonEnvironmentSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
         var envIdsNode = JsonSerializer.SerializeToNode(envIds, ReusableJsonSerializerOptions.Web);
 
         foreach (var envId in envIds)
@@ -107,7 +107,7 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
             {
                 ["segment"] = segment.SerializeAsEnvironmentSpecific(envId),
                 ["affectedFlagIds"] = JsonSerializer.SerializeToNode(flagReferences.Select(x => x.Id)),
-                ["segmentNonSpecific"] = segmentNonSpecificNode,
+                ["segmentNonSpecific"] = segmentNonEnvironmentSpecificNode,
                 ["envIds"] = envIdsNode
             };
 
