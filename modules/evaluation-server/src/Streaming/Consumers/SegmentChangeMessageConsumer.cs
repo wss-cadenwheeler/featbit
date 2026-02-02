@@ -27,11 +27,15 @@ public class SegmentChangeMessageConsumer(
     {
         using var document = JsonDocument.Parse(message);
         var root = document.RootElement;
-        
-        if (configuration.GetRedisShouldUpsertState() && store is HybridStore &&
-            root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) &&
+
+        if (root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) &&
             root.TryGetProperty("envIds", out var envIds))
         {
+            if (!configuration.GetRedisShouldUpsertState() || store is not HybridStore)
+            {
+                return;
+            }
+
             try
             {
                 if (segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web) is { } segmentObj &&
@@ -50,7 +54,7 @@ public class SegmentChangeMessageConsumer(
 
             return;
         }
-        
+
         if (!root.TryGetProperty("segment", out var segment) ||
             !root.TryGetProperty("affectedFlagIds", out var affectedFlagIds))
         {
@@ -59,7 +63,7 @@ public class SegmentChangeMessageConsumer(
 
         var envId = segment.GetProperty("envId").GetGuid();
         var flagIds = affectedFlagIds.Deserialize<string[]>()!;
-        
+
         var connections = connectionManager.GetEnvConnections(envId);
         foreach (var connection in connections)
         {
