@@ -20,18 +20,22 @@ public class OnSegmentChange : INotification
 
     public string Comment { get; set; }
 
+    public bool IsTargetingChange { get; set; }
+
     public OnSegmentChange(
         Segment segment,
         string operation,
         DataChange dataChange,
         Guid operatorId,
-        string comment = "")
+        string comment = "",
+        bool isTargetingChange = false)
     {
         Segment = segment;
         Operation = operation;
         DataChange = dataChange;
         OperatorId = operatorId;
         Comment = comment;
+        IsTargetingChange = isTargetingChange;
     }
 
     public AuditLog GetAuditLog()
@@ -48,6 +52,7 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
     private readonly IMessageProducer _messageProducer;
     private readonly ICacheService _cache;
     private readonly IAuditLogService _auditLogService;
+    private readonly IFeatureFlagAppService _featureFlagAppService;
     private readonly IWebhookHandler _webhookHandler;
 
     public OnSegmentChangeHandler(
@@ -55,12 +60,14 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         IMessageProducer messageProducer,
         ICacheService cache,
         IAuditLogService auditLogService,
+        IFeatureFlagAppService featureFlagAppService,
         IWebhookHandler webhookHandler)
     {
         _segmentService = segmentService;
         _messageProducer = messageProducer;
         _cache = cache;
         _auditLogService = auditLogService;
+        _featureFlagAppService = featureFlagAppService;
         _webhookHandler = webhookHandler;
     }
 
@@ -88,10 +95,18 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
 
         foreach (var envId in envIds)
         {
-            // publish segment change message
-            await PublishSegmentChangeMessage(envId);
+            var affectedFlags = await GetAffectedFlagsAsync(envId);
 
-            // handle webhook
+            // update affected flags
+            if (affectedFlags.Count > 0)
+            {
+                await _featureFlagAppService.OnSegmentUpdatedAsync(segment, notification.OperatorId, affectedFlags);
+            }
+
+            // publish segment change message
+            await PublishSegmentChangeMessage(envId, affectedFlags);
+
+            // handle webhook asynchronously
             _ = _webhookHandler.HandleAsync(
                 envId,
                 segment,
@@ -102,19 +117,30 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
 
         return;
 
-        async Task PublishSegmentChangeMessage(Guid envId)
+        async ValueTask<ICollection<FlagReference>> GetAffectedFlagsAsync(Guid envId)
         {
-            var hasNoFlagReferences =
-                notification.Operation is Operations.Archive or Operations.Restore or Operations.Create;
+            // no affected flags for create/archive/restore operations
+            if (notification.Operation is Operations.Archive or Operations.Restore or Operations.Create)
+            {
+                return [];
+            }
 
-            var flagReferences = hasNoFlagReferences
-                ? []
-                : await _segmentService.GetFlagReferencesAsync(envId, segment.Id);
+            // only targeting change affects flags
+            if (!notification.IsTargetingChange)
+            {
+                return [];
+            }
 
+            var affectedFlags = await _segmentService.GetFlagReferencesAsync(envId, segment.Id);
+            return affectedFlags;
+        }
+
+        async Task PublishSegmentChangeMessage(Guid envId, ICollection<FlagReference> affectedFlags)
+        {
             JsonObject message = new()
             {
                 ["segment"] = segment.SerializeAsEnvironmentSpecific(envId),
-                ["affectedFlagIds"] = JsonSerializer.SerializeToNode(flagReferences.Select(x => x.Id))
+                ["affectedFlagIds"] = JsonSerializer.SerializeToNode(affectedFlags.Select(x => x.Id))
             };
 
             await _messageProducer.PublishAsync(Topics.SegmentChange, message);
