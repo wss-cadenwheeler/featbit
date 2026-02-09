@@ -1,5 +1,6 @@
 ﻿using Infrastructure.Caches;
 using Infrastructure.MQ;
+using Infrastructure.MQ.Kafka;
 using Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Npgsql;

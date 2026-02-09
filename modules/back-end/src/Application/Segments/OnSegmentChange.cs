@@ -4,6 +4,9 @@ using Application.Caches;
 using Domain.AuditLogs;
 using Domain.Messages;
 using Domain.Segments;
+using Domain.Utils;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Configuration;
 
 namespace Application.Segments;
 
@@ -53,6 +56,7 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
     private readonly IAuditLogService _auditLogService;
     private readonly IFeatureFlagAppService _featureFlagAppService;
     private readonly IWebhookHandler _webhookHandler;
+    private readonly IConfiguration _configuration;
 
     public OnSegmentChangeHandler(
         ISegmentService segmentService,
@@ -60,7 +64,8 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         ICacheService cache,
         IAuditLogService auditLogService,
         IFeatureFlagAppService featureFlagAppService,
-        IWebhookHandler webhookHandler)
+        IWebhookHandler webhookHandler, 
+        IConfiguration configuration)
     {
         _segmentService = segmentService;
         _messageProducer = messageProducer;
@@ -68,6 +73,7 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         _auditLogService = auditLogService;
         _featureFlagAppService = featureFlagAppService;
         _webhookHandler = webhookHandler;
+        _configuration = configuration;
     }
 
     public async Task Handle(OnSegmentChange notification, CancellationToken cancellationToken)
@@ -81,26 +87,45 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         // update cache
         await _cache.UpsertSegmentAsync(envIds, segment);
 
-        foreach (var envId in envIds)
+        var alternativeKafkaTopics = _configuration.GetKafkaAlternativeTopicsConfiguration();
+        if (alternativeKafkaTopics is { Enabled: true })
         {
-            var affectedFlags = await GetAffectedFlagsAsync(envId);
+            var segmentNonEnvironmentSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
+            var envIdsNode = JsonSerializer.SerializeToNode(envIds, ReusableJsonSerializerOptions.Web);
 
-            // update affected flags
-            if (affectedFlags.Count > 0)
+            JsonObject segmentUpsertMessage = new()
             {
-                await _featureFlagAppService.OnSegmentUpdatedAsync(segment, notification.OperatorId, affectedFlags);
+                ["segmentNonSpecific"] = segmentNonEnvironmentSpecificNode,
+                ["envIds"] = envIdsNode
+            };
+            
+            // TODO: Handle env specific updates
+            
+            await _messageProducer.PublishAsync(alternativeKafkaTopics.SegmentChangeTopic, segmentUpsertMessage);
+        }
+        else
+        {
+            foreach (var envId in envIds)
+            {
+                var affectedFlags = await GetAffectedFlagsAsync(envId);
+
+                // update affected flags
+                if (affectedFlags.Count > 0)
+                {
+                    await _featureFlagAppService.OnSegmentUpdatedAsync(segment, notification.OperatorId, affectedFlags);
+                }
+
+                // publish segment change message
+                await PublishSegmentChangeMessage(envId, affectedFlags);
+
+                // handle webhook asynchronously
+                _ = _webhookHandler.HandleAsync(
+                    envId,
+                    segment,
+                    notification.DataChange,
+                    notification.OperatorId
+                );
             }
-
-            // publish segment change message
-            await PublishSegmentChangeMessage(envId, affectedFlags);
-
-            // handle webhook asynchronously
-            _ = _webhookHandler.HandleAsync(
-                envId,
-                segment,
-                notification.DataChange,
-                notification.OperatorId
-            );
         }
 
         return;

@@ -3,6 +3,8 @@ using Domain.AuditLogs;
 using Domain.FeatureFlags;
 using Domain.FlagRevisions;
 using Domain.Messages;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Configuration;
 
 namespace Application.FeatureFlags;
 
@@ -47,19 +49,22 @@ public class OnFeatureFlagChangedHandler : INotificationHandler<OnFeatureFlagCha
     private readonly ICacheService _cache;
     private readonly IAuditLogService _auditLogService;
     private readonly IWebhookHandler _webhookHandler;
+    private readonly IConfiguration _configuration;
 
     public OnFeatureFlagChangedHandler(
         IFlagRevisionService flagRevisionService,
         IMessageProducer messageProducer,
         ICacheService cache,
         IAuditLogService auditLogService,
-        IWebhookHandler webhookHandler)
+        IWebhookHandler webhookHandler,
+        IConfiguration configuration)
     {
         _flagRevisionService = flagRevisionService;
         _messageProducer = messageProducer;
         _cache = cache;
         _auditLogService = auditLogService;
         _webhookHandler = webhookHandler;
+        _configuration = configuration;
     }
 
     public async Task Handle(OnFeatureFlagChanged notification, CancellationToken cancellationToken)
@@ -76,8 +81,17 @@ public class OnFeatureFlagChangedHandler : INotificationHandler<OnFeatureFlagCha
         var revision = new FlagRevision(flag, notification.Comment);
         await _flagRevisionService.AddOneAsync(revision);
 
-        // publish feature flag change message
-        await _messageProducer.PublishAsync(Topics.FeatureFlagChange, flag);
+        var alternativeKafkaTopics = _configuration.GetKafkaAlternativeTopicsConfiguration();
+        if (alternativeKafkaTopics is { Enabled: true })
+        {
+            await _messageProducer.PublishAsync(alternativeKafkaTopics.FeatureFlagChangeTopic, flag);
+        }
+        else
+        {
+            // publish feature flag change message
+            await _messageProducer.PublishAsync(Topics.FeatureFlagChange, flag);
+        }
+
 
         // handle webhooks
         _ = _webhookHandler.HandleAsync(notification.Flag, notification.DataChange, notification.OperatorId);

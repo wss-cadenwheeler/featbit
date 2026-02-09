@@ -1,6 +1,12 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Application.Bases;
 using Application.Caches;
+using Domain.Messages;
+using Domain.Utils;
 using Domain.Workspaces;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Configuration;
 
 namespace Application.Workspaces;
 
@@ -32,12 +38,16 @@ public class UpdateLicenseHandler : IRequestHandler<UpdateLicense, WorkspaceVm>
     private readonly IWorkspaceService _service;
     private readonly ICacheService _cacheService;
     private readonly IMapper _mapper;
+    private readonly IConfiguration _configuration;
+    private readonly IMessageProducer _messageProducer;
 
-    public UpdateLicenseHandler(IWorkspaceService service, ICacheService cacheService, IMapper mapper)
+    public UpdateLicenseHandler(IWorkspaceService service, ICacheService cacheService, IMapper mapper, IConfiguration configuration, IMessageProducer messageProducer)
     {
         _service = service;
         _cacheService = cacheService;
         _mapper = mapper;
+        _configuration = configuration;
+        _messageProducer = messageProducer;
     }
 
     public async Task<WorkspaceVm> Handle(UpdateLicense request, CancellationToken cancellationToken)
@@ -50,6 +60,13 @@ public class UpdateLicenseHandler : IRequestHandler<UpdateLicense, WorkspaceVm>
 
         // update license cache
         await _cacheService.UpsertLicenseAsync(workspace);
+        
+        var alternativeKafkaTopics = _configuration.GetKafkaAlternativeTopicsConfiguration();
+        
+        if (alternativeKafkaTopics is { Enabled: true })
+        {
+            await _messageProducer.PublishAsync(alternativeKafkaTopics.LicenseChangeTopic, workspace);
+        }
 
         return _mapper.Map<WorkspaceVm>(workspace);
     }
