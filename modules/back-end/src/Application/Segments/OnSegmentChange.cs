@@ -92,11 +92,13 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
         {
             var segmentNonEnvironmentSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
             var envIdsNode = JsonSerializer.SerializeToNode(envIds, ReusableJsonSerializerOptions.Web);
+            var notificationNode = JsonSerializer.SerializeToNode(notification, ReusableJsonSerializerOptions.Web);
 
             JsonObject segmentUpsertMessage = new()
             {
                 ["segmentNonSpecific"] = segmentNonEnvironmentSpecificNode,
-                ["envIds"] = envIdsNode
+                ["envIds"] = envIdsNode,
+                ["notification"] = notificationNode
             };
             
             await _messageProducer.PublishAsync(alternativeKafkaTopics.SegmentChangeTopic, segmentUpsertMessage);
@@ -115,15 +117,18 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
 
                 // publish segment change message
                 await PublishSegmentChangeMessage(envId, affectedFlags);
-
-                // handle webhook asynchronously
-                _ = _webhookHandler.HandleAsync(
-                    envId,
-                    segment,
-                    notification.DataChange,
-                    notification.OperatorId
-                );
             }
+        }
+
+        foreach (var envId in envIds)
+        {
+            // handle webhook asynchronously
+            _ = _webhookHandler.HandleAsync(
+                envId,
+                segment,
+                notification.DataChange,
+                notification.OperatorId
+            );
         }
 
         return;
