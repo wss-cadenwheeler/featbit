@@ -99,8 +99,6 @@ public class OnSegmentChangeHandler : INotificationHandler<OnSegmentChange>
                 ["envIds"] = envIdsNode
             };
             
-            // TODO: Handle env specific updates
-            
             await _messageProducer.PublishAsync(alternativeKafkaTopics.SegmentChangeTopic, segmentUpsertMessage);
         }
         else
