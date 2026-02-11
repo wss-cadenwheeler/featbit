@@ -1,12 +1,10 @@
 using System.Text.Json;
 using Application.Caches;
-using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Utils;
 using Domain.Workspaces;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Infrastructure.MQ.ControlPlane;
+namespace Api.Application.ControlPlane;
 
 public class LicenseChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {

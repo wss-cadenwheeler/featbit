@@ -1,10 +1,23 @@
+using System.Reflection;
+using Application.Bases.Behaviours;
+using Application.Services;
+using Infrastructure.AppService;
+using Infrastructure.Caches;
+using Infrastructure.Persistence;
+using MediatR;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
-builder.Services.AddInfrastructureServices(builder.Configuration);
-builder.Services.AddApplicationServices();
+builder.Services.AddCache(builder.Configuration);
+builder.Services.AddTransient<IFeatureFlagAppService, FeatureFlagAppService>();
+builder.Services.AddDbSpecificServices(builder.Configuration);
+
+// MediatR
+builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));
 
 var app = builder.Build();
 
@@ -41,3 +54,4 @@ record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
     public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
 }
+

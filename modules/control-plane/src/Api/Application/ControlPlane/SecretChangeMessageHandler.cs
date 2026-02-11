@@ -1,12 +1,9 @@
 using System.Text.Json;
 using Application.Caches;
 using Domain.Environments;
-using Domain.FeatureFlags;
 using Domain.Messages;
-using Domain.Utils;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Infrastructure.MQ.ControlPlane;
+namespace Api.Application.ControlPlane;
 
 public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {

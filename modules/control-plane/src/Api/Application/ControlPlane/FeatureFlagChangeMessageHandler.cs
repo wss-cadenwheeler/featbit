@@ -1,12 +1,10 @@
 using System.Text.Json;
 using Application.Caches;
-using Domain.EndUsers;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Utils;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Infrastructure.MQ.ControlPlane;
+namespace Api.Application.ControlPlane;
 
 public class FeatureFlagChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService, IMessageProducer messageProducer) : IMessageHandler
 {

@@ -1,15 +1,11 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Application.Caches;
 using Application.Segments;
-using Domain.AuditLogs;
-using Domain.FeatureFlags;
+using Application.Services;
 using Domain.Messages;
 using Domain.Segments;
-using Domain.Utils;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Infrastructure.MQ.ControlPlane;
+namespace Api.Application.ControlPlane;
 
 public class SegmentChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
