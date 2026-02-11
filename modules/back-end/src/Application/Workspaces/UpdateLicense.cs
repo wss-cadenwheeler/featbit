@@ -1,6 +1,9 @@
 using Application.Bases;
 using Application.Caches;
+using Application.Configuration;
+using Domain.Messages;
 using Domain.Workspaces;
+using Microsoft.Extensions.Configuration;
 
 namespace Application.Workspaces;
 
@@ -27,30 +30,30 @@ public class UpdateLicenseValidator : AbstractValidator<UpdateLicense>
     }
 }
 
-public class UpdateLicenseHandler : IRequestHandler<UpdateLicense, WorkspaceVm>
+public class UpdateLicenseHandler(
+    IWorkspaceService service,
+    ICacheService cacheService,
+    IMapper mapper,
+    IConfiguration configuration,
+    IMessageProducer messageProducer)
+    : IRequestHandler<UpdateLicense, WorkspaceVm>
 {
-    private readonly IWorkspaceService _service;
-    private readonly ICacheService _cacheService;
-    private readonly IMapper _mapper;
-
-    public UpdateLicenseHandler(IWorkspaceService service, ICacheService cacheService, IMapper mapper)
-    {
-        _service = service;
-        _cacheService = cacheService;
-        _mapper = mapper;
-    }
-
     public async Task<WorkspaceVm> Handle(UpdateLicense request, CancellationToken cancellationToken)
     {
-        var workspace = await _service.GetAsync(request.Id);
+        var workspace = await service.GetAsync(request.Id);
 
         // save to database
         workspace.UpdateLicense(request.License);
-        await _service.UpdateAsync(workspace);
+        await service.UpdateAsync(workspace);
 
         // update license cache
-        await _cacheService.UpsertLicenseAsync(workspace);
+        await cacheService.UpsertLicenseAsync(workspace);
+        
+        if (configuration.UseControlPlane())
+        {
+            await messageProducer.PublishAsync(Topics.ControlPlaneLicenseChange, workspace);
+        }
 
-        return _mapper.Map<WorkspaceVm>(workspace);
+        return mapper.Map<WorkspaceVm>(workspace);
     }
 }
