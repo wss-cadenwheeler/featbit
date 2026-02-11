@@ -1,5 +1,6 @@
 using Confluent.Kafka;
 using Domain.Messages;
+using Infrastructure.MQ.ControlPlane;
 using Infrastructure.MQ.Kafka;
 using Infrastructure.MQ.None;
 using Infrastructure.MQ.Postgres;
@@ -31,6 +32,10 @@ public static class MqServiceCollectionExtensions
                 break;
         }
 
+        services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(Topics.ControlPlaneFeatureFlagChange);
+        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
+        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
+        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
         return;
 
         void AddNone()
