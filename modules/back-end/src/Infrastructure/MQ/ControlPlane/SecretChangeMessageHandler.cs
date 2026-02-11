@@ -4,10 +4,11 @@ using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Utils;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Infrastructure.MQ.ControlPlane;
 
-public class SecretChangeMessageHandler(ICacheService cacheService) : IMessageHandler
+public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {
     public string Topic => Topics.ControlPlaneSecretChange;
 
@@ -24,7 +25,6 @@ public class SecretChangeMessageHandler(ICacheService cacheService) : IMessageHa
         var deserializedSecret = secret.Deserialize<Secret>();
         if (deserializedResourceDescriptor != null && deserializedSecret != null)
         {
-            // TODO: Upsert to all Redis Instances
             await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret).ConfigureAwait(false);
         }
     }

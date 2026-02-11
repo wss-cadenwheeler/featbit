@@ -7,14 +7,13 @@ using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Segments;
 using Domain.Utils;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Infrastructure.MQ.ControlPlane;
 
 public class SegmentChangeMessageHandler(
-    ICacheService cacheService,
-    IMessageProducer messageProducer,
+    [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IFeatureFlagAppService featureFlagAppService,
-    ISegmentService segmentService,
     ISegmentMessageService segmentMessageService) : IMessageHandler
 {
     public string Topic => Topics.ControlPlaneSegmentChange;
@@ -36,7 +35,6 @@ public class SegmentChangeMessageHandler(
         if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
             deserializedNotificationNode is not null)
         {
-            // TODO: Upsert to all Redis Instances
             await cacheService
                 .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
 

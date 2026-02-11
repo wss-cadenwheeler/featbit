@@ -4,10 +4,11 @@ using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Utils;
 using Domain.Workspaces;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Infrastructure.MQ.ControlPlane;
 
-public class LicenseChangeMessageHandler(ICacheService cacheService) : IMessageHandler
+public class LicenseChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {
     public string Topic => Topics.ControlPlaneLicenseChange;
 
@@ -16,7 +17,6 @@ public class LicenseChangeMessageHandler(ICacheService cacheService) : IMessageH
         var workspace = JsonSerializer.Deserialize<Workspace>(message, ReusableJsonSerializerOptions.Web);
         if (workspace != null)
         {
-            // TODO: Upsert to all Redis Instances
             await cacheService.UpsertLicenseAsync(workspace);
         }
     }
