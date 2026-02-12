@@ -4,7 +4,7 @@ using Domain.FeatureFlags;
 using Domain.Segments;
 using Domain.Workspaces;
 
-namespace Infrastructure.Caches.Redis;
+namespace Api.Infrastructure.Caches;
 
 public class CompositeRedisCacheService(IEnumerable<ICacheService> cacheServices) : ICacheService
 {
