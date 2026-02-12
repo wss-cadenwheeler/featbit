@@ -48,7 +48,7 @@ public static class MqServiceCollectionExtensions
             services.TryAddRedis(configuration);
 
             services.AddSingleton<IMessageProducer, RedisMessageProducer>();
-            services.AddHostedService<RedisMessageConsumer>();
+            // services.AddHostedService<RedisMessageConsumer>();
 
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
@@ -67,7 +67,7 @@ public static class MqServiceCollectionExtensions
             services.AddSingleton(consumerConfig);
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
-            services.AddHostedService<KafkaMessageConsumer>();
+            // services.AddHostedService<KafkaMessageConsumer>();
         }
 
         void AddPostgres()
@@ -75,7 +75,7 @@ public static class MqServiceCollectionExtensions
             services.TryAddPostgres(configuration);
             
             services.AddSingleton<IMessageProducer, PostgresMessageProducer>();
-            services.AddHostedService<PostgresMessageConsumer>();
+            // services.AddHostedService<PostgresMessageConsumer>();
 
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
