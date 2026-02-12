@@ -11,12 +11,9 @@
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\..\..\back-end\src\Domain\Domain.csproj" />
-      <ProjectReference Include="..\..\..\back-end\src\Infrastructure\Infrastructure.csproj" />
-    </ItemGroup>
-
-    <ItemGroup>
-      <Folder Include="Application\" />
+        <ProjectReference Include="..\..\..\back-end\src\Application\Application.csproj"/>
+        <ProjectReference Include="..\..\..\back-end\src\Domain\Domain.csproj"/>
+        <ProjectReference Include="..\..\..\back-end\src\Infrastructure\Infrastructure.csproj"/>
     </ItemGroup>
 
 
