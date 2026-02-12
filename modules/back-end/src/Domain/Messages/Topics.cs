@@ -9,6 +9,14 @@ public static class Topics
     public const string SegmentChange = "featbit-segment-change";
 
     public const string Insights = "featbit-insights";
+    
+    public const string ControlPlaneFeatureFlagChange = "featbit-control-plane-feature-flag-change";
+    
+    public const string ControlPlaneSegmentChange = "featbit-control-plane-segment-change";
+    
+    public const string ControlPlaneSecretChange = "featbit-control-plane-secret-change";
+    
+    public const string ControlPlaneLicenseChange = "featbit-control-plane-license-change";
 
     public static string ToChannel(string topic) => topic switch
     {

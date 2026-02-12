@@ -1,13 +1,14 @@
+using Api.Application.ControlPlane;
 using Confluent.Kafka;
 using Domain.Messages;
+using Infrastructure;
+using Infrastructure.MQ;
 using Infrastructure.MQ.Kafka;
 using Infrastructure.MQ.None;
 using Infrastructure.MQ.Postgres;
 using Infrastructure.MQ.Redis;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 
-namespace Infrastructure.MQ;
+namespace Api.Infrastructure.MQ;
 
 public static class MqServiceCollectionExtensions
 {
@@ -30,7 +31,11 @@ public static class MqServiceCollectionExtensions
                 AddPostgres();
                 break;
         }
-        
+
+        services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(Topics.ControlPlaneFeatureFlagChange);
+        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
+        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
+        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
         return;
 
         void AddNone()

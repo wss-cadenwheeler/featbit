@@ -1,3 +1,4 @@
+using Application.Segments;
 using Domain.Users;
 using Infrastructure.Caches;
 using Infrastructure.MQ;
@@ -42,6 +43,7 @@ public static class ConfigureServices
         services.AddDbSpecificServices(configuration);
         services.AddTransient<IEnvironmentAppService, AppServices.EnvironmentAppService>();
         services.AddTransient<IFeatureFlagAppService, AppServices.FeatureFlagAppService>();
+        services.AddTransient<ISegmentMessageService, SegmentMessageService>();
 
         // InsightsWriter must be a singleton service
         services.AddSingleton(typeof(AppServices.InsightsWriter));
