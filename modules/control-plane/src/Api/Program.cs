@@ -1,9 +1,11 @@
 using System.Reflection;
+using Api.Infrastructure.Caches;
+using Api.Infrastructure.MQ;
+using Api.Infrastructure.Persistence;
 using Application.Bases.Behaviours;
+using Application.Segments;
 using Application.Services;
 using Infrastructure.AppService;
-using Infrastructure.Caches;
-using Infrastructure.Persistence;
 using MediatR;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,6 +16,8 @@ builder.Services.AddOpenApi();
 builder.Services.AddCache(builder.Configuration);
 builder.Services.AddTransient<IFeatureFlagAppService, FeatureFlagAppService>();
 builder.Services.AddDbSpecificServices(builder.Configuration);
+builder.Services.AddMq(builder.Configuration);
+builder.Services.AddTransient<ISegmentMessageService, SegmentMessageService>();
 
 // MediatR
 builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
@@ -29,29 +33,6 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-    {
-        var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-            .ToArray();
-        return forecast;
-    })
-    .WithName("GetWeatherForecast");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
 

@@ -26,7 +26,6 @@ public static class CacheServiceCollectionExtensions
 
         void AddNone()
         {
-            services.AddTransient<ICachePopulatingService, NonePopulatingService>();
             services.AddTransient<ICacheService, NoneCacheService>();
         }
 
@@ -57,8 +56,6 @@ public static class CacheServiceCollectionExtensions
                 services.TryAddRedis(configuration);
                 services.AddTransient<ICacheService, RedisCacheService>();
             }
-
-            services.AddTransient<ICachePopulatingService, RedisPopulatingService>();
         }
     }
 }
