@@ -1,11 +1,14 @@
 using Confluent.Kafka;
 using Domain.Messages;
+using Infrastructure.Caches.Redis;
 using Infrastructure.MQ.Kafka;
 using Infrastructure.MQ.None;
 using Infrastructure.MQ.Postgres;
 using Infrastructure.MQ.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace Infrastructure.MQ;
 
@@ -30,7 +33,7 @@ public static class MqServiceCollectionExtensions
                 AddPostgres();
                 break;
         }
-        
+
         return;
 
         void AddNone()
@@ -43,7 +46,18 @@ public static class MqServiceCollectionExtensions
             services.TryAddRedis(configuration);
 
             services.AddSingleton<IMessageProducer, RedisMessageProducer>();
-            services.AddHostedService<RedisMessageConsumer>();
+            services.AddHostedService(sp =>
+            {
+                var redisClient = sp.GetRequiredService<IRedisClient>();
+                var logger = sp.GetRequiredService<ILogger<RedisMessageConsumer>>();
+
+                var topics = new[]
+                {
+                    Topics.EndUser, Topics.Insights
+                };
+
+                return new RedisMessageConsumer(redisClient, sp, logger, topics);
+            });
 
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
@@ -62,15 +76,57 @@ public static class MqServiceCollectionExtensions
             services.AddSingleton(consumerConfig);
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
-            services.AddHostedService<KafkaMessageConsumer>();
+            services.AddHostedService(sp =>
+            {
+                var cfg = sp.GetRequiredService<ConsumerConfig>();
+                var logger = sp.GetRequiredService<ILogger<KafkaMessageConsumer>>();
+                var provider = sp.GetRequiredService<IServiceProvider>();
+
+                // QUESTION: Why doesn't Kafka consume Insights messages?
+                var topics = new[]
+                {
+                    Topics.EndUser
+                };
+
+                return new KafkaMessageConsumer(cfg, provider, logger, topics);
+            });
+            
+            services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
         }
 
         void AddPostgres()
         {
             services.TryAddPostgres(configuration);
             
-            services.AddSingleton<IMessageProducer, PostgresMessageProducer>();
-            services.AddHostedService<PostgresMessageConsumer>();
+
+            
+            services.AddSingleton<IMessageProducer, PostgresMessageProducer>(sp =>
+            {
+                var topics = new[]
+                {
+                    Topics.FeatureFlagChange, Topics.SegmentChange
+                };
+                
+                var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
+                var logger = sp.GetRequiredService<ILogger<PostgresMessageProducer>>();
+
+                return new PostgresMessageProducer(dataSource, logger, topics);
+            });
+
+            services.AddHostedService(sp =>
+            {
+                var topics = new[]
+                {
+                    Topics.EndUser, Topics.Insights
+                };
+                
+                var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+                var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
+                var logger = sp.GetRequiredService<ILogger<PostgresMessageConsumer>>();
+
+
+                return new PostgresMessageConsumer(scopeFactory, dataSource, logger, topics);
+            });
 
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);

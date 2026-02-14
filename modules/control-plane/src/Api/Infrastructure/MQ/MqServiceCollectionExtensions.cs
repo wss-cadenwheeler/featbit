@@ -2,11 +2,13 @@ using Api.Application.ControlPlane;
 using Confluent.Kafka;
 using Domain.Messages;
 using Infrastructure;
+using Infrastructure.Caches.Redis;
 using Infrastructure.MQ;
-using KafkaMessageProducer = Api.Infrastructure.MQ.Kafka.KafkaMessageProducer;
-using NoneMessageProducer = Api.Infrastructure.MQ.None.NoneMessageProducer;
-using PostgresMessageProducer = Api.Infrastructure.MQ.Postgres.PostgresMessageProducer;
-using RedisMessageProducer = Api.Infrastructure.MQ.Redis.RedisMessageProducer;
+using Infrastructure.MQ.Kafka;
+using Infrastructure.MQ.None;
+using Infrastructure.MQ.Postgres;
+using Infrastructure.MQ.Redis;
+using Npgsql;
 
 namespace Api.Infrastructure.MQ;
 
@@ -15,6 +17,18 @@ public static class MqServiceCollectionExtensions
     public static void AddMq(this IServiceCollection services, IConfiguration configuration)
     {
         var mqProvider = configuration.GetMqProvider();
+        
+        var topics = new[]
+        {
+            Topics.ControlPlaneFeatureFlagChange, Topics.ControlPlaneLicenseChange,
+            Topics.ControlPlaneSecretChange, Topics.ControlPlaneSegmentChange
+        };
+        
+        services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(
+            Topics.ControlPlaneFeatureFlagChange);
+        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
+        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
+        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
 
         switch (mqProvider)
         {
@@ -31,11 +45,7 @@ public static class MqServiceCollectionExtensions
                 AddPostgres();
                 break;
         }
-
-        services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(Topics.ControlPlaneFeatureFlagChange);
-        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
-        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
-        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
+        
         return;
 
         void AddNone()
@@ -48,7 +58,13 @@ public static class MqServiceCollectionExtensions
             services.TryAddRedis(configuration);
 
             services.AddSingleton<IMessageProducer, RedisMessageProducer>();
-            services.AddHostedService<Redis.RedisMessageConsumer>();
+            services.AddHostedService(sp =>
+            {
+                var redisClient = sp.GetRequiredService<IRedisClient>();
+                var logger = sp.GetRequiredService<ILogger<RedisMessageConsumer>>();
+
+                return new RedisMessageConsumer(redisClient, sp, logger, topics);
+            });
         }
 
         void AddKafka()
@@ -64,15 +80,36 @@ public static class MqServiceCollectionExtensions
             services.AddSingleton(consumerConfig);
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
-            services.AddHostedService<Kafka.KafkaMessageConsumer>();
+
+            services.AddHostedService(sp =>
+            {
+                var cfg = sp.GetRequiredService<ConsumerConfig>();
+                var logger = sp.GetRequiredService<ILogger<KafkaMessageConsumer>>();
+                var provider = sp.GetRequiredService<IServiceProvider>();
+
+                return new KafkaMessageConsumer(cfg, provider, logger, topics);
+            });
         }
 
         void AddPostgres()
         {
             services.TryAddPostgres(configuration);
-            
-            services.AddSingleton<IMessageProducer, PostgresMessageProducer>();
-            services.AddHostedService<Postgres.PostgresMessageConsumer>();
+
+            services.AddSingleton<IMessageProducer, PostgresMessageProducer>(sp =>
+            {
+                var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
+                var logger = sp.GetRequiredService<ILogger<PostgresMessageProducer>>();
+
+                return new PostgresMessageProducer(dataSource, logger, []);
+            });
+            services.AddHostedService(sp =>
+            {
+                var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+                var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
+                var logger = sp.GetRequiredService<ILogger<PostgresMessageConsumer>>();
+
+                return new PostgresMessageConsumer(scopeFactory, dataSource, logger, topics);
+            });
         }
     }
 }
