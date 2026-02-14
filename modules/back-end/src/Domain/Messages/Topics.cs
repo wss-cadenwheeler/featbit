@@ -18,6 +18,9 @@ public static class Topics
     
     public const string ControlPlaneLicenseChange = "featbit-control-plane-license-change";
 
+    public const string ConnectionMade = "featbit-connection-made";
+    public const string ConnectionClosed = "featbit-connection-closed";
+
     public static string ToChannel(string topic) => topic switch
     {
         FeatureFlagChange => "featbit_feature_flag_change_channel",
