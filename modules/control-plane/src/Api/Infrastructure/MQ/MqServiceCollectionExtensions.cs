@@ -3,8 +3,8 @@ using Confluent.Kafka;
 using Domain.Messages;
 using Infrastructure;
 using Infrastructure.MQ;
-using Infrastructure.MQ.None;
 using KafkaMessageProducer = Api.Infrastructure.MQ.Kafka.KafkaMessageProducer;
+using NoneMessageProducer = Api.Infrastructure.MQ.None.NoneMessageProducer;
 using PostgresMessageProducer = Api.Infrastructure.MQ.Postgres.PostgresMessageProducer;
 using RedisMessageProducer = Api.Infrastructure.MQ.Redis.RedisMessageProducer;
 
