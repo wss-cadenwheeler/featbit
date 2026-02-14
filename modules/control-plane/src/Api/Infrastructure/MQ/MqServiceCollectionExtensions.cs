@@ -3,10 +3,10 @@ using Confluent.Kafka;
 using Domain.Messages;
 using Infrastructure;
 using Infrastructure.MQ;
-using Infrastructure.MQ.Kafka;
 using Infrastructure.MQ.None;
-using Infrastructure.MQ.Postgres;
-using Infrastructure.MQ.Redis;
+using KafkaMessageProducer = Api.Infrastructure.MQ.Kafka.KafkaMessageProducer;
+using PostgresMessageProducer = Api.Infrastructure.MQ.Postgres.PostgresMessageProducer;
+using RedisMessageProducer = Api.Infrastructure.MQ.Redis.RedisMessageProducer;
 
 namespace Api.Infrastructure.MQ;
 
@@ -48,7 +48,7 @@ public static class MqServiceCollectionExtensions
             services.TryAddRedis(configuration);
 
             services.AddSingleton<IMessageProducer, RedisMessageProducer>();
-            services.AddHostedService<Api.Infrastructure.MQ.Redis.RedisMessageConsumer>();
+            services.AddHostedService<Redis.RedisMessageConsumer>();
         }
 
         void AddKafka()
@@ -64,7 +64,7 @@ public static class MqServiceCollectionExtensions
             services.AddSingleton(consumerConfig);
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
-            services.AddHostedService<Api.Infrastructure.MQ.Kafka.KafkaMessageConsumer>();
+            services.AddHostedService<Kafka.KafkaMessageConsumer>();
         }
 
         void AddPostgres()
@@ -72,7 +72,7 @@ public static class MqServiceCollectionExtensions
             services.TryAddPostgres(configuration);
             
             services.AddSingleton<IMessageProducer, PostgresMessageProducer>();
-            services.AddHostedService<Api.Infrastructure.MQ.Postgres.PostgresMessageConsumer>();
+            services.AddHostedService<Postgres.PostgresMessageConsumer>();
         }
     }
 }
