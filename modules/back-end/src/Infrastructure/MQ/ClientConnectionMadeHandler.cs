@@ -2,11 +2,11 @@
 
 namespace Infrastructure.MQ;
 
-public class ClientConnectionMadeHandler : IMessageConsumer
+public class ClientConnectionMadeHandler : IMessageHandler
 {
     public string Topic => Topics.ConnectionMade;
 
-    public async Task HandleAsync(string message, CancellationToken cancellationToken)
+    public async Task HandleAsync(string message)
     {
         Console.WriteLine($"Handling connection made message: {message}");
     }
