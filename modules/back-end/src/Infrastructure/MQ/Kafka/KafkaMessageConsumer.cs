@@ -53,15 +53,7 @@ public partial class KafkaMessageConsumer : BackgroundService
                     // reached end of topic
                     continue;
                 }
-
-                var handler = _messageConsumers.FirstOrDefault(x => x.Topic == consumeResult.Topic);
-                if (handler == null)
-                {
-                    //Log.NoHandlerForTopic(_logger, consumeResult.Topic);
-                    Console.WriteLine($"No handler for topic {consumeResult.Topic}");
-                    continue;
-                }
-                
+                                
                 var topic = consumeResult.Topic;
                 if (string.IsNullOrWhiteSpace(topic))
                 {
