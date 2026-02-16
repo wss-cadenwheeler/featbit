@@ -2,6 +2,7 @@ using System.Text.Json;
 using Application.Caches;
 using Domain.Environments;
 using Domain.Messages;
+using Domain.Utils;
 
 namespace Api.Application.ControlPlane;
 
@@ -18,8 +19,8 @@ public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] IC
         {
             throw new InvalidDataException("invalid secret change data");
         }
-        var deserializedResourceDescriptor = resourceDescriptor.Deserialize<ResourceDescriptor>();
-        var deserializedSecret = secret.Deserialize<Secret>();
+        var deserializedResourceDescriptor = resourceDescriptor.Deserialize<ResourceDescriptor>(ReusableJsonSerializerOptions.Web);
+        var deserializedSecret = secret.Deserialize<Secret>(ReusableJsonSerializerOptions.Web);
         if (deserializedResourceDescriptor != null && deserializedSecret != null)
         {
             await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret).ConfigureAwait(false);

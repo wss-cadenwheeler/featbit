@@ -4,6 +4,7 @@ using Application.Segments;
 using Application.Services;
 using Domain.Messages;
 using Domain.Segments;
+using Domain.Utils;
 
 namespace Api.Application.ControlPlane;
 
@@ -25,9 +26,9 @@ public class SegmentChangeMessageHandler(
             throw new InvalidDataException("invalid segment change data");
         }
 
-        var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>();
-        var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>();
-        var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>();
+        var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
+        var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web);
+        var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
         if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
             deserializedNotificationNode is not null)
         {
