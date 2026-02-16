@@ -14,18 +14,18 @@ public partial class KafkaMessageConsumer : BackgroundService
     private readonly IConsumer<Null, string> _consumer;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<KafkaMessageConsumer> _logger;
-    private readonly IEnumerable<IMessageConsumer> _messageConsumers;
+    private readonly string[] _topics;
 
     public KafkaMessageConsumer(
         ConsumerConfig config,
         IServiceProvider serviceProvider,
-        IEnumerable<IMessageConsumer> messageConsumers,
-        ILogger<KafkaMessageConsumer> logger)
+        ILogger<KafkaMessageConsumer> logger, 
+        string[] topics)
     {
         _consumer = new ConsumerBuilder<Null, string>(config).Build();
         _serviceProvider = serviceProvider;
         _logger = logger;
-        _messageConsumers = messageConsumers;
+        _topics = topics; 
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
@@ -38,8 +38,8 @@ public partial class KafkaMessageConsumer : BackgroundService
 
     private async Task StartConsumerLoop(CancellationToken cancellationToken)
     {
-        _consumer.Subscribe([Topics.EndUser, Topics.ConnectionMade]);
-        _logger.LogInformation("Start consuming {Topic} messages...", Topics.EndUser);
+        _consumer.Subscribe(_topics);
+        _logger.LogInformation("Start consuming messages for {Topics}...", string.Join(", ", _topics));
 
         ConsumeResult<Null, string>? consumeResult = null;
         var message = string.Empty;
@@ -61,9 +61,24 @@ public partial class KafkaMessageConsumer : BackgroundService
                     Console.WriteLine($"No handler for topic {consumeResult.Topic}");
                     continue;
                 }
+                
+                var topic = consumeResult.Topic;
+                if (string.IsNullOrWhiteSpace(topic))
+                {
+                    continue;
+                }
 
-                message = consumeResult.Message == null ? string.Empty : consumeResult.Message.Value;
-                await handler.HandleAsync(message, cancellationToken);
+                using var scope = _serviceProvider.CreateScope();
+                var sp = scope.ServiceProvider;
+                
+                var handler = sp.GetKeyedService<IMessageHandler>(topic);
+                if (handler == null)
+                {
+                    Log.NoHandlerForTopic(_logger, topic);
+                    continue;
+                }
+                
+                await handler.HandleAsync(message);
             }
             catch (ConsumeException ex)
             {

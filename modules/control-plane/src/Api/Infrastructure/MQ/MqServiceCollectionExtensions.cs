@@ -1,22 +1,34 @@
+using Api.Application.ControlPlane;
 using Confluent.Kafka;
 using Domain.Messages;
+using Infrastructure;
 using Infrastructure.Caches.Redis;
+using Infrastructure.MQ;
 using Infrastructure.MQ.Kafka;
 using Infrastructure.MQ.None;
 using Infrastructure.MQ.Postgres;
 using Infrastructure.MQ.Redis;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Npgsql;
 
-namespace Infrastructure.MQ;
+namespace Api.Infrastructure.MQ;
 
 public static class MqServiceCollectionExtensions
 {
     public static void AddMq(this IServiceCollection services, IConfiguration configuration)
     {
         var mqProvider = configuration.GetMqProvider();
+        
+        var topics = new[]
+        {
+            Topics.ControlPlaneFeatureFlagChange, Topics.ControlPlaneLicenseChange,
+            Topics.ControlPlaneSecretChange, Topics.ControlPlaneSegmentChange
+        };
+        
+        services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(
+            Topics.ControlPlaneFeatureFlagChange);
+        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
+        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
+        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
 
         switch (mqProvider)
         {
@@ -33,7 +45,7 @@ public static class MqServiceCollectionExtensions
                 AddPostgres();
                 break;
         }
-
+        
         return;
 
         void AddNone()
@@ -51,16 +63,8 @@ public static class MqServiceCollectionExtensions
                 var redisClient = sp.GetRequiredService<IRedisClient>();
                 var logger = sp.GetRequiredService<ILogger<RedisMessageConsumer>>();
 
-                var topics = new[]
-                {
-                    Topics.EndUser, Topics.Insights
-                };
-
                 return new RedisMessageConsumer(redisClient, sp, logger, topics);
             });
-
-            services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
-            services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
         }
 
         void AddKafka()
@@ -76,60 +80,36 @@ public static class MqServiceCollectionExtensions
             services.AddSingleton(consumerConfig);
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
+
             services.AddHostedService(sp =>
             {
                 var cfg = sp.GetRequiredService<ConsumerConfig>();
                 var logger = sp.GetRequiredService<ILogger<KafkaMessageConsumer>>();
                 var provider = sp.GetRequiredService<IServiceProvider>();
 
-                // QUESTION: Why doesn't Kafka consume Insights messages?
-                var topics = new[]
-                {
-                    Topics.EndUser
-                };
-
                 return new KafkaMessageConsumer(cfg, provider, logger, topics);
             });
-            
-            services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
         }
 
         void AddPostgres()
         {
             services.TryAddPostgres(configuration);
-            
 
-            
             services.AddSingleton<IMessageProducer, PostgresMessageProducer>(sp =>
             {
-                var topics = new[]
-                {
-                    Topics.FeatureFlagChange, Topics.SegmentChange
-                };
-                
                 var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
                 var logger = sp.GetRequiredService<ILogger<PostgresMessageProducer>>();
 
-                return new PostgresMessageProducer(dataSource, logger, topics);
+                return new PostgresMessageProducer(dataSource, logger, []);
             });
-
             services.AddHostedService(sp =>
             {
-                var topics = new[]
-                {
-                    Topics.EndUser, Topics.Insights
-                };
-                
                 var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
                 var dataSource = sp.GetRequiredService<NpgsqlDataSource>();
                 var logger = sp.GetRequiredService<ILogger<PostgresMessageConsumer>>();
 
-
                 return new PostgresMessageConsumer(scopeFactory, dataSource, logger, topics);
             });
-
-            services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
-            services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
         }
     }
 }
