@@ -60,4 +60,9 @@ public sealed partial class ConnectionManager(ILogger<ConnectionManager> logger)
 
         return connections;
     }
+        
+    public ICollection<Connection> GetAllConnections()
+    {
+        return Connections.Values;
+    }
 }

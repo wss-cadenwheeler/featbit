@@ -24,7 +24,7 @@ public partial class RedisMessageConsumer : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Subscribe Topics.FeatureFlagChange, Topics.SegmentChange
+        // Subscribe Topics.FeatureFlagChange, Topics.SegmentChange, Topics.PushFullSyncChange
         var channel = new RedisChannel(Topics.DataChangePattern, RedisChannel.PatternMode.Pattern);
         var queue = await _redisClient.GetSubscriber().SubscribeAsync(channel);
 

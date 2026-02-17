@@ -35,7 +35,8 @@ public static class StreamingServiceCollectionExtensions
         // services
         services
             .AddEvaluator()
-            .AddTransient<IDataSyncService, DataSyncService>();
+            .AddTransient<IDataSyncService, DataSyncService>()
+            .AddTransient<IAdminService, AdminService>();
 
         var rpServiceType = options.CustomRpService != null
             ? options.CustomRpService.GetType()
@@ -57,7 +58,8 @@ public static class StreamingServiceCollectionExtensions
         // mq message consumers
         services
             .AddSingleton<IMessageConsumer, FeatureFlagChangeMessageConsumer>()
-            .AddSingleton<IMessageConsumer, SegmentChangeMessageConsumer>();
+            .AddSingleton<IMessageConsumer, SegmentChangeMessageConsumer>()
+            .AddSingleton<IMessageConsumer, PushFullSyncChangeMessageConsumer>();
 
         return new StreamingBuilder(services);
     }
