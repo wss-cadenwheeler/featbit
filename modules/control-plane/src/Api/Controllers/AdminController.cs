@@ -1,10 +1,11 @@
 using Api.Application.Admin;
-using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Api.Controllers;
 
 [Route("api/admin")]
+[Authorize(AuthenticationSchemes = "ApiKey")]
 public class AdminController: ApiControllerBase
 {
     [HttpPost("push-eval-full-sync")]
