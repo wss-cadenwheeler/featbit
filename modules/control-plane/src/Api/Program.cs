@@ -2,6 +2,7 @@ using System.Reflection;
 using Api.Infrastructure.Caches;
 using Api.Infrastructure.MQ;
 using Api.Infrastructure.Persistence;
+using Api.Setup;
 using Application.Bases.Behaviours;
 using Application.Segments;
 using Application.Services;
@@ -9,11 +10,18 @@ using Infrastructure;
 using Infrastructure.AppService;
 using MediatR;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Serilog;
+using Serilog.Events;
+
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+builder.Services.AddSerilog((_, lc) => ConfigureSerilog.Configure(lc, builder.Configuration));
 builder.Services.AddOpenApi();
 builder.Services.AddCache(builder.Configuration);
 builder.Services.AddTransient<IFeatureFlagAppService, FeatureFlagAppService>();
@@ -28,6 +36,27 @@ builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.Get
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));    
 
 var app = builder.Build();
+
+// serilog request logging
+app.UseSerilogRequestLogging(options =>
+{
+    options.IncludeQueryInRequestPath = true;
+    options.GetLevel = (ctx, _, ex) =>
+    {
+        if (ex != null || ctx.Response.StatusCode > 499)
+        {
+            return LogEventLevel.Error;
+        }
+
+        // ignore health check endpoints
+        if (ctx.Request.Path.StartsWithSegments("/health"))
+        {
+            return LogEventLevel.Debug;
+        }
+
+        return LogEventLevel.Information;
+    };
+});
 
 app.MapHealthChecks("health/liveness", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("health/readiness", new HealthCheckOptions()
