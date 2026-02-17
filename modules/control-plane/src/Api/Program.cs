@@ -23,6 +23,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddSerilog((_, lc) => ConfigureSerilog.Configure(lc, builder.Configuration));
 builder.Services.AddOpenApi();
+builder.Services.AddControllers();
 builder.Services.AddCache(builder.Configuration);
 builder.Services.AddTransient<IFeatureFlagAppService, FeatureFlagAppService>();
 builder.Services.AddDbSpecificServices(builder.Configuration);
@@ -68,10 +69,16 @@ app.MapHealthChecks("health/readiness", new HealthCheckOptions()
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/openapi/v1.json", "v1");
+    });
 }
 
 app.UseHttpsRedirection();
 
+app.MapControllers();
 
 app.Run();
 
