@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: control-plane
+  name: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-plane
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      containers:
+        - env:
+            - name: IS_PRO
+              value: "true"
+            - name: Kafka__BootstrapServers
+              value: kafka:9092
+            - name: MongoDb__ConnectionString
+              value: mongodb://admin:password@mongodb:27017
+            - name: MongoDb__Database
+              value: featbit
+            - name: OLAP__ServiceHost
+              value: http://da-server:8200
+            - name: Redis__ConnectionString
+              value: redis:6379
+          image: featbit/featbit-control-plane:latest
+          name: control-plane
+          ports:
+            - containerPort: 5200
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+              ephemeral-storage: 2Gi
+            limits:
+              memory: 2Gi
+              cpu: 500m
+              ephemeral-storage: 4Gi
+      restartPolicy: Always
+status: {}
