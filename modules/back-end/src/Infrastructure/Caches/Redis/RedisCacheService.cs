@@ -3,6 +3,7 @@ using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
 using Domain.Workspaces;
+using Microsoft.AspNetCore.DataProtection;
 using StackExchange.Redis;
 
 namespace Infrastructure.Caches.Redis;
@@ -69,7 +70,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.StringSetAsync(key, value);
     }
 
-    public async Task UpsertSecretAsync(ResourceDescriptor resourceDescriptor, Secret secret)
+    public async Task UpsertSecretAsync(ResourceDescriptor resourceDescriptor, Domain.Environments.Secret secret)
     {
         var key = RedisKeys.Secret(secret.Value);
 
@@ -91,7 +92,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.HashSetAsync(key, fields);
     }
 
-    public async Task DeleteSecretAsync(Secret secret)
+    public async Task DeleteSecretAsync(Domain.Environments.Secret secret)
     {
         var key = RedisKeys.Secret(secret.Value);
 
@@ -110,5 +111,15 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         var license = await licenseGetter();
         await Redis.StringSetAsync(key, license);
         return license;
+    }
+
+    public async Task UpsertConnectionMade(Guid envId, string secert) 
+    {
+         await Redis.StringSetAsync(RedisKeys.Connection(secert), envId.ToString());
+    }
+
+    public async Task DeleteConnectionMade(string secert)
+    {
+        await Redis.KeyDeleteAsync(RedisKeys.Connection(secert));
     }
 }

@@ -22,4 +22,8 @@ public interface ICacheService
     Task DeleteSecretAsync(Secret secret);
 
     Task<string> GetOrSetLicenseAsync(Guid workspaceId, Func<Task<string>> licenseGetter);
+
+    Task UpsertConnectionMade(Guid envId, string secert);
+
+    Task DeleteConnectionMade(string secert);
 }

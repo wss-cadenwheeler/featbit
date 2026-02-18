@@ -42,4 +42,14 @@ public class CompositeRedisCacheService(IEnumerable<ICacheService> cacheServices
 
         return license;
     }
+
+    public async Task UpsertConnectionMade(Guid envId, string secert)
+    {
+        await Task.WhenAll(cacheServices.Select(s => s.UpsertConnectionMade(envId, secert)));
+    }
+
+    public async Task DeleteConnectionMade(string secert)
+    {
+        await Task.WhenAll(cacheServices.Select(s => s.DeleteConnectionMade(secert)));
+    }
 }

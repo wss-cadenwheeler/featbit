@@ -28,4 +28,10 @@ public class NoneCacheService : ICacheService
 
         return license;
     }
+
+    public Task UpsertConnectionmade(Guid envId, string secert) => Task.CompletedTask;
+
+    public Task UpsertConnectionMade(Guid envId, string secert) => Task.CompletedTask;
+
+    public Task DeleteConnectionMade(string secert) => Task.CompletedTask;
 }
