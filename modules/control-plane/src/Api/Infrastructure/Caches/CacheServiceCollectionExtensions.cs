@@ -35,27 +35,19 @@ public static class CacheServiceCollectionExtensions
                 .GetSection("Redis:Instances")
                 .Get<string[]>() ?? [];
             
-            if (redisInstances is { Length: > 0 })
-            {
-                var clients = redisInstances
-                    .Select(connStr => new RedisClient(connStr))
-                    .ToList();
+            var clients = redisInstances
+                .Select(connStr => new RedisClient(connStr))
+                .ToList();
 
-                services.AddSingleton<IRedisClient>(clients[0]);
+            services.AddSingleton<IRedisClient>(clients[0]);
 
-                var cacheServices = clients
-                    .Select(client => (ICacheService)new RedisCacheService(client))
-                    .ToList();
+            var cacheServices = clients
+                .Select(client => (ICacheService)new RedisCacheService(client))
+                .ToList();
                 
-                services.AddTransient<ICacheService, RedisCacheService>();
+            services.AddTransient<ICacheService, RedisCacheService>();
                 
-                services.AddKeyedSingleton<ICacheService>("compositeCache", (_, _) => new CompositeRedisCacheService(cacheServices));
-            }
-            else
-            {
-                services.TryAddRedis(configuration);
-                services.AddTransient<ICacheService, RedisCacheService>();
-            }
+            services.AddKeyedSingleton<ICacheService>("compositeCache", (_, _) => new CompositeRedisCacheService(cacheServices));
         }
     }
 }
