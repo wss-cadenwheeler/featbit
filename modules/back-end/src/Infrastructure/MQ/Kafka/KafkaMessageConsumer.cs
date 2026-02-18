@@ -53,7 +53,9 @@ public partial class KafkaMessageConsumer : BackgroundService
                     // reached end of topic
                     continue;
                 }
-                                
+
+                message = consumeResult.Message.Value;
+
                 var topic = consumeResult.Topic;
                 if (string.IsNullOrWhiteSpace(topic))
                 {

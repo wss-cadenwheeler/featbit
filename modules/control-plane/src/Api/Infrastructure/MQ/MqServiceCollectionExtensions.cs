@@ -22,7 +22,7 @@ public static class MqServiceCollectionExtensions
         {
             Topics.ControlPlaneFeatureFlagChange, Topics.ControlPlaneLicenseChange,
             Topics.ControlPlaneSecretChange, Topics.ControlPlaneSegmentChange,
-            Topics.ConnectionMade,
+            Topics.ConnectionMade, Topics.ConnectionClosed
         };
         
         services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(
@@ -31,7 +31,8 @@ public static class MqServiceCollectionExtensions
         services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
         services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
         services.AddKeyedTransient<IMessageHandler, ClientConnectionMadeHandler>(Topics.ConnectionMade);
-
+        services.AddKeyedTransient<IMessageHandler, ClientConnectionClosedHandler>(Topics.ConnectionClosed);
+      
         switch (mqProvider)
         {
             case MqProvider.None:

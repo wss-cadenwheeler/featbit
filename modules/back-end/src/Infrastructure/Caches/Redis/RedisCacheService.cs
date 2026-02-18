@@ -3,7 +3,6 @@ using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
 using Domain.Workspaces;
-using Microsoft.AspNetCore.DataProtection;
 using StackExchange.Redis;
 
 namespace Infrastructure.Caches.Redis;
@@ -70,7 +69,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.StringSetAsync(key, value);
     }
 
-    public async Task UpsertSecretAsync(ResourceDescriptor resourceDescriptor, Domain.Environments.Secret secret)
+    public async Task UpsertSecretAsync(ResourceDescriptor resourceDescriptor, Secret secret)
     {
         var key = RedisKeys.Secret(secret.Value);
 
@@ -92,7 +91,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.HashSetAsync(key, fields);
     }
 
-    public async Task DeleteSecretAsync(Domain.Environments.Secret secret)
+    public async Task DeleteSecretAsync(Secret secret)
     {
         var key = RedisKeys.Secret(secret.Value);
 
