@@ -55,6 +55,11 @@ public partial class KafkaMessageConsumer : BackgroundService
                 }
 
                 message = consumeResult.Message.Value;
+                
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    continue;
+                }
 
                 var topic = consumeResult.Topic;
                 if (string.IsNullOrWhiteSpace(topic))
