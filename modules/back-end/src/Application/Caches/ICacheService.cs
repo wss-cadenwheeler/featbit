@@ -2,6 +2,7 @@ using Domain.Environments;
 using Domain.Segments;
 using Domain.FeatureFlags;
 using Domain.Workspaces;
+using Domain.Connections;
 
 namespace Application.Caches;
 
@@ -23,7 +24,7 @@ public interface ICacheService
 
     Task<string> GetOrSetLicenseAsync(Guid workspaceId, Func<Task<string>> licenseGetter);
 
-    Task UpsertConnectionMade(Guid envId, string secert);
+    Task UpsertConnectionMadeAsync(ConnectionMessage connectionInfo);
 
-    Task DeleteConnectionMade(string secert);
+    Task DeleteConnectionMadeAsync(string secert);
 }

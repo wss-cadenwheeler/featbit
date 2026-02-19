@@ -1,4 +1,5 @@
 using Application.Caches;
+using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
@@ -112,12 +113,19 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         return license;
     }
 
-    public async Task UpsertConnectionMade(Guid envId, string secert) 
+    public async Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage)
     {
-         await Redis.StringSetAsync(RedisKeys.Connection(secert), envId.ToString());
+        var fields = new HashEntry[]
+        {
+            new("id", connectionMessage.Id),
+            new("envId", connectionMessage.EnvId.ToString()),
+            new("secert", connectionMessage.Secert)
+        };
+
+        await Redis.HashSetAsync(RedisKeys.Connection(connectionMessage.Id), fields);
     }
 
-    public async Task DeleteConnectionMade(string secert)
+    public async Task DeleteConnectionMadeAsync(string secert)
     {
         await Redis.KeyDeleteAsync(RedisKeys.Connection(secert));
     }

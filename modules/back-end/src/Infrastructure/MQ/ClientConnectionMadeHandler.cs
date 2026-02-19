@@ -21,6 +21,6 @@ public class ClientConnectionMadeHandler(ICacheService cacheService) : IMessageH
             return;
         }
 
-        await cacheService.UpsertConnectionMade(connectionInfo.EnvId, connectionInfo.Secert);
+        await cacheService.UpsertConnectionMadeAsync(connectionInfo);
     }
 }

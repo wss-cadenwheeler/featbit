@@ -21,6 +21,6 @@ public class ClientConnectionClosedHandler(ICacheService cacheService) : IMessag
 			return;
 		}
 
-		await cacheService.DeleteConnectionMade(connectionInfo.Secert);
+		await cacheService.DeleteConnectionMadeAsync(connectionInfo.Id);
 	}
 }

@@ -1,4 +1,5 @@
 using Application.Caches;
+using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
@@ -43,13 +44,13 @@ public class CompositeRedisCacheService(IEnumerable<ICacheService> cacheServices
         return license;
     }
 
-    public async Task UpsertConnectionMade(Guid envId, string secert)
+    public async Task UpsertConnectionMade(ConnectionMessage connectionMessage)
     {
-        await Task.WhenAll(cacheServices.Select(s => s.UpsertConnectionMade(envId, secert)));
+        await Task.WhenAll(cacheServices.Select(s => s.UpsertConnectionMadeAsync(connectionMessage)));
     }
 
-    public async Task DeleteConnectionMade(string secert)
+    public async Task DeleteConnectionMadeAsync(string secert)
     {
-        await Task.WhenAll(cacheServices.Select(s => s.DeleteConnectionMade(secert)));
+        await Task.WhenAll(cacheServices.Select(s => s.DeleteConnectionMadeAsync(secert)));
     }
 }
