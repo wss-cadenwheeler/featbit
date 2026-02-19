@@ -50,15 +50,12 @@ public partial class KafkaMessageConsumer : BackgroundService
                 consumeResult = _consumer.Consume(cancellationToken);
                 if (consumeResult.IsPartitionEOF)
                 {
+                    // reached end of topic
                     continue;
                 }
 
                 message = consumeResult.Message.Value;
-                if (string.IsNullOrWhiteSpace(message))
-                {
-                    continue;
-                }
-                
+
                 var topic = consumeResult.Topic;
                 if (string.IsNullOrWhiteSpace(topic))
                 {

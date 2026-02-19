@@ -2,6 +2,7 @@ using Domain.Environments;
 using Domain.Segments;
 using Domain.FeatureFlags;
 using Domain.Workspaces;
+using Domain.Connections;
 
 namespace Application.Caches;
 
@@ -22,4 +23,8 @@ public interface ICacheService
     Task DeleteSecretAsync(Secret secret);
 
     Task<string> GetOrSetLicenseAsync(Guid workspaceId, Func<Task<string>> licenseGetter);
+
+    Task UpsertConnectionMadeAsync(ConnectionMessage connectionInfo);
+
+    Task DeleteConnectionMadeAsync(string secert);
 }

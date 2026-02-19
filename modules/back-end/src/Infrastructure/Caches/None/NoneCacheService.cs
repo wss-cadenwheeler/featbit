@@ -1,4 +1,5 @@
 using Application.Caches;
+using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
@@ -28,4 +29,8 @@ public class NoneCacheService : ICacheService
 
         return license;
     }
+
+    public Task UpsertConnectionMade(ConnectionMessage connectionMessage) => Task.CompletedTask;
+     
+    public Task DeleteConnectionMadeAsync(string secert) => Task.CompletedTask;
 }
