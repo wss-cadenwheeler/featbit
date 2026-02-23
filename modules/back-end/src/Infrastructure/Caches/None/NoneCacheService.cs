@@ -30,7 +30,7 @@ public class NoneCacheService : ICacheService
         return license;
     }
 
-    public Task UpsertConnectionMade(ConnectionMessage connectionMessage) => Task.CompletedTask;
+    public Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
      
-    public Task DeleteConnectionMadeAsync(string secert) => Task.CompletedTask;
+    public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
 }
