@@ -1,23 +1,25 @@
 ﻿using System.Text.Json;
+using Amazon.Runtime.Internal.Util;
 using Application.Caches;
 using Domain.Connections;
 using Domain.Messages;
+using Microsoft.Extensions.Logging;
 
 namespace Infrastructure.MQ;
 
-public class ClientConnectionMadeHandler(ICacheService cacheService) : IMessageHandler
+public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<ClientConnectionMadeHandler> logger) : IMessageHandler
 {
     public string Topic => Topics.ConnectionMade;
 
     public async Task HandleAsync(string message)
     {
-        Console.WriteLine($"Handling connection made message: {message}");
+        logger.LogInformation($"Handling connection made message: {message}");
 
         var connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
 
         if (connectionInfo == null)
         {
-            Console.WriteLine("Failed to deserialize connection message.");
+            logger.LogError("Failed to deserialize connection message: {Message}", message);
             return;
         }
 
