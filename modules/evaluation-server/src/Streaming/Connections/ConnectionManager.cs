@@ -1,41 +1,69 @@
 using System.Collections.Concurrent;
+using Domain.Connection;
+using Domain.Messages;
 using Microsoft.Extensions.Logging;
 
 namespace Streaming.Connections;
 
-public sealed partial class ConnectionManager(ILogger<ConnectionManager> logger) : IConnectionManager
+public sealed partial class ConnectionManager(ILogger<ConnectionManager> logger, IMessageProducer producer) : IConnectionManager
 {
     internal readonly ConcurrentDictionary<string, Connection> Connections = new(StringComparer.Ordinal);
-
-    public void Add(ConnectionContext context)
+  
+    public async Task Add(ConnectionContext context)
     {
+        bool connectionAdded = false;
+
         if (context.Type == ConnectionType.RelayProxy)
         {
             foreach (var connection in context.MappedRpConnections)
-            {
-                Connections.TryAdd(connection.Id, connection);
+            { 
+               connectionAdded = Connections.TryAdd(connection.Id, connection);
+                
+                if (connectionAdded)
+                {
+                    await producer.PublishAsync(Topics.FeatbitConnectionMade, ConnectionMessage.CreateConnectionMadeMessage(connection.Id, connection.EnvId, connection.Secret.ProjectKey));
+                }
             }
         }
         else
         {
-            Connections.TryAdd(context.Connection.Id, context.Connection);
+            connectionAdded = Connections.TryAdd(context.Connection.Id, context.Connection);
+
+            if (connectionAdded)
+            {
+                await producer.PublishAsync(Topics.FeatbitConnectionMade, ConnectionMessage.CreateConnectionMadeMessage(context.Connection.Id, context.Connection.EnvId, context.Connection.Secret.ProjectKey));
+            }
+
         }
 
         Log.ConnectionAdded(logger, context);
     }
 
-    public void Remove(ConnectionContext context)
+    public async Task Remove(ConnectionContext context)
     {
+        bool connectionRemoved = false;
+
         if (context.Type == ConnectionType.RelayProxy)
         {
             foreach (var mappedConnection in context.MappedRpConnections)
             {
-                Connections.TryRemove(mappedConnection.Id, out _);
+             connectionRemoved=   Connections.TryRemove(mappedConnection.Id, out _);
+
+                if (connectionRemoved)
+                {
+                    await producer.PublishAsync(Topics.FeatbitConnectionClosed, ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id, context.Connection.EnvId, mappedConnection.Secret.ProjectKey));
+                }
             }
         }
         else
         {
-            Connections.TryRemove(context.Connection.Id, out _);
+            connectionRemoved = Connections.TryRemove(context.Connection.Id, out _);
+
+            if (connectionRemoved)
+            {
+                await producer.PublishAsync(Topics.FeatbitConnectionClosed, ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id, context.Connection.EnvId, context.Connection.Secret.ProjectKey));
+            }
+
         }
 
         context.MarkAsClosed();

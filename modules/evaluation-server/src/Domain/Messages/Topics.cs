@@ -11,6 +11,8 @@ public static class Topics
     public const string PushFullSyncChange = "featbit-control-plane-push-full-sync-change";
 
     public const string Insights = "featbit-insights";
+    public const string FeatbitConnectionMade = "featbit-connection-made";
+    public const string FeatbitConnectionClosed = "featbit-connection-closed";
 
     public static string ToChannel(string topic) => topic switch
     {

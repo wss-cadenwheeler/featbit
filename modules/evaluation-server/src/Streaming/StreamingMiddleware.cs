@@ -46,7 +46,7 @@ public class StreamingMiddleware(
 
         await connectionContext.PrepareForProcessingAsync(validationResult.Secrets);
 
-        connectionManager.Add(connectionContext);
+        await connectionManager.Add(connectionContext);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(
             httpContext.RequestAborted,
@@ -59,6 +59,6 @@ public class StreamingMiddleware(
         // dispatch end means the connection was closed
         await connectionContext.CloseAsync();
 
-        connectionManager.Remove(connectionContext);
+        await connectionManager.Remove(connectionContext);
     }
 }
