@@ -125,8 +125,8 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.HashSetAsync(RedisKeys.Connection(connectionMessage.Id), fields);
     }
 
-    public async Task DeleteConnectionMadeAsync(string secert)
+    public async Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage)
     {
-        await Redis.KeyDeleteAsync(RedisKeys.Connection(secert));
+        await Redis.KeyDeleteAsync(RedisKeys.Connection(connectionMessage.Id));
     }
 }

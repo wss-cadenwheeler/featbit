@@ -49,9 +49,4 @@ public static class RedisCaches
 
         return index;
     }
-
-    public static string GetConnectionKey(string secret)
-    {
-        return $"connection:{secret}";
-    }
 }

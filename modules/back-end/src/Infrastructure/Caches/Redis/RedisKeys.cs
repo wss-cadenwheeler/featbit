@@ -24,5 +24,5 @@ public static class RedisKeys
 
     public static RedisKey Secret(string secretString) => new($"{SecretPrefix}{secretString}");
 
-    public static RedisKey Connection(string secretString) => new($"{ConnectionPrefix}{secretString}");
+    public static RedisKey Connection(string connectionId) => new($"{ConnectionPrefix}{connectionId}");
 }

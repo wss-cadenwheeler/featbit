@@ -26,5 +26,5 @@ public interface ICacheService
 
     Task UpsertConnectionMadeAsync(ConnectionMessage connectionInfo);
 
-    Task DeleteConnectionMadeAsync(string secert);
+    Task DeleteConnectionMadeAsync(ConnectionMessage connectionInfo);
 }
