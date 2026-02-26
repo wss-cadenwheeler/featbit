@@ -17,11 +17,6 @@ public static class Topics
     public const string ControlPlaneSecretChange = "featbit-control-plane-secret-change";
     
     public const string ControlPlaneLicenseChange = "featbit-control-plane-license-change";
-    
-    public const string PushFullSyncChange = "featbit-control-plane-push-full-sync-change";
-
-    public const string ConnectionMade = "featbit-connection-made";
-    public const string ConnectionClosed = "featbit-connection-closed";
 
     public static string ToChannel(string topic) => topic switch
     {
