@@ -119,7 +119,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         {
             new("id", connectionMessage.Id),
             new("envId", connectionMessage.EnvId.ToString()),
-            new("secert", connectionMessage.Secert)
+            new("secret", connectionMessage.Secret)
         };
 
         await Redis.HashSetAsync(RedisKeys.Connection(connectionMessage.Id), fields);
