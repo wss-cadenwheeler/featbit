@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Api.Authentication;
 
@@ -22,27 +23,17 @@ public class ApiKeyAuthenticationHandler : AuthenticationHandler<AuthenticationS
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        if (string.IsNullOrWhiteSpace(_apiKey))
-        {
-            return Task.FromResult(AuthenticateResult.Fail("No API Key configured."));
-        }
-        
-        if (!Request.Headers.ContainsKey(_apiKeyHeaderName))
-        {
-            return Task.FromResult(AuthenticateResult.Fail("API Key header not found."));
-        }
+        var endpoint = Context.GetEndpoint();
+        if (endpoint?.Metadata?.GetMetadata<IAllowAnonymous>() != null || string.IsNullOrWhiteSpace(_apiKey) ||
+            !Request.Headers.TryGetValue(_apiKeyHeaderName, out var providedApiKeyValues))
+            return Task.FromResult(AuthenticateResult.NoResult());
 
-        var providedApiKey = Request.Headers[_apiKeyHeaderName].ToString();
-
-        if (string.IsNullOrEmpty(providedApiKey))
-        {
-            return Task.FromResult(AuthenticateResult.Fail("API Key is empty."));
-        }
+        var providedApiKey = providedApiKeyValues.ToString();
+        if (string.IsNullOrWhiteSpace(providedApiKey))
+            return Task.FromResult(AuthenticateResult.NoResult());
 
         if (!_apiKey.Equals(providedApiKey, StringComparison.OrdinalIgnoreCase))
-        {
             return Task.FromResult(AuthenticateResult.Fail("Invalid API Key."));
-        }
 
         var claims = new[]
         {
@@ -55,4 +46,4 @@ public class ApiKeyAuthenticationHandler : AuthenticationHandler<AuthenticationS
 
         return Task.FromResult(AuthenticateResult.Success(ticket));
     }
-} 
+}

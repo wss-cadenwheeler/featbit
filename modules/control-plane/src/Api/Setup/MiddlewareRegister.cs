@@ -30,11 +30,11 @@ public static class MiddlewareRegister
             };
         });
 
-        app.MapHealthChecks("health/liveness", new HealthCheckOptions { Predicate = _ => false });
+        app.MapHealthChecks("health/liveness", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
         app.MapHealthChecks("health/readiness", new HealthCheckOptions()
         {
             Predicate = registration => registration.Tags.Contains(HealthCheckBuilderExtensions.ReadinessTag)
-        });
+        }).AllowAnonymous();
 
         app.UseAuthentication();
         app.UseAuthorization();
