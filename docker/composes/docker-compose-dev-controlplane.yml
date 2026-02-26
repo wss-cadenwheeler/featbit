@@ -197,3 +197,4 @@ networks:
 volumes:
   mongodb:
   redis:
+  kafka:
