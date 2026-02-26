@@ -11,16 +11,51 @@ public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<Cli
 
     public async Task HandleAsync(string message)
     {
-        logger.LogInformation($"Handling connection made message: {message}");
+        logger.LogInformation("Handling connection made message: {Message}", message);
 
-        var connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
-
-        if (connectionInfo == null)
+        ConnectionMessage? connectionInfo;
+        try
         {
-            logger.LogError("Failed to deserialize connection message: {Message}", message);
+            connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(ex, "Failed to deserialize connection message: {Message}", message);
             return;
         }
 
+        if (!TryValidate(connectionInfo, message))
+            return;
+
         await cacheService.UpsertConnectionMadeAsync(connectionInfo);
+    }
+
+    private bool TryValidate(ConnectionMessage? connectionInfo, string rawMessage)
+    {
+        if (connectionInfo is null)
+        {
+            logger.LogError("Connection message is null after deserialization: {Message}", rawMessage);
+            return false;
+        }
+        
+        if (string.IsNullOrWhiteSpace(connectionInfo.Id))
+        {
+            logger.LogError("Connection id is null or empty: {Message}", rawMessage);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionInfo.Secret))
+        {
+            logger.LogError("Connection secret is null or empty: {Message}", rawMessage);
+            return false;
+        }
+
+        if (connectionInfo.EnvId == Guid.Empty)
+        {
+            logger.LogError("Connection env id is empty: {Message}", rawMessage);
+            return false;
+        }
+        
+        return true;
     }
 }

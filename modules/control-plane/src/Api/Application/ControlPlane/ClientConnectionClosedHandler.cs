@@ -10,17 +10,52 @@ public class ClientConnectionClosedHandler(ICacheService cacheService, ILogger<C
 	public string Topic => Topics.ConnectionClosed;
 
 	public async Task HandleAsync(string message)
-	{
-		logger.LogInformation($"Handling connection made message: {message}");
+{
+    logger.LogInformation("Handling connection closed message: {Message}", message);
 
-		var connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
+    ConnectionMessage? connectionInfo;
+    try
+    {
+        connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
+    }
+    catch (JsonException ex)
+    {
+        logger.LogError(ex, "Failed to deserialize connection message: {Message}", message);
+        return;
+    }
 
-		if (connectionInfo == null)
-		{
-            logger.LogError("Failed to deserialize connection message: {Message}", message);
-            return;
-		}
+    if (!TryValidate(connectionInfo, message))
+        return;
 
-		await cacheService.DeleteConnectionMadeAsync(connectionInfo);
-	}
+    await cacheService.DeleteConnectionMadeAsync(connectionInfo!);
+}
+
+private bool TryValidate(ConnectionMessage? connectionInfo, string rawMessage)
+{
+    if (connectionInfo is null)
+    {
+        logger.LogError("Connection message is null after deserialization: {Message}", rawMessage);
+        return false;
+    }
+
+    if (string.IsNullOrWhiteSpace(connectionInfo.Id))
+    {
+        logger.LogError("Connection id is null or empty: {Message}", rawMessage);
+        return false;
+    }
+
+    if (string.IsNullOrWhiteSpace(connectionInfo.Secret))
+    {
+        logger.LogError("Connection secret is null or empty: {Message}", rawMessage);
+        return false;
+    }
+
+    if (connectionInfo.EnvId == Guid.Empty)
+    {
+        logger.LogError("Connection env id is empty: {Message}", rawMessage);
+        return false;
+    }
+
+    return true;
+}
 }
