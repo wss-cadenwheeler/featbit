@@ -55,7 +55,6 @@ services:
       - MqProvider=Kafka
       - CacheProvider=Redis
       - MongoDb__ConnectionString=mongodb://admin:password@mongodb:27017
-      - Redis__ConnectionString=redis:6379
       - Redis__Instances__0=redis:6379
     depends_on:
       - mongodb
