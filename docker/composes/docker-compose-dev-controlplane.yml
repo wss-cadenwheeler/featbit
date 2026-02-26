@@ -47,10 +47,9 @@ services:
     image: featbit/control-plane:dev
     container_name: control-plane
     build:
-      context: ./modules/control-plane
-      dockerfile: ./deploy/Dockerfile
+      context: ./modules
+      dockerfile: ./control-plane/deploy/Dockerfile
     environment:
-      - SSOEnabled=true
       - DbProvider=MongoDb
       - MqProvider=Kafka
       - CacheProvider=Redis
@@ -59,7 +58,6 @@ services:
     depends_on:
       - mongodb
       - redis
-      - da-server
       - kafka
     ports:
       - "5200:5200"
