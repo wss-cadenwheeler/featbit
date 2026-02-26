@@ -18,29 +18,48 @@ public sealed partial class ConnectionManager(ILogger<ConnectionManager> logger,
         {
             foreach (var connection in context.MappedRpConnections)
             {
-                connectionAdded = Connections.TryAdd(connection.Id, connection);
-
-                if (connectionAdded)
+                try
                 {
+                    connectionAdded = Connections.TryAdd(connection.Id, connection);
+
+                    if (!connectionAdded)
+                    {
+                        continue;
+                    }
+
                     await producer.PublishAsync(Topics.FeatbitConnectionMade,
                         ConnectionMessage.CreateConnectionMadeMessage(connection.Id, connection.EnvId,
                             connection.Secret.ProjectKey));
+                    Log.ConnectionAdded(logger, context);
+                }
+                catch (Exception e)
+                {
+                    Log.ConnectionCouldNotBeAdded(logger, connection.Id, e);
                 }
             }
         }
         else
         {
-            connectionAdded = Connections.TryAdd(context.Connection.Id, context.Connection);
-
-            if (connectionAdded)
+            try
             {
-                await producer.PublishAsync(Topics.FeatbitConnectionMade,
-                    ConnectionMessage.CreateConnectionMadeMessage(context.Connection.Id, context.Connection.EnvId,
-                        context.Connection.Secret.ProjectKey));
+                connectionAdded = Connections.TryAdd(context.Connection.Id, context.Connection);
+
+                if (connectionAdded)
+                {
+                    await producer.PublishAsync(Topics.FeatbitConnectionMade,
+                        ConnectionMessage.CreateConnectionMadeMessage(context.Connection.Id, context.Connection.EnvId,
+                            context.Connection.Secret.ProjectKey));
+                    Log.ConnectionAdded(logger, context);
+                }
+                
+            }
+            catch (Exception e)
+            {
+                Log.ConnectionCouldNotBeAdded(logger, context.Connection.Id, e);
             }
         }
 
-        Log.ConnectionAdded(logger, context);
+        
     }
 
     public async Task Remove(ConnectionContext context)
@@ -51,31 +70,48 @@ public sealed partial class ConnectionManager(ILogger<ConnectionManager> logger,
         {
             foreach (var mappedConnection in context.MappedRpConnections)
             {
-                connectionRemoved = Connections.TryRemove(mappedConnection.Id, out _);
-
-                if (connectionRemoved)
+                try
                 {
+                    connectionRemoved = Connections.TryRemove(mappedConnection.Id, out _);
+
+                    if (!connectionRemoved)
+                    {
+                        continue;
+                    }
+
                     await producer.PublishAsync(Topics.FeatbitConnectionClosed,
-                        ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id, context.Connection.EnvId,
+                        ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id,
+                            context.Connection.EnvId,
                             mappedConnection.Secret.ProjectKey));
+                    Log.ConnectionRemoved(logger, context);
+                }
+                catch (Exception e)
+                {
+                    Log.ConnectionCouldNotBeRemoved(logger, mappedConnection.Id, e);
                 }
             }
         }
         else
         {
-            connectionRemoved = Connections.TryRemove(context.Connection.Id, out _);
-
-            if (connectionRemoved)
+            try
             {
-                await producer.PublishAsync(Topics.FeatbitConnectionClosed,
-                    ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id, context.Connection.EnvId,
-                        context.Connection.Secret.ProjectKey));
+                connectionRemoved = Connections.TryRemove(context.Connection.Id, out _);
+
+                if (connectionRemoved)
+                {
+                    await producer.PublishAsync(Topics.FeatbitConnectionClosed,
+                        ConnectionMessage.CreateConnectionClosedMessage(context.Connection.Id, context.Connection.EnvId,
+                            context.Connection.Secret.ProjectKey));
+                    Log.ConnectionRemoved(logger, context);
+                }
+            }
+            catch (Exception e)
+            {
+                Log.ConnectionCouldNotBeRemoved(logger, context.Connection.Id, e);
             }
         }
 
         context.MarkAsClosed();
-
-        Log.ConnectionRemoved(logger, context);
     }
 
     public ICollection<Connection> GetEnvConnections(Guid envId)
