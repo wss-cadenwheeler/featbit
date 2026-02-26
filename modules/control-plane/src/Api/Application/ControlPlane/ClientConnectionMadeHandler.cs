@@ -1,11 +1,9 @@
 ﻿using System.Text.Json;
-using Amazon.Runtime.Internal.Util;
 using Application.Caches;
 using Domain.Connections;
 using Domain.Messages;
-using Microsoft.Extensions.Logging;
 
-namespace Infrastructure.MQ;
+namespace Api.Application.ControlPlane;
 
 public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<ClientConnectionMadeHandler> logger) : IMessageHandler
 {
