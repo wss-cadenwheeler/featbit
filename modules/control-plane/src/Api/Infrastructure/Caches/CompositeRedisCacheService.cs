@@ -4,31 +4,34 @@ using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Segments;
 using Domain.Workspaces;
+using Microsoft.Extensions.Logging;
 
 namespace Api.Infrastructure.Caches;
 
-public class CompositeRedisCacheService(IEnumerable<ICacheService> cacheServices) : ICacheService
+public class CompositeRedisCacheService(
+    IEnumerable<ICacheService> cacheServices,
+    ILogger<CompositeRedisCacheService> logger) : ICacheService
 {
     public Task UpsertFlagAsync(FeatureFlag flag) =>
-        Task.WhenAll(cacheServices.Select(s => s.UpsertFlagAsync(flag)));
+        BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
 
     public Task DeleteFlagAsync(Guid envId, Guid flagId) =>
-        Task.WhenAll(cacheServices.Select(s => s.DeleteFlagAsync(envId, flagId)));
+        BroadcastAsync(s => s.DeleteFlagAsync(envId, flagId), nameof(DeleteFlagAsync));
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) =>
-        Task.WhenAll(cacheServices.Select(s => s.UpsertSegmentAsync(envIds, segment)));
+        BroadcastAsync(s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentAsync));
 
     public Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId) =>
-        Task.WhenAll(cacheServices.Select(s => s.DeleteSegmentAsync(envIds, segmentId)));
+        BroadcastAsync(s => s.DeleteSegmentAsync(envIds, segmentId), nameof(DeleteSegmentAsync));
 
     public Task UpsertLicenseAsync(Workspace workspace) =>
-        Task.WhenAll(cacheServices.Select(s => s.UpsertLicenseAsync(workspace)));
+        BroadcastAsync(s => s.UpsertLicenseAsync(workspace), nameof(UpsertLicenseAsync));
 
     public Task UpsertSecretAsync(ResourceDescriptor resourceDescriptor, Secret secret) =>
-        Task.WhenAll(cacheServices.Select(s => s.UpsertSecretAsync(resourceDescriptor, secret)));
+        BroadcastAsync(s => s.UpsertSecretAsync(resourceDescriptor, secret), nameof(UpsertSecretAsync));
 
     public Task DeleteSecretAsync(Secret secret) =>
-        Task.WhenAll(cacheServices.Select(s => s.DeleteSecretAsync(secret)));
+        BroadcastAsync(s => s.DeleteSecretAsync(secret), nameof(DeleteSecretAsync));
 
     public async Task<string> GetOrSetLicenseAsync(Guid workspaceId, Func<Task<string>> licenseGetter)
     {
@@ -36,21 +39,47 @@ public class CompositeRedisCacheService(IEnumerable<ICacheService> cacheServices
         var first = cacheServices.First();
         var license = await first.GetOrSetLicenseAsync(workspaceId, licenseGetter);
 
-        // Ensure the rest have it too
+        // Ensure the rest have it too (best-effort)
         var rest = cacheServices.Skip(1);
-        await Task.WhenAll(rest.Select(s =>
-            s.GetOrSetLicenseAsync(workspaceId, () => Task.FromResult(license))));
+        await BroadcastAsync(
+            s => s.GetOrSetLicenseAsync(workspaceId, () => Task.FromResult(license)),
+            nameof(GetOrSetLicenseAsync));
 
         return license;
     }
 
-    public async Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage)
+    public Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage) =>
+        BroadcastAsync(s => s.UpsertConnectionMadeAsync(connectionMessage), nameof(UpsertConnectionMadeAsync));
+
+    public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) =>
+        BroadcastAsync(s => s.DeleteConnectionMadeAsync(connectionMessage), nameof(DeleteConnectionMadeAsync));
+
+    private Task BroadcastAsync(Func<ICacheService, Task> action, string operationName)
     {
-        await Task.WhenAll(cacheServices.Select(s => s.UpsertConnectionMadeAsync(connectionMessage)));
+        var tasks = cacheServices.Select(s => ExecuteSafelyAsync(s, action, operationName));
+        return Task.WhenAll(tasks);
     }
 
-    public async Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage)
+    private async Task ExecuteSafelyAsync(
+        ICacheService service,
+        Func<ICacheService, Task> action,
+        string operationName)
     {
-        await Task.WhenAll(cacheServices.Select(s => s.DeleteConnectionMadeAsync(connectionMessage)));
+        try
+        {
+            await action(service);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Redis cache broadcast operation '{Operation}' failed for implementation {CacheService}. Continuing.",
+                operationName,
+                service.GetType().FullName);
+        }
     }
 }
