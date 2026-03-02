@@ -11,44 +11,53 @@ namespace Api.Application.ControlPlane;
 public class SegmentChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IFeatureFlagAppService featureFlagAppService,
-    ISegmentMessageService segmentMessageService) : IMessageHandler
+    ISegmentMessageService segmentMessageService, ILogger<SegmentChangeMessageHandler> logger) : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSegmentChange;
 
     public async Task HandleAsync(string message)
     {
-        using var document = JsonDocument.Parse(message);
-        var root = document.RootElement;
-        if (!root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) ||
-            !root.TryGetProperty("envIds", out var envIds) ||
-            !root.TryGetProperty("notification", out var notification))
+        try
         {
-            throw new InvalidDataException("invalid segment change data");
-        }
-
-        var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
-        var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web);
-        var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
-        if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
-            deserializedNotificationNode is not null)
-        {
-            await cacheService
-                .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
-
-            foreach (var envId in deserializedEnvIdsNode)
+            using var document = JsonDocument.Parse(message);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) ||
+                !root.TryGetProperty("envIds", out var envIds) ||
+                !root.TryGetProperty("notification", out var notification))
             {
-                var affectedFlags = await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
+                throw new InvalidDataException("invalid segment change data");
+            }
 
-                // update affected flags
-                if (affectedFlags.Count > 0)
+            var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
+            var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web);
+            var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
+            if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
+                deserializedNotificationNode is not null)
+            {
+                await cacheService
+                    .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
+
+                foreach (var envId in deserializedEnvIdsNode)
                 {
-                    await featureFlagAppService.OnSegmentUpdatedAsync(deserializedSegmentNonEnvironmentSpecificNode,
-                        deserializedNotificationNode.OperatorId, affectedFlags);
-                }
+                    var affectedFlags = await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
 
-                // publish segment change message
-                await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, deserializedSegmentNonEnvironmentSpecificNode);
+                    // update affected flags
+                    if (affectedFlags.Count > 0)
+                    {
+                        await featureFlagAppService.OnSegmentUpdatedAsync(deserializedSegmentNonEnvironmentSpecificNode,
+                            deserializedNotificationNode.OperatorId, affectedFlags);
+                    }
+
+                    // publish segment change message
+                    await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, deserializedSegmentNonEnvironmentSpecificNode);
+                }
             }
         }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Error processing segment change message");
+            throw;
+        }
+
     }
 }

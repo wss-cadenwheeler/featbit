@@ -7,35 +7,44 @@ using Domain.Utils;
 
 namespace Api.Application.ControlPlane;
 
-public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService)
+public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService, ILogger<SecretChangeMessageHandler> logger)
     : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSecretChange;
 
     public async Task HandleAsync(string message)
     {
-        using var document = JsonDocument.Parse(message);
-        var root = document.RootElement;
-
-        if (!root.TryGetProperty("operation", out var operationProperty))
+        try
         {
-            throw new InvalidDataException("Invalid secret change data");
+            using var document = JsonDocument.Parse(message);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("operation", out var operationProperty))
+            {
+                throw new InvalidDataException("Invalid secret change data");
+            }
+
+            var operation = operationProperty.GetString();
+
+            if (string.IsNullOrWhiteSpace(operation) ||
+                !Enum.TryParse(operation, ignoreCase: true, out SecretChangeOperations operationEnum))
+            {
+                throw new InvalidDataException("Invalid secret change data");
+            }
+
+            await (operationEnum switch
+            {
+                SecretChangeOperations.Add => HandleAdd(root),
+                SecretChangeOperations.Delete => HandleDelete(root),
+                _ => throw new ArgumentOutOfRangeException(nameof(operationEnum), operationEnum, "Unsupported operation.")
+            });
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Error handling secret change message");
+            throw;
         }
 
-        var operation = operationProperty.GetString();
-
-        if (string.IsNullOrWhiteSpace(operation) ||
-            !Enum.TryParse(operation, ignoreCase: true, out SecretChangeOperations operationEnum))
-        {
-            throw new InvalidDataException("Invalid secret change data");
-        }
-
-        await (operationEnum switch
-        {
-            SecretChangeOperations.Add => HandleAdd(root),
-            SecretChangeOperations.Delete => HandleDelete(root),
-            _ => throw new ArgumentOutOfRangeException(nameof(operationEnum), operationEnum, "Unsupported operation.")
-        });
     }
 
     private async Task HandleAdd(JsonElement root)
