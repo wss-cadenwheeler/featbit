@@ -1,9 +1,6 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Application.Caches;
 using Application.Configuration;
 using Domain.Messages;
-using Domain.Utils;
 using Microsoft.Extensions.Configuration;
 using Environment = Domain.Environments.Environment;
 
@@ -20,10 +17,10 @@ public class OnEnvironmentAdded : INotification
 }
 
 public class OnEnvironmentAddedHandler(
-    IEnvironmentService _envService,
-    ICacheService _cache,
-    IConfiguration _configuration,
-    IMessageProducer _messageProducer)
+    IEnvironmentService envService,
+    ICacheService cache,
+    IConfiguration configuration,
+    IMessageProducer messageProducer)
     : INotificationHandler<OnEnvironmentAdded>
 {
     public async Task Handle(OnEnvironmentAdded notification, CancellationToken cancellationToken)
@@ -31,14 +28,14 @@ public class OnEnvironmentAddedHandler(
         var env = notification.Environment;
 
         // add secret cache
-        var resourceDescriptor = await _envService.GetResourceDescriptorAsync(env.Id);
+        var resourceDescriptor = await envService.GetResourceDescriptorAsync(env.Id);
         foreach (var secret in env.Secrets)
         {
-            await _cache.UpsertSecretAsync(resourceDescriptor, secret);
-            if (_configuration.UseControlPlane())
+            await cache.UpsertSecretAsync(resourceDescriptor, secret);
+            if (configuration.UseControlPlane())
             {
-                var message = ControlPlaneSecretHelpers.CreateMessage(resourceDescriptor, secret);
-                await _messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSecretChange, message);
+                var message = ControlPlaneSecretHelpers.CreateAddMessage(resourceDescriptor, secret);
+                await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSecretChange, message);
             }
         }
     }

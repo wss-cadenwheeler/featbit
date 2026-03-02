@@ -1,5 +1,6 @@
 using Application.Caches;
 using Application.Configuration;
+using Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 using Domain.AuditLogs;
 using Domain.FeatureFlags;
 using Domain.FlagRevisions;
@@ -44,11 +45,10 @@ public class OnFeatureFlagChanged : INotification
 
 public class OnFeatureFlagChangedHandler(
     IFlagRevisionService flagRevisionService,
-    IMessageProducer messageProducer,
     ICacheService cache,
     IAuditLogService auditLogService,
     IWebhookHandler webhookHandler,
-    IConfiguration configuration)
+    IFeatureFlagChangePublisher featureFlagChangePublisher)
     : INotificationHandler<OnFeatureFlagChanged>
 {
     public async Task Handle(OnFeatureFlagChanged notification, CancellationToken cancellationToken)
@@ -66,14 +66,7 @@ public class OnFeatureFlagChangedHandler(
         await flagRevisionService.AddOneAsync(revision);
 
         // publish feature flag change message
-        if (configuration.UseControlPlane())
-        {
-            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneFeatureFlagChange, flag);
-        }
-        else
-        {
-            await messageProducer.PublishAsync(Topics.FeatureFlagChange, flag);
-        }
+        await featureFlagChangePublisher.PublishAsync(flag);
 
         // handle webhooks
         _ = webhookHandler.HandleAsync(notification.Flag, notification.DataChange, notification.OperatorId);

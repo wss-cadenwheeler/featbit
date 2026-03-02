@@ -1,12 +1,14 @@
 using System.Text.Json;
 using Application.Caches;
 using Domain.Environments;
+using Domain.Environments.MessagePublishing;
 using Domain.Messages;
 using Domain.Utils;
 
 namespace Api.Application.ControlPlane;
 
-public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
+public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService)
+    : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSecretChange;
 
@@ -14,16 +16,57 @@ public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] IC
     {
         using var document = JsonDocument.Parse(message);
         var root = document.RootElement;
+
+        if (!root.TryGetProperty("operation", out var operationProperty))
+        {
+            throw new InvalidDataException("Invalid secret change data");
+        }
+
+        var operation = operationProperty.GetString();
+
+        if (string.IsNullOrWhiteSpace(operation) ||
+            !Enum.TryParse(operation, ignoreCase: true, out SecretChangeOperations operationEnum))
+        {
+            throw new InvalidDataException("Invalid secret change data");
+        }
+
+        await (operationEnum switch
+        {
+            SecretChangeOperations.Add => HandleAdd(root),
+            SecretChangeOperations.Delete => HandleDelete(root),
+            _ => throw new ArgumentOutOfRangeException(nameof(operationEnum), operationEnum, "Unsupported operation.")
+        });
+    }
+
+    private async Task HandleAdd(JsonElement root)
+    {
         if (!root.TryGetProperty("resourceDescriptor", out var resourceDescriptor) ||
             !root.TryGetProperty("secret", out var secret))
         {
-            throw new InvalidDataException("invalid secret change data");
+            throw new InvalidDataException("Invalid secret change data");
         }
-        var deserializedResourceDescriptor = resourceDescriptor.Deserialize<ResourceDescriptor>(ReusableJsonSerializerOptions.Web);
+
+        var deserializedResourceDescriptor =
+            resourceDescriptor.Deserialize<ResourceDescriptor>(ReusableJsonSerializerOptions.Web);
         var deserializedSecret = secret.Deserialize<Secret>(ReusableJsonSerializerOptions.Web);
         if (deserializedResourceDescriptor != null && deserializedSecret != null)
         {
-            await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret).ConfigureAwait(false);
+            await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleDelete(JsonElement root)
+    {
+        if (!root.TryGetProperty("secret", out var secret))
+        {
+            throw new InvalidDataException("Invalid secret change data");
+        }
+
+        var deserializedSecret = secret.Deserialize<Secret>(ReusableJsonSerializerOptions.Web);
+        if (deserializedSecret != null)
+        {
+            await cacheService.DeleteSecretAsync(deserializedSecret).ConfigureAwait(false);
         }
     }
 }

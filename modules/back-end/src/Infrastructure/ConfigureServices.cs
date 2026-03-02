@@ -1,4 +1,7 @@
+using Application.Configuration;
+using Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 using Application.Segments;
+using Application.Segments.MessagePublishing.SegmentChange;
 using Domain.Users;
 using Infrastructure.Caches;
 using Infrastructure.MQ;
@@ -44,9 +47,27 @@ public static class ConfigureServices
         services.AddTransient<IEnvironmentAppService, AppServices.EnvironmentAppService>();
         services.AddTransient<IFeatureFlagAppService, AppServices.FeatureFlagAppService>();
         services.AddTransient<ISegmentMessageService, SegmentMessageService>();
+        services.AddChangePublishingServices(configuration);
 
         // InsightsWriter must be a singleton service
         services.AddSingleton(typeof(AppServices.InsightsWriter));
+
+        return services;
+    }
+
+    private static IServiceCollection AddChangePublishingServices(
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        if (configuration.UseControlPlane())
+        {
+            services.AddScoped<ISegmentChangePublisher, ControlPlaneSegmentChangePublisher>();
+            services.AddScoped<IFeatureFlagChangePublisher, ControlPlaneFeatureFlagChangePublisher>();
+        }
+        else
+        {
+            services.AddScoped<ISegmentChangePublisher, DirectSegmentChangePublisher>();
+            services.AddScoped<IFeatureFlagChangePublisher, DirectFeatureFlagChangePublisher>();
+        }
 
         return services;
     }

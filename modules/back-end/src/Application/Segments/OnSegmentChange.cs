@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Application.Caches;
 using Application.Configuration;
+using Application.Segments.MessagePublishing.SegmentChange;
 using Domain.AuditLogs;
 using Domain.Messages;
 using Domain.Segments;
@@ -50,13 +51,10 @@ public class OnSegmentChange : INotification
 
 public class OnSegmentChangeHandler(
     ISegmentService segmentService,
-    IMessageProducer messageProducer,
     ICacheService cache,
     IAuditLogService auditLogService,
-    IFeatureFlagAppService featureFlagAppService,
     IWebhookHandler webhookHandler,
-    IConfiguration configuration,
-    ISegmentMessageService segmentMessageService)
+    ISegmentChangePublisher segmentChangePublisher)
     : INotificationHandler<OnSegmentChange>
 {
     public async Task Handle(OnSegmentChange notification, CancellationToken cancellationToken)
@@ -69,38 +67,8 @@ public class OnSegmentChangeHandler(
 
         // update cache
         await cache.UpsertSegmentAsync(envIds, segment);
-
-        if (configuration.UseControlPlane())
-        {
-            var segmentNonEnvironmentSpecificNode = JsonSerializer.SerializeToNode(segment, ReusableJsonSerializerOptions.Web);
-            var envIdsNode = JsonSerializer.SerializeToNode(envIds, ReusableJsonSerializerOptions.Web);
-            var notificationNode = JsonSerializer.SerializeToNode(notification, ReusableJsonSerializerOptions.Web);
-
-            JsonObject segmentUpsertMessage = new()
-            {
-                ["segmentNonSpecific"] = segmentNonEnvironmentSpecificNode,
-                ["envIds"] = envIdsNode,
-                ["notification"] = notificationNode
-            };
-            
-            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSegmentChange, segmentUpsertMessage);
-        }
-        else
-        {
-            foreach (var envId in envIds)
-            {
-                var affectedFlags = await segmentMessageService.GetAffectedFlagsAsync(envId, notification);
-
-                // update affected flags
-                if (affectedFlags.Count > 0)
-                {
-                    await featureFlagAppService.OnSegmentUpdatedAsync(segment, notification.OperatorId, affectedFlags);
-                }
-
-                // publish segment change message
-                await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, segment);
-            }
-        }
+        
+        await segmentChangePublisher.PublishAsync(notification);
 
         foreach (var envId in envIds)
         {
