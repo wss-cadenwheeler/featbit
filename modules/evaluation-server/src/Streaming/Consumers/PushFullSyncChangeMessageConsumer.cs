@@ -4,9 +4,12 @@ using Streaming.Services;
 
 namespace Streaming.Consumers;
 
-public class PushFullSyncChangeMessageConsumer(IAdminService adminService, ILogger<PushFullSyncChangeMessageConsumer> logger) : IMessageConsumer
+public class PushFullSyncChangeMessageConsumer(
+    IAdminService adminService,
+    ILogger<PushFullSyncChangeMessageConsumer> logger) : IMessageConsumer
 {
     public string Topic => Topics.PushFullSyncChange;
+
     public async Task HandleAsync(string message, CancellationToken cancellationToken)
     {
         try
@@ -17,9 +20,8 @@ public class PushFullSyncChangeMessageConsumer(IAdminService adminService, ILogg
         {
             logger.LogError(
                 ex,
-                "Exception occurred while processing push full sync change message "
+                "Exception occurred while processing push full sync change message"
             );
         }
-        
     }
 }

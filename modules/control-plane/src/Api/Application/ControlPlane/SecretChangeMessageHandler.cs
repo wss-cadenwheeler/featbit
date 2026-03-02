@@ -7,7 +7,9 @@ using Domain.Utils;
 
 namespace Api.Application.ControlPlane;
 
-public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService, ILogger<SecretChangeMessageHandler> logger)
+public class SecretChangeMessageHandler(
+    [FromKeyedServices("compositeCache")] ICacheService cacheService,
+    ILogger<SecretChangeMessageHandler> logger)
     : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSecretChange;
@@ -36,7 +38,8 @@ public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] IC
             {
                 SecretChangeOperations.Add => HandleAdd(root),
                 SecretChangeOperations.Delete => HandleDelete(root),
-                _ => throw new ArgumentOutOfRangeException(nameof(operationEnum), operationEnum, "Unsupported operation.")
+                _ => throw new ArgumentOutOfRangeException(nameof(operationEnum), operationEnum,
+                    "Unsupported operation.")
             });
         }
         catch (Exception e)
@@ -44,7 +47,6 @@ public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] IC
             logger.LogError(e, "Error handling secret change message");
             throw;
         }
-
     }
 
     private async Task HandleAdd(JsonElement root)
@@ -58,11 +60,20 @@ public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] IC
         var deserializedResourceDescriptor =
             resourceDescriptor.Deserialize<ResourceDescriptor>(ReusableJsonSerializerOptions.Web);
         var deserializedSecret = secret.Deserialize<Secret>(ReusableJsonSerializerOptions.Web);
-        if (deserializedResourceDescriptor != null && deserializedSecret != null)
+        if (deserializedResourceDescriptor is null)
         {
-            await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret)
-                .ConfigureAwait(false);
+            logger.LogError("Invalid secret change data: {Field} is null", nameof(deserializedResourceDescriptor));
+            throw new ArgumentNullException(nameof(deserializedResourceDescriptor), "Invalid secret change data.");
         }
+
+        if (deserializedSecret is null)
+        {
+            logger.LogError("Invalid secret change data: {Field} is null", nameof(deserializedSecret));
+            throw new ArgumentNullException(nameof(deserializedSecret), "Invalid secret change data.");
+        }
+
+        await cacheService.UpsertSecretAsync(deserializedResourceDescriptor, deserializedSecret)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleDelete(JsonElement root)
