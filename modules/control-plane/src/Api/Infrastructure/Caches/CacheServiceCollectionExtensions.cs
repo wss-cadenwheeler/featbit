@@ -3,6 +3,7 @@ using Infrastructure;
 using Infrastructure.Caches;
 using Infrastructure.Caches.None;
 using Infrastructure.Caches.Redis;
+using Microsoft.Extensions.Logging;
 
 namespace Api.Infrastructure.Caches;
 
@@ -46,8 +47,12 @@ public static class CacheServiceCollectionExtensions
                 .ToList();
                 
             services.AddTransient<ICacheService, RedisCacheService>();
-                
-            services.AddKeyedSingleton<ICacheService>("compositeCache", (_, _) => new CompositeRedisCacheService(cacheServices));
+
+            services.AddKeyedSingleton<ICacheService>(
+                "compositeCache",
+                (sp, _) => new CompositeRedisCacheService(
+                    cacheServices,
+                    sp.GetRequiredService<ILogger<CompositeRedisCacheService>>()));
         }
     }
 }
