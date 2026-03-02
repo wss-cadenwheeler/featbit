@@ -8,7 +8,7 @@ namespace Api.Application.ControlPlane;
 
 public class FeatureFlagChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService, IMessageProducer messageProducer) : IMessageHandler
 {
-    public string Topic => Topics.ControlPlaneFeatureFlagChange;
+    public string Topic => ControlPlaneTopics.ControlPlaneFeatureFlagChange;
 
     public async Task HandleAsync(string message)
     {

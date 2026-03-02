@@ -83,7 +83,7 @@ public class OnSegmentChangeHandler(
                 ["notification"] = notificationNode
             };
             
-            await messageProducer.PublishAsync(Topics.ControlPlaneSegmentChange, segmentUpsertMessage);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSegmentChange, segmentUpsertMessage);
         }
         else
         {

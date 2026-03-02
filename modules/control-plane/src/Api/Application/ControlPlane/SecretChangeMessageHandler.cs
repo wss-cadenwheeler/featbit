@@ -8,7 +8,7 @@ namespace Api.Application.ControlPlane;
 
 public class SecretChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {
-    public string Topic => Topics.ControlPlaneSecretChange;
+    public string Topic => ControlPlaneTopics.ControlPlaneSecretChange;
 
     public async Task HandleAsync(string message)
     {

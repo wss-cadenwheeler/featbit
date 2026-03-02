@@ -8,7 +8,7 @@ namespace Api.Application.ControlPlane;
 
 public class LicenseChangeMessageHandler([FromKeyedServices("compositeCache")] ICacheService cacheService) : IMessageHandler
 {
-    public string Topic => Topics.ControlPlaneLicenseChange;
+    public string Topic => ControlPlaneTopics.ControlPlaneLicenseChange;
 
     public async Task HandleAsync(string message)
     {

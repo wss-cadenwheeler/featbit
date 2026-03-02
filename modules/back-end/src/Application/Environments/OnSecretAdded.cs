@@ -38,7 +38,7 @@ public class OnSecretAddedHandler(
         if (configuration.UseControlPlane())
         {
             var message = ControlPlaneSecretHelpers.CreateMessage(resourceDescriptor, notification.Secret);
-            await messageProducer.PublishAsync(Topics.ControlPlaneSecretChange, message);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSecretChange, message);
         }
     }
 }

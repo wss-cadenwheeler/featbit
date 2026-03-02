@@ -13,7 +13,7 @@ public class SegmentChangeMessageHandler(
     IFeatureFlagAppService featureFlagAppService,
     ISegmentMessageService segmentMessageService) : IMessageHandler
 {
-    public string Topic => Topics.ControlPlaneSegmentChange;
+    public string Topic => ControlPlaneTopics.ControlPlaneSegmentChange;
 
     public async Task HandleAsync(string message)
     {

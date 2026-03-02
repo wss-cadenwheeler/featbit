@@ -7,7 +7,7 @@ namespace Api.Application.ControlPlane;
 
 public class ClientConnectionClosedHandler(ICacheService cacheService, ILogger<ClientConnectionClosedHandler> logger) : IMessageHandler
 {
-	public string Topic => Topics.ConnectionClosed;
+	public string Topic => ControlPlaneTopics.ConnectionClosed;
 
 	public async Task HandleAsync(string message)
 {

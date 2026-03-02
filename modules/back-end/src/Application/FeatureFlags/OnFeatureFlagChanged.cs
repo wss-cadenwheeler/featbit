@@ -68,7 +68,7 @@ public class OnFeatureFlagChangedHandler(
         // publish feature flag change message
         if (configuration.UseControlPlane())
         {
-            await messageProducer.PublishAsync(Topics.ControlPlaneFeatureFlagChange, flag);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneFeatureFlagChange, flag);
         }
         else
         {

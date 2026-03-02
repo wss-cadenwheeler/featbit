@@ -20,18 +20,18 @@ public static class MqServiceCollectionExtensions
         
         var topics = new[]
         {
-            Topics.ControlPlaneFeatureFlagChange, Topics.ControlPlaneLicenseChange,
-            Topics.ControlPlaneSecretChange, Topics.ControlPlaneSegmentChange,
-            Topics.ConnectionMade, Topics.ConnectionClosed
+            ControlPlaneTopics.ControlPlaneFeatureFlagChange, ControlPlaneTopics.ControlPlaneLicenseChange,
+            ControlPlaneTopics.ControlPlaneSecretChange, ControlPlaneTopics.ControlPlaneSegmentChange,
+            ControlPlaneTopics.ConnectionMade, ControlPlaneTopics.ConnectionClosed
         };
         
         services.AddKeyedTransient<IMessageHandler, FeatureFlagChangeMessageHandler>(
-            Topics.ControlPlaneFeatureFlagChange);
-        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(Topics.ControlPlaneLicenseChange);
-        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(Topics.ControlPlaneSecretChange);
-        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(Topics.ControlPlaneSegmentChange);
-        services.AddKeyedTransient<IMessageHandler, ClientConnectionMadeHandler>(Topics.ConnectionMade);
-        services.AddKeyedTransient<IMessageHandler, ClientConnectionClosedHandler>(Topics.ConnectionClosed);
+            ControlPlaneTopics.ControlPlaneFeatureFlagChange);
+        services.AddKeyedTransient<IMessageHandler, LicenseChangeMessageHandler>(ControlPlaneTopics.ControlPlaneLicenseChange);
+        services.AddKeyedTransient<IMessageHandler, SecretChangeMessageHandler>(ControlPlaneTopics.ControlPlaneSecretChange);
+        services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(ControlPlaneTopics.ControlPlaneSegmentChange);
+        services.AddKeyedTransient<IMessageHandler, ClientConnectionMadeHandler>(ControlPlaneTopics.ConnectionMade);
+        services.AddKeyedTransient<IMessageHandler, ClientConnectionClosedHandler>(ControlPlaneTopics.ConnectionClosed);
       
         switch (mqProvider)
         {

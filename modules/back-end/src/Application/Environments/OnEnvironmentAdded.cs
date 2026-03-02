@@ -20,10 +20,10 @@ public class OnEnvironmentAdded : INotification
 }
 
 public class OnEnvironmentAddedHandler(
-    IEnvironmentService envService,
-    ICacheService cache,
-    IConfiguration configuration,
-    IMessageProducer messageProducer)
+    IEnvironmentService _envService,
+    ICacheService _cache,
+    IConfiguration _configuration,
+    IMessageProducer _messageProducer)
     : INotificationHandler<OnEnvironmentAdded>
 {
     public async Task Handle(OnEnvironmentAdded notification, CancellationToken cancellationToken)
@@ -31,14 +31,14 @@ public class OnEnvironmentAddedHandler(
         var env = notification.Environment;
 
         // add secret cache
-        var resourceDescriptor = await envService.GetResourceDescriptorAsync(env.Id);
+        var resourceDescriptor = await _envService.GetResourceDescriptorAsync(env.Id);
         foreach (var secret in env.Secrets)
         {
-            await cache.UpsertSecretAsync(resourceDescriptor, secret);
-            if (configuration.UseControlPlane())
+            await _cache.UpsertSecretAsync(resourceDescriptor, secret);
+            if (_configuration.UseControlPlane())
             {
                 var message = ControlPlaneSecretHelpers.CreateMessage(resourceDescriptor, secret);
-                await messageProducer.PublishAsync(Topics.ControlPlaneSecretChange, message);
+                await _messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSecretChange, message);
             }
         }
     }

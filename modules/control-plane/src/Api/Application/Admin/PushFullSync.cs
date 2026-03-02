@@ -13,7 +13,7 @@ public class PushFullSyncHandler(IMessageProducer messageProducer, ILogger<PushF
     {
         try
         {
-            await messageProducer.PublishAsync(Topics.PushFullSyncChange, EmptyMessage);
+            await messageProducer.PublishAsync(ControlPlaneTopics.PushFullSyncChange, EmptyMessage);
             return true;
         }
         catch (Exception e)

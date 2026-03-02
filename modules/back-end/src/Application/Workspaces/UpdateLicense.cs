@@ -51,7 +51,7 @@ public class UpdateLicenseHandler(
         
         if (configuration.UseControlPlane())
         {
-            await messageProducer.PublishAsync(Topics.ControlPlaneLicenseChange, workspace);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneLicenseChange, workspace);
         }
 
         return mapper.Map<WorkspaceVm>(workspace);

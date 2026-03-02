@@ -7,7 +7,7 @@ namespace Api.Application.ControlPlane;
 
 public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<ClientConnectionMadeHandler> logger) : IMessageHandler
 {
-    public string Topic => Topics.ConnectionMade;
+    public string Topic => ControlPlaneTopics.ConnectionMade;
 
     public async Task HandleAsync(string message)
     {
