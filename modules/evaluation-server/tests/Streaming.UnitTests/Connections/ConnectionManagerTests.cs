@@ -1,6 +1,8 @@
+using System.Net.WebSockets;
 using Domain.Messages;
 using Domain.Shared;
 using Microsoft.Extensions.Logging.Testing;
+using Moq;
 using Streaming.Connections;
 
 namespace Streaming.UnitTests.Connections;
@@ -11,7 +13,8 @@ public class ConnectionManagerTests
     public void Empty()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         Assert.Empty(manager.Connections);
     }
@@ -20,7 +23,8 @@ public class ConnectionManagerTests
     public void ClientConnection()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         var context = new ConnectionContextBuilder().Build();
 
@@ -37,7 +41,8 @@ public class ConnectionManagerTests
     public void RelayProxyConnections()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         Secret[] secrets =
         [
@@ -68,7 +73,8 @@ public class ConnectionManagerTests
     public void GetEnvConnections()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         var s1 = new Secret(SecretTypes.Client, "p1", envId: Guid.NewGuid(), "dev");
         var s2 = new Secret(SecretTypes.Client, "p2", envId: Guid.NewGuid(), "dev");

@@ -1,6 +1,7 @@
 using Domain.Messages;
 using Domain.Shared;
 using Microsoft.Extensions.Logging.Testing;
+using Moq;
 using Streaming.Connections;
 
 namespace Streaming.UnitTests.Connections;
@@ -11,7 +12,8 @@ public class ConnectionLogTests
     public void ClientConnectionProperties()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         var context = new ConnectionContextBuilder().Build();
         manager.Add(context);
@@ -46,7 +48,8 @@ public class ConnectionLogTests
     public void RelayProxyConnectionProperties()
     {
         var logger = new FakeLogger<ConnectionManager>();
-        var manager = new ConnectionManager(logger, new NoneMessageProducer());
+        var messageProducer = new Mock<IMessageProducer>();
+        var manager = new ConnectionManager(logger, messageProducer.Object);
 
         Secret[] secrets =
         [
