@@ -10,7 +10,7 @@ public class HeartbeatService(IMessageProducer messageProducer, ILogger<Heartbea
     
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("HeartbeatIntervalSeconds  started with PodId: {PodId}", _podId);
+        logger.LogInformation("HeartbeatService started with PodId: {PodId}", _podId);
 
         var heartbeatInterval = configuration.GetHeartbeatIntervalSeconds();
 
