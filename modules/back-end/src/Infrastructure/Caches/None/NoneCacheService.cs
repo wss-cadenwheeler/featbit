@@ -2,6 +2,7 @@ using Application.Caches;
 using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
+using Domain.Health;
 using Domain.Segments;
 using Domain.Workspaces;
 
@@ -33,4 +34,8 @@ public class NoneCacheService : ICacheService
     public Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
      
     public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
+
+    public Task UpsertPodHeartbeat(HealthMessage healthMessage) => Task.CompletedTask;
+
+    public Task DeletePodConnection(Guid podId) => Task.CompletedTask;
 }

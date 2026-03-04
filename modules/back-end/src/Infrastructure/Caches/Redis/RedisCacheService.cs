@@ -2,6 +2,7 @@ using Application.Caches;
 using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
+using Domain.Health;
 using Domain.Segments;
 using Domain.Workspaces;
 using StackExchange.Redis;
@@ -128,5 +129,17 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     public async Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage)
     {
         await Redis.KeyDeleteAsync(RedisKeys.Connection(connectionMessage.Id));
+    }
+
+    public async Task UpsertPodHeartbeat(HealthMessage healthMessage)
+    {
+        var redisKey = RedisKeys.Heartbeat(healthMessage.PodId);
+
+       await Redis.StringSetAsync(redisKey, healthMessage.Timestamp.ToUnixTimeSeconds(), TimeSpan.FromSeconds(30));
+    }
+
+    public Task DeletePodConnection(Guid podId)
+    {
+        throw new NotImplementedException();
     }
 }

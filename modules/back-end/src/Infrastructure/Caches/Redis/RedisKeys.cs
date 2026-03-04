@@ -11,6 +11,7 @@ public static class RedisKeys
     private const string LicensePrefix = "featbit:license:";
     private const string SecretPrefix = "featbit:secret:";
     private const string ConnectionPrefix = "featbit:connection:";
+    private const string HeartbeadPrefix = "featbit:heartbeat:";
 
     public static RedisKey License(Guid id) => new($"{LicensePrefix}{id}");
 
@@ -25,4 +26,6 @@ public static class RedisKeys
     public static RedisKey Secret(string secretString) => new($"{SecretPrefix}{secretString}");
 
     public static RedisKey Connection(string connectionId) => new($"{ConnectionPrefix}{connectionId}");
+
+    public static RedisKey Heartbeat(string podId) => new($"{HeartbeadPrefix}{podId}");
 }

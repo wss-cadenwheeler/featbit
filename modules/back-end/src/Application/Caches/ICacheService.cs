@@ -3,6 +3,7 @@ using Domain.Segments;
 using Domain.FeatureFlags;
 using Domain.Workspaces;
 using Domain.Connections;
+using Domain.Health;
 
 namespace Application.Caches;
 
@@ -27,4 +28,8 @@ public interface ICacheService
     Task UpsertConnectionMadeAsync(ConnectionMessage connectionInfo);
 
     Task DeleteConnectionMadeAsync(ConnectionMessage connectionInfo);
+
+    Task UpsertPodHeartbeat(HealthMessage healthMessage);
+
+    Task DeletePodConnection(Guid podId);
 }
