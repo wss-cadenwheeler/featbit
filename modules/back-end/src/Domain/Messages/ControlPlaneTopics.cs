@@ -15,4 +15,6 @@ public static class ControlPlaneTopics
     public const string ConnectionMade = "featbit-connection-made";
     
     public const string ConnectionClosed = "featbit-connection-closed";
+    
+    public const string PodHeartbeat = "featbit-pod-heartbeat";
 }

@@ -1,3 +1,4 @@
+using Api.Configuration;
 using Api.Health;
 using Api.Services;
 using Domain.Workspaces;
@@ -51,7 +52,10 @@ public static class ServicesRegister
         services.AddTransient<IRelayProxyAppService, RelayProxyAppService>();
         services.AddTransient<IFeatureFlagService, FeatureFlagService>();
 
-        services.AddHostedService<HeartbeatService>();
+        if (configuration.UseControlPlane())
+        {
+            services.AddHostedService<HeartbeatService>();
+        }
 
         return builder;
     }
