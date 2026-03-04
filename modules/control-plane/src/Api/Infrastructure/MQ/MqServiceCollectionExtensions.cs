@@ -32,7 +32,7 @@ public static class MqServiceCollectionExtensions
         services.AddKeyedTransient<IMessageHandler, SegmentChangeMessageHandler>(ControlPlaneTopics.ControlPlaneSegmentChange);
         services.AddKeyedTransient<IMessageHandler, ClientConnectionMadeHandler>(ControlPlaneTopics.ConnectionMade);
         services.AddKeyedTransient<IMessageHandler, ClientConnectionClosedHandler>(ControlPlaneTopics.ConnectionClosed);
-      
+        services.AddKeyedTransient<IMessageHandler, HeartbeatMessageHandler>(ControlPlaneTopics.PodHeartbeat);
         switch (mqProvider)
         {
             case MqProvider.None:
