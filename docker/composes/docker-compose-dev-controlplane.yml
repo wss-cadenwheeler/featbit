@@ -27,14 +27,14 @@ services:
       dockerfile: ./deploy/Dockerfile
     environment:
       - SSOEnabled=true
-      - DbProvider=MongoDb
+      - DbProvider=Postgres
       - MqProvider=Kafka
       - CacheProvider=Redis
-      - MongoDb__ConnectionString=mongodb://admin:password@mongodb:27017
+      - Postgres__ConnectionString=Host=postgresql;Port=5432;Username=postgres;Password=please_change_me;Database=featbit
       - Redis__ConnectionString=redis:6379
       - UseControlPlane=true
     depends_on:
-      - mongodb
+      - postgresql
       - redis
       - da-server
       - kafka
@@ -50,13 +50,13 @@ services:
       context: ./modules
       dockerfile: ./control-plane/deploy/Dockerfile
     environment:
-      - DbProvider=MongoDb
+      - DbProvider=Postgres
       - MqProvider=Kafka
       - CacheProvider=Redis
-      - MongoDb__ConnectionString=mongodb://admin:password@mongodb:27017
+      - Postgres__ConnectionString=Host=postgresql;Port=5432;Username=postgres;Password=please_change_me;Database=featbit
       - Redis__Instances__0=redis:6379
     depends_on:
-      - mongodb
+      - postgresql
       - redis
       - kafka
     ports:
@@ -71,13 +71,13 @@ services:
       context: ./modules/evaluation-server
       dockerfile: ./deploy/Dockerfile
     environment:
-      - DbProvider=MongoDb
+      - DbProvider=Postgres
       - MqProvider=Kafka
       - CacheProvider=Redis
-      - MongoDb__ConnectionString=mongodb://admin:password@mongodb:27017
+      - Postgres__ConnectionString=Host=postgresql;Port=5432;Username=postgres;Password=please_change_me;Database=featbit
       - Redis__ConnectionString=redis:6379
     depends_on:
-      - mongodb
+      - postgresql
       - redis
       - kafka
     ports:
@@ -92,30 +92,32 @@ services:
       context: ./modules/data-analytics
       dockerfile: ./Dockerfile
     depends_on:
-      - mongodb
+      - postgresql
     ports:
       - "8200:80"
     networks:
       - featbit-network
     environment:
-      DB_PROVIDER: MongoDb
-      MONGO_URI: mongodb://admin:password@mongodb:27017
-      MONGO_INITDB_DATABASE: featbit
-      MONGO_HOST: mongodb
+      CHECK_DB_LIVNESS: false
+      DB_PROVIDER: Postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: please_change_me
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: featbit
 
-  mongodb:
-    image: mongo:5.0.32
-    container_name: mongodb
+  postgresql:
+    image: postgres:15.10
+    container_name: postgresql
     restart: on-failure
     ports:
-      - "27017:27017"
+      - "5432:5432"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=password
-      - MONGO_INITDB_DATABASE=featbit
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: please_change_me
     volumes:
-      - mongodb:/data/db
-      - ./infra/mongodb/docker-entrypoint-initdb.d/:/docker-entrypoint-initdb.d/
+      - ./infra/postgresql/docker-entrypoint-initdb.d/:/docker-entrypoint-initdb.d/
+      - postgres:/var/lib/postgresql/data
     networks:
       - featbit-network
 
@@ -198,6 +200,6 @@ networks:
         - subnet: 172.1.0.0/16
 
 volumes:
-  mongodb:
+  postgres:
   redis:
   kafka:
