@@ -1,3 +1,5 @@
+using Api.Configuration;
+using Api.Health;
 using Api.Services;
 using Domain.Workspaces;
 using Infrastructure;
@@ -49,6 +51,11 @@ public static class ServicesRegister
         LicenseVerifier.ImportPublicKey(configuration["PublicKey"]);
         services.AddTransient<IRelayProxyAppService, RelayProxyAppService>();
         services.AddTransient<IFeatureFlagService, FeatureFlagService>();
+
+        if (configuration.UseControlPlane())
+        {
+            services.AddHostedService<HeartbeatService>();
+        }
 
         return builder;
     }

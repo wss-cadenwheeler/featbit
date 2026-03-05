@@ -19,4 +19,11 @@ public class RedisClient : IRedisClient
             () => ConnectionMultiplexer.Connect(connectionString)
         );
     }
+    
+    public RedisClient(string connectionString)
+    {
+        _lazyConnection = new Lazy<ConnectionMultiplexer>(
+            () => ConnectionMultiplexer.Connect(connectionString)
+        );
+    }
 }
