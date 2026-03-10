@@ -38,4 +38,10 @@ public class NoneCacheService : ICacheService
     public Task UpsertPodHeartbeat(HealthMessage healthMessage) => Task.CompletedTask;
 
     public Task DeletePodConnection(Guid podId) => Task.CompletedTask;
+
+    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    {
+        return new List<HealthMessage>();
+    }
+
 }

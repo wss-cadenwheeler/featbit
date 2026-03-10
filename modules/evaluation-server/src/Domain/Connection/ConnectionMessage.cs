@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Domain.Health;
 
 namespace Domain.Connection
 {
@@ -18,6 +19,7 @@ namespace Domain.Connection
         public Guid EnvId { get; init; }
         public required string Secret { get; init; }
         public required string Id { get; init;  }
+        public string HeartbeatId { get; init; } = InfrastructureInfo.Id.ToString();
 
         public static ConnectionMessage CreateConnectionMadeMessage(string connectionId, Guid envId, string secert)
         {

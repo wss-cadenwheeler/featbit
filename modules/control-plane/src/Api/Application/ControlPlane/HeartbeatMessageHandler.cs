@@ -2,7 +2,6 @@
 using Application.Caches;
 using Domain.Health;
 using Domain.Messages;
-using StackExchange.Redis;
 
 namespace Api.Application.ControlPlane;
 

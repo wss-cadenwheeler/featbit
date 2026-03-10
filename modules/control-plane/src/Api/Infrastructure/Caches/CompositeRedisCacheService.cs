@@ -93,4 +93,13 @@ public class CompositeRedisCacheService(
     {
         throw new NotImplementedException();
     }
+
+    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    {
+        throw new NotImplementedException();
+            
+        await BroadcastAsync(
+            s => s.GetAllHealthMessages(),
+            nameof(GetAllHealthMessages));
+    }
 }

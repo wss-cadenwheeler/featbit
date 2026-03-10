@@ -32,4 +32,6 @@ public interface ICacheService
     Task UpsertPodHeartbeat(HealthMessage healthMessage);
 
     Task DeletePodConnection(Guid podId);
+
+    Task<List<HealthMessage>> GetAllHealthMessages();
 }

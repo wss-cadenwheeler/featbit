@@ -28,4 +28,8 @@ public static class RedisKeys
     public static RedisKey Connection(string connectionId) => new($"{ConnectionPrefix}{connectionId}");
 
     public static RedisKey Heartbeat(string podId) => new($"{HeartbeadPrefix}{podId}");
+
+    public static RedisValue GetAllHeartBeats => new($"{HeartbeadPrefix}*");
+
+    public static RedisValue GetAllConnections => new($"{ConnectionPrefix}*");
 }
