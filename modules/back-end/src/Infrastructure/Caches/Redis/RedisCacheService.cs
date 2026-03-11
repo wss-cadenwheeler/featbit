@@ -169,7 +169,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     {
         var connectionKeys = redis.Connection.GetServer(redis.Connection.GetEndPoints().First()).Keys(pattern: RedisKeys.GetAllConnections).ToList();
 
-        var droppedConnectionsTasks = connectionKeys.Select(async key => await Redis.HashGetAsync(key, "heartbeatId")).ToList();
+        var droppedConnectionsTasks = connectionKeys.Select(key => Redis.HashGetAsync(key, "heartbeatId")).ToList();
         
         var connectionsToRemove = await Task.WhenAll(droppedConnectionsTasks);
             
