@@ -9,7 +9,6 @@ public class HeartbeatMessageHandler(ICacheService cacheService, ILogger<Heartbe
 {
     public string Topic => ControlPlaneTopics.PodHeartbeat;
 
-    //TODO: Implement monitor for if we havent heard from pod to purge the clients connected to that pod
     public async Task HandleAsync(string message)
     {
         logger.LogInformation($"Received heartbeat message: {message}");

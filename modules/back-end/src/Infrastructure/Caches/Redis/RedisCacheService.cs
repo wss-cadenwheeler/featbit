@@ -155,8 +155,6 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
 
     public async Task<List<HealthMessage>> GetAllHealthMessages()
     {
-        var keys = redis.Connection.GetServer(redis.Connection.GetEndPoints().First()).Keys(pattern: RedisKeys.GetAllHeartBeats);
-
         var values = await Redis.HashGetAllAsync(RedisKeys.Heartbeat("*"));
 
         return [

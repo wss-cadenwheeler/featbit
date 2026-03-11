@@ -11,7 +11,7 @@ public class PodHealthChecker(ICacheService cacheService, ILogger<HeartbeatMessa
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var deadPodTimeStamp = DateTime.UtcNow.AddSeconds(podTimeoutSeconds *-1);
+            var deadPodTimeStamp = DateTime.UtcNow.AddSeconds(podTimeoutSeconds * -1);
 
             var healthMessages = await cacheService.GetAllHealthMessages();
 
