@@ -26,7 +26,7 @@ public partial class PostgresMessageConsumer : BackgroundService
         }
     );
 
-    private static readonly string[] ListeningTopics = [Topics.FeatureFlagChange, Topics.SegmentChange];
+    private static readonly string[] ListeningTopics = [Topics.FeatureFlagChange, Topics.SegmentChange, Topics.PushFullSyncChange];
     private static readonly string[] ListeningChannels = ListeningTopics.Select(Topics.ToChannel).ToArray();
     private static readonly string ListenChannelsSql = string.Join(' ', ListeningChannels.Select(x => $"LISTEN {x};"));
 
