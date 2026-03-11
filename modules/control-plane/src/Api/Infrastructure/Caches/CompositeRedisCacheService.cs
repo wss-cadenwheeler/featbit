@@ -2,6 +2,7 @@ using Application.Caches;
 using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
+using Domain.Health;
 using Domain.Segments;
 using Domain.Workspaces;
 using Microsoft.Extensions.Logging;
@@ -81,5 +82,24 @@ public class CompositeRedisCacheService(
                 operationName,
                 service.GetType().FullName);
         }
+    }
+
+    public async Task UpsertPodHeartbeat(HealthMessage healthMessage)
+    {
+        await BroadcastAsync(s => s.UpsertPodHeartbeat(healthMessage), nameof(UpsertPodHeartbeat));
+    }
+
+    public Task DeletePodConnection(Guid podId)
+    {
+        throw new NotImplementedException();
+    }
+
+    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    {
+        throw new NotImplementedException();
+            
+        await BroadcastAsync(
+            s => s.GetAllHealthMessages(),
+            nameof(GetAllHealthMessages));
     }
 }

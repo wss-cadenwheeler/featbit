@@ -6,8 +6,8 @@ namespace Api.Health;
 
 public class HeartbeatService(IMessageProducer messageProducer, ILogger<HeartbeatService> logger, IConfiguration configuration) : BackgroundService
 {
-    private readonly Guid _podId = Guid.NewGuid();
-    
+    private readonly Guid _podId = InfrastructureInfo.Id;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("HeartbeatService started with PodId: {PodId}", _podId);

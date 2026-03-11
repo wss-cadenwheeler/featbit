@@ -1,4 +1,5 @@
 using System.Reflection;
+using Api.Application.ControlPlane;
 using Api.Authentication;
 using Api.Infrastructure.Caches;
 using Api.Infrastructure.MQ;
@@ -49,6 +50,8 @@ public static class ServicesRegister
         builder.Services.AddAuthentication("ApiKey")
             .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>("ApiKey", options => { });
         
+       builder.Services.AddHostedService<PodHealthChecker>();
+
         return builder;
     }
     
