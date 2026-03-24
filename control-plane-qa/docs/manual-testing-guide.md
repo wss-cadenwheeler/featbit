@@ -9,11 +9,21 @@ This guide walks through manual testing of the FeatBit control plane functionali
 - ✅ All pods running
 - ✅ Kafka UI accessible
 
-## Access URLs (east and/or west)
-- **FeatBit UI:** https://featbit.east.local
-- **FeatBit API:** https://featbit-api.east.local
-- **Kafka UI:** https://featbit-kafka-ui.east.local
-- **Control Plane:** https://featbit-control-plane.east.local
+## Access URLs
+
+### Port-forward mode (default)
+- **FeatBit UI (west):** http://localhost:8081
+- **FeatBit UI (east):** http://localhost:8082
+- **FeatBit API (west):** http://localhost:15000
+- **FeatBit API (east):** http://localhost:15001
+- **Kafka UI (west):** http://localhost:18080
+- **Kafka UI (east):** http://localhost:18081
+
+### Nginx proxy mode (optional, requires Setup-FeatBitProxy.ps1)
+- **FeatBit UI:** http://featbit.east.local
+- **FeatBit API:** http://featbit-api.east.local
+- **Kafka UI:** http://featbit-kafka-ui.east.local
+- **Control Plane:** http://featbit-control-plane.east.local
 
 ## Test Credentials
 - **Email:** test@featbit.com

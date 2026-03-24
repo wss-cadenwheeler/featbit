@@ -505,7 +505,8 @@ Write-Header "Initializing Database"
 Write-Info "Running database initialization script..."
 
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$fallbackSeedScriptPath = Join-Path $scriptDirectory "infra\mongodb\docker-entrypoint-initdb.d\v0.0.0.js"
+$repoRoot = Split-Path -Parent $scriptDirectory
+$fallbackSeedScriptPath = Join-Path $repoRoot "infra\mongodb\docker-entrypoint-initdb.d\v0.0.0.js"
 
 # Get the init script from ConfigMap
 $initScript = kubectl --context $WestContext get configmap -n featbit mongodb-init -o jsonpath='{.data.init\.js}' 2>$null

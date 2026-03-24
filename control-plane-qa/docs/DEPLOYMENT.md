@@ -1,14 +1,16 @@
 # FeatBit Multi-Cluster Deployment
 
-This repository contains automated scripts for deploying FeatBit Pro to two Minikube clusters (west and east) with DNS-based access.
+This folder contains automated scripts for deploying FeatBit Pro to two Minikube clusters (west and east). All scripts live under `control-plane-qa/` in the repository root and are run from that directory.
 
 ## Overview
 
-The deployment consists of three main scripts that automate the entire setup process:
+The standard deployment workflow:
 
-1. **Deploy-FeatBitClusters.ps1** - Creates clusters and deploys FeatBit
-2. **Configure-FeatBitIngress.ps1** - Sets up Kubernetes ingress
-3. **Setup-FeatBitProxy.ps1** - Configures nginx reverse proxy with DNS names
+1. **`deployment.env`** — configure your environment once
+2. **`Deploy-FeatBitClusters.ps1`** — create clusters and deploy FeatBit
+3. **`Start-PortForwards.ps1`** — expose all services on localhost
+4. **`Initialize-MongoDBReplicaSet.ps1`** — initialise the replica set (in-cluster MongoDB only)
+5. **`Setup-FeatBitProxy.ps1`** — optional nginx reverse proxy for DNS-based access
 
 ## Prerequisites
 
@@ -16,138 +18,291 @@ The deployment consists of three main scripts that automate the entire setup pro
 - Docker Desktop installed and running
 - Minikube installed
 - kubectl installed
-- Chocolatey package manager installed
+- Chocolatey package manager installed (for `Setup-FeatBitProxy.ps1` only)
 - PowerShell 5.1 or later
-- Administrator privileges (for proxy setup)
+- Administrator privileges (for `Setup-FeatBitProxy.ps1` only)
 
 ## Architecture
 
 ```
-Browser (DNS names)
+Browser
     ↓
-Nginx Reverse Proxy (Windows Host)
-    ↓
-Port Forwards (kubectl)
+Port Forwards (kubectl)          ← primary access method
     ↓
 Kubernetes Services (Minikube)
     ↓
 FeatBit Pods
+
+          ─ or ─
+
+Browser (DNS names)
+    ↓
+Nginx Reverse Proxy (Windows Host)  ← optional, via Setup-FeatBitProxy.ps1
+    ↓
+Port Forwards (kubectl)
+    ↓
+Kubernetes Services (Minikube)
 ```
 
 ### Clusters
 
-- **West Cluster** (`west` profile)
-  - CPU: 4 cores
-  - Memory: 8GB
-  - Subnet: 192.168.49.x
-  
-- **East Cluster** (`east` profile)
-  - CPU: 4 cores
-  - Memory: 8GB
-  - Subnet: 192.168.58.x
+- **West Cluster** (`west` profile) — default 4 CPUs / 8 GB
+- **East Cluster** (`east` profile) — default 4 CPUs / 8 GB
 
-### DNS Names
+Both clusters share a Docker bridge network (`featbit-cluster-network`) for cross-cluster infrastructure communication.
 
-| Service | West Cluster | East Cluster |
-|---------|-------------|-------------|
+### Port Mappings (port-forward mode)
+
+| Service | West | East |
+|---------|------|------|
+| UI | http://localhost:8081 | http://localhost:8082 |
+| API | http://localhost:15000 | http://localhost:15001 |
+| Evaluation | http://localhost:5100 | http://localhost:5101 |
+| Kafka UI | http://localhost:18080 | http://localhost:18081 |
+
+### DNS Names (nginx proxy mode)
+
+| Service | West | East |
+|---------|------|------|
 | UI | http://featbit.west.local | http://featbit.east.local |
 | API | http://featbit-api.west.local | http://featbit-api.east.local |
 | Evaluation | http://featbit-eval.west.local | http://featbit-eval.east.local |
 
 ## Quick Start
 
+All commands below assume your working directory is the `control-plane-qa` folder:
+
+```powershell
+cd <repo-root>\control-plane-qa
+```
+
+### Step 0: Configure deployment.env
+
+Copy the example file and fill in values for your environment:
+
+```powershell
+Copy-Item deployment.env.example deployment.env
+notepad deployment.env
+```
+
+Key settings (all optional — see comments in the file for defaults):
+
+| Variable | Purpose |
+|---|---|
+| `CUSTOM_IMAGE_REGISTRY` | Private registry hostname (leave blank for Docker Hub) |
+| `MINIKUBE_BASE_IMAGE` | Custom kicbase image with corporate certs pre-baked |
+| `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
+| `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
+| `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
+| `WEST_CPUS` / `WEST_MEMORY` | Cluster resource overrides |
+
 ### Step 1: Deploy Clusters and FeatBit
 
 ```powershell
-cd C:\Users\<your-user>\source\wss-cadenwheeler\featbit
 .\Deploy-FeatBitClusters.ps1
 ```
 
 This script will:
-- ✓ Check Docker registry is running
+- ✓ Check Docker registry is running (localhost:5000)
 - ✓ Verify FeatBit images are available
-- ✓ Create west and east Minikube clusters with insecure registry support
-- ✓ Enable ingress addon
-- ✓ Connect west/east minikube nodes to a shared custom Docker network (`featbit-cluster-network`)
-- ✓ Deploy infrastructure (MongoDB, Redis, ClickHouse, Kafka)
+- ✓ Create west and east Minikube clusters
+- ✓ Connect both nodes to a shared Docker network
+- ✓ Deploy infrastructure (MongoDB, Redis, ClickHouse, Kafka — per your configuration)
 - ✓ Deploy FeatBit applications (UI, API, Evaluation, Control Plane, Data Analytics)
+- ✓ Configure database connection strings
 
-**Estimated time:** 5-7 minutes
+To recreate clusters from scratch: add `-RecreateClusters`.
+To redeploy FeatBit without touching clusters: add `-SkipClusterCreation`.
 
-### Step 2: Configure Ingress
+**Estimated time:** 5–10 minutes
 
-```powershell
-.\Configure-FeatBitIngress.ps1 -UsePortForward
-```
-
-This script will:
-- ✓ Create nginx ingress resources
-- ✓ Update UI deployments with localhost URLs
-- ✓ Start port forwarding for all services
-
-**Estimated time:** 1-2 minutes
-
-### Step 3: Setup Nginx Reverse Proxy (Requires Admin)
-
-**Open PowerShell as Administrator**, then run:
+### Step 2: Start Port Forwards
 
 ```powershell
-cd C:\Users\<your-user>\source\wss-cadenwheeler\featbit
-.\Setup-FeatBitProxy.ps1
+.\Start-PortForwards.ps1
 ```
 
-This script will:
-- ✓ Install nginx via Chocolatey
-- ✓ Configure nginx as reverse proxy with CORS support
-- ✓ Add DNS entries to Windows hosts file
-- ✓ Update FeatBit UI deployments with DNS URLs
-- ✓ Start all port forwarding services
-- ✓ Start nginx
+Keep this window open. It manages all `kubectl port-forward` processes with automatic restart. Access FeatBit at http://localhost:8081 (west) and http://localhost:8082 (east).
 
-**Estimated time:** 2-3 minutes
+To stop all port forwards:
+
+```powershell
+.\Stop-PortForwards.ps1
+```
+
+### Step 3: Initialize MongoDB Replica Set (in-cluster MongoDB only)
+
+Skip this step if MongoDB is running on the host (`HostInfraComponents` includes `mongodb`) — it is already initialised by Docker Compose.
+
+Run **after** port forwards are active:
+
+```powershell
+.\Initialize-MongoDBReplicaSet.ps1
+```
+
+**Estimated time:** 1–2 minutes
 
 ### Step 4: Access FeatBit
 
 Open your browser to:
-- West Cluster: http://featbit.west.local
-- East Cluster: http://featbit.east.local
+- West Cluster: http://localhost:8081
+- East Cluster: http://localhost:8082
 
 **Default credentials:**
 - Username: `test@featbit.com`
 - Password: `123456`
 
+### Step 5 (Optional): Setup Nginx Reverse Proxy
+
+For DNS name access instead of localhost ports. **Requires an Administrator PowerShell session.**
+
+```powershell
+.\Setup-FeatBitProxy.ps1
+```
+
+After this, FeatBit is accessible at http://featbit.west.local and http://featbit.east.local.
+
 ## Script Reference
 
 ### Deploy-FeatBitClusters.ps1
 
-**Purpose:** Creates Minikube clusters and deploys FeatBit Pro.
+**Purpose:** Creates Minikube clusters and deploys FeatBit Pro. The primary entry point for standing up the environment.
 
 **Parameters:**
-- `-SkipClusterCreation` - Only deploy FeatBit (skip cluster creation)
-- `-SkipImageCheck` - Skip verification of Docker images
-- `-DeploymentMode` - `Basic` (default) or `Advanced`
-- `-DatabaseProvider` - `MongoDb` (default) or `Postgres` (exactly one database provider per deployment)
-- `-HostInfraComponents` - Host Docker infra components in `Basic` mode (`redis`, `kafka`, `clickhouse`, and only one of `mongodb` or `postgresql`)
-- `-WestCpus` - CPU count for west cluster (default: 4)
-- `-WestMemory` - Memory in MB for west cluster (default: 8192)
-- `-EastCpus` - CPU count for east cluster (default: 4)
-- `-EastMemory` - Memory in MB for east cluster (default: 8192)
+- `-SkipClusterCreation` — Only deploy FeatBit (clusters must already exist)
+- `-RecreateClusters` — Delete and recreate clusters before deploying
+- `-SkipImageCheck` — Skip verification of FeatBit images in the local registry
+- `-DeploymentMode` — `Basic` (default) or `Advanced`
+- `-DatabaseProvider` — `MongoDb` (default) or `Postgres`
+- `-HostInfraComponents` — Host Docker infra components in Basic mode (`redis`, `kafka`, `clickhouse`, and one of `mongodb` or `postgresql`)
+- `-WestCpus` / `-WestMemory` / `-EastCpus` / `-EastMemory` — Cluster resource overrides
+- `-CustomImageRegistry` — Private registry hostname
+- `-MinikubeBaseImage` — Custom kicbase image with corporate certs
+
+All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
 **Examples:**
 ```powershell
-# Full deployment
+# Standard deployment (uses deployment.env defaults)
 .\Deploy-FeatBitClusters.ps1
 
-# Basic mode with host infrastructure (default behavior)
-.\Deploy-FeatBitClusters.ps1 -DeploymentMode Basic -HostInfraComponents redis,kafka,clickhouse,mongodb
+# Recreate clusters from scratch
+.\Deploy-FeatBitClusters.ps1 -RecreateClusters
 
-# Advanced mode (infra in both east/west clusters)
+# Redeploy FeatBit only (skip cluster creation)
+.\Deploy-FeatBitClusters.ps1 -SkipClusterCreation
+
+# Advanced mode — all infra runs inside both clusters
 .\Deploy-FeatBitClusters.ps1 -DeploymentMode Advanced
 
-# PostgreSQL deployment (binary DB choice: Postgres instead of MongoDb)
+# PostgreSQL instead of MongoDB
 .\Deploy-FeatBitClusters.ps1 -DatabaseProvider Postgres -DeploymentMode Advanced
 
 # Custom resources
+.\Deploy-FeatBitClusters.ps1 -WestCpus 6 -WestMemory 16384
+```
+
+### Start-PortForwards.ps1
+
+**Purpose:** Starts and manages all `kubectl port-forward` processes in a single window with automatic restart on failure.
+
+```powershell
+.\Start-PortForwards.ps1
+```
+
+Keep the window open while using FeatBit. Port mappings are printed on startup.
+
+### Stop-PortForwards.ps1
+
+**Purpose:** Kills all active port-forward processes.
+
+```powershell
+.\Stop-PortForwards.ps1
+```
+
+### Initialize-MongoDBReplicaSet.ps1
+
+**Purpose:** Initialises the MongoDB replica set across west and east clusters. Required when `mongodb` is deployed in-cluster (not in host Docker). Run after port forwards are active.
+
+```powershell
+.\Initialize-MongoDBReplicaSet.ps1
+```
+
+### Setup-FeatBitProxy.ps1
+
+**Purpose:** Sets up an nginx reverse proxy with DNS names for local access. **Requires Administrator.**
+
+**Parameters:**
+- `-NginxPath` — Path to nginx installation (default: `C:\nginx`)
+- `-SkipNginxInstall` — Skip nginx installation if already present
+
+**Examples:**
+```powershell
+# Full setup (installs nginx via Chocolatey)
+.\Setup-FeatBitProxy.ps1
+
+# Use existing nginx installation
+.\Setup-FeatBitProxy.ps1 -SkipNginxInstall
+```
+
+### Set-InfraImages.ps1
+
+**Purpose:** Rewrites infrastructure YAML image references for a custom container registry. Generates files under `kubernetes/.generated/` without modifying source-controlled files.
+
+```powershell
+# Rewrite for custom registry
+.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com
+
+# Preview changes without writing
+.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -WhatIf
+
+# Generate and apply to both clusters
+.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -Apply west,east
+
+# Reset to Docker Hub defaults
+.\Set-InfraImages.ps1 -Reset
+```
+
+### Repair-KafkaConfig.ps1
+
+**Purpose:** Restores the correct Kafka cross-cluster advertised listener and MirrorMaker configuration after a YAML re-apply resets the env vars to placeholder values.
+
+```powershell
+# Restore defaults
+.\Repair-KafkaConfig.ps1
+
+# Preview commands without executing
+.\Repair-KafkaConfig.ps1 -WhatIf
+```
+
+### Trust-MinikubeCertificates.ps1
+
+**Purpose:** Downloads and installs corporate CA certificates into existing Minikube clusters at runtime. Useful when clusters were created from the stock kicbase (not a custom base image with certs pre-baked).
+
+Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
+
+```powershell
+# Trust certs in default west and east clusters
+.\Trust-MinikubeCertificates.ps1
+
+# Trust certs and configure Docker daemon for a registry
+.\Trust-MinikubeCertificates.ps1 -RegistryHosts myregistry.example.com
+
+# Trust certs in specific clusters
+.\Trust-MinikubeCertificates.ps1 -Clusters @("dev", "test")
+```
+
+### Test-EvalWebSocket.ps1
+
+**Purpose:** Validates WebSocket connectivity to the evaluation servers on both west and east clusters (via port forwards).
+
+```powershell
+# Test with default server key
+.\Test-EvalWebSocket.ps1
+
+# Test with a specific environment server SDK key
+.\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
+```
 .\Deploy-FeatBitClusters.ps1 -WestCpus 6 -WestMemory 16384
 
 # Only redeploy FeatBit
@@ -156,24 +311,7 @@ Open your browser to:
 
 ### Configure-FeatBitIngress.ps1
 
-**Purpose:** Configures Kubernetes ingress and port forwarding.
-
-**Parameters:**
-- `-WestDomain` - Domain for west cluster (default: west.featbit.local)
-- `-EastDomain` - Domain for east cluster (default: east.featbit.local)
-- `-UsePortForward` - Start port forwarding automatically
-
-**Examples:**
-```powershell
-# Configure ingress only
-.\Configure-FeatBitIngress.ps1
-
-# Configure and start port forwarding
-.\Configure-FeatBitIngress.ps1 -UsePortForward
-
-# Custom domains
-.\Configure-FeatBitIngress.ps1 -WestDomain "west.mycompany.local"
-```
+> **Deprecated.** This script is no longer part of the standard workflow. Use `Start-PortForwards.ps1` for service access. It is retained for reference only.
 
 ### Setup-FeatBitProxy.ps1
 
@@ -280,8 +418,9 @@ Get-Process kubectl | Stop-Process
 ```
 
 Restart port forwarding:
+
 ```powershell
-.\Configure-FeatBitIngress.ps1 -UsePortForward
+.\Start-PortForwards.ps1
 ```
 
 ### Nginx Issues

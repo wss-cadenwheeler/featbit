@@ -1,11 +1,13 @@
 # FeatBit Proxy Setup - Manual Steps
+# NOTE: These steps are now automated by Setup-FeatBitProxy.ps1.
+# This file is retained as a reference for environments where the script cannot run.
 # Run as Administrator
 
 # STEP 1: Install nginx
 choco install nginx -y
 
 # STEP 2: Copy nginx config
-# Copy nginx.conf from this directory to C:\nginx\conf\nginx.conf
+# Copy nginx.conf from the control-plane-qa directory to C:\nginx\conf\nginx.conf
 
 # STEP 3: Update hosts file
 # Add these lines to C:\Windows\System32\drivers\etc\hosts:

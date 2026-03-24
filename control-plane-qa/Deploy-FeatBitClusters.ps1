@@ -161,8 +161,9 @@ function Write-Error {
 function Get-InfraImageMap {
     param([string]$MapFile)
 
-    $defaultPath = Join-Path $scriptPath "kubernetes\infra-image-map.json"
-    $localPath   = Join-Path $scriptPath "kubernetes\infra-image-map.local.json"
+    $repoRoot    = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+    $defaultPath = Join-Path $repoRoot "kubernetes\infra-image-map.json"
+    $localPath   = Join-Path $repoRoot "kubernetes\infra-image-map.local.json"
     $resolved = if ($MapFile) { $MapFile } else { $defaultPath }
 
     if (-not (Test-Path $resolved)) {
@@ -565,7 +566,7 @@ function Ensure-HostBridgeServices {
     }
 }
 
-$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $kubernetesProPath = Join-Path $scriptPath "kubernetes\pro"
 
 # Ephemeral manifests directory — gitignored.  Every YAML file applied to a
@@ -822,7 +823,7 @@ foreach ($clusterContext in @("west", "east")) {
     $nodes = kubectl --context $clusterContext get nodes -o name 2>$null
     if (-not $nodes -or $LASTEXITCODE -ne 0) {
         Write-Error "Cluster context '$clusterContext' is not reachable."
-        Write-Info "Run .\Deploy-FeatBitMultiCluster.ps1 first, or rerun this script with -RecreateClusters."
+        Write-Info "Rerun this script with -RecreateClusters to create the clusters."
         exit 1
     }
 }
