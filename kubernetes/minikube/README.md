@@ -1,0 +1,1 @@
+The docker file in this folder is only needed if you are using a private image repo on an internal network with self issued certificates.  Because of the number of images needed to run and the PRO stack with control planes having a private repo can avoid being rate limited by dockerhub.
