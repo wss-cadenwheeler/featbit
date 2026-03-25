@@ -57,7 +57,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: dockerhub.io/library/mongo:5.0.32
+        image: mongo:5.0.32
         command:
         - mongod
         - "--replSet"

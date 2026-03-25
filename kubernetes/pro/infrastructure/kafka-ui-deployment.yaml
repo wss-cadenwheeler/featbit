@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: kafka-ui
-          image: dockerhub.io/provectuslabs/kafka-ui:latest
+          image: provectuslabs/kafka-ui:latest
           env:
             - name: KAFKA_CLUSTERS_0_NAME
               value: featbit-main

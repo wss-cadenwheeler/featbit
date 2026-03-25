@@ -94,6 +94,7 @@ param(
     [string]$DatabaseProvider = "MongoDb",
     [string[]]$HostInfraComponents = @("redis", "kafka", "clickhouse", "mongodb"),
     [string]$CustomImageRegistry = "",
+    [string]$FeatBitImageRegistry = "",
     [string]$InfraImageRepository = "",
     [string]$InfraImageMapFile = "",
     [PSCredential]$CustomRegistryCredential,
@@ -161,7 +162,7 @@ function Write-Error {
 function Get-InfraImageMap {
     param([string]$MapFile)
 
-    $repoRoot    = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+    $repoRoot    = Split-Path -Parent $PSScriptRoot
     $defaultPath = Join-Path $repoRoot "kubernetes\infra-image-map.json"
     $localPath   = Join-Path $repoRoot "kubernetes\infra-image-map.local.json"
     $resolved = if ($MapFile) { $MapFile } else { $defaultPath }
@@ -387,9 +388,7 @@ function Stop-HostInfrastructure {
     }
 
     Write-Info "Stopping host infrastructure Docker containers (if running)..."
-    Push-Location $RepositoryRoot
-    docker compose -f $composePath down 2>&1 | Out-Null
-    Pop-Location
+    docker compose --project-directory $RepositoryRoot -f $composePath down 2>&1 | Out-Null
 
     Write-Success "Host infrastructure stopped."
 }
@@ -397,7 +396,9 @@ function Stop-HostInfrastructure {
 function Start-HostInfrastructure {
     param(
         [System.Collections.Generic.HashSet[string]]$Components,
-        [string]$RepositoryRoot
+        [string]$RepositoryRoot,
+        [string]$CustomImageRegistry = "",
+        [hashtable]$ImageMap = $null
     )
 
     if ($Components.Count -eq 0) {
@@ -408,6 +409,25 @@ function Start-HostInfrastructure {
     $composePath = Join-Path $RepositoryRoot "docker\composes\docker-compose-infra.yml"
     if (-not (Test-Path $composePath)) {
         throw "Cannot find host infra compose file: $composePath"
+    }
+
+    # Set image env vars so docker compose can substitute registry-prefixed paths.
+    # Env vars are only set when a custom registry is configured; the compose file
+    # falls back to the bare Docker Hub names when they are absent.
+    if ($CustomImageRegistry -and $ImageMap) {
+        $composeImageKeys = @{
+            "KAFKA_IMAGE"           = "bitnami/kafka:3.5"
+            "REDIS_IMAGE"           = "bitnami/redis:6.2.10"
+            "CLICKHOUSE_IMAGE"      = "clickhouse/clickhouse-server:23.7"
+            "MONGO_COMPOSE_IMAGE"   = "mongo:5.0.32"
+            "POSTGRES_COMPOSE_IMAGE" = "postgres:15.10"
+        }
+        foreach ($envVar in $composeImageKeys.Keys) {
+            $mapKey = $composeImageKeys[$envVar]
+            if ($ImageMap.ContainsKey($mapKey)) {
+                [System.Environment]::SetEnvironmentVariable($envVar, "$CustomImageRegistry/$($ImageMap[$mapKey])")
+            }
+        }
     }
 
     $serviceNames = New-Object System.Collections.Generic.List[string]
@@ -439,13 +459,10 @@ function Start-HostInfrastructure {
 
     Write-Info "Starting host infrastructure via docker compose: $($serviceNames -join ', ')"
 
-    Push-Location $RepositoryRoot
-    docker compose -f $composePath up -d $serviceNames
+    docker compose --project-directory $RepositoryRoot -f $composePath up -d $serviceNames
     if ($LASTEXITCODE -ne 0) {
-        Pop-Location
         throw "Failed to start host infrastructure services."
     }
-    Pop-Location
 
     Write-Success "Host infrastructure services are running"
 }
@@ -566,7 +583,7 @@ function Ensure-HostBridgeServices {
     }
 }
 
-$scriptPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$scriptPath = Split-Path -Parent $PSScriptRoot
 $kubernetesProPath = Join-Path $scriptPath "kubernetes\pro"
 
 # Ephemeral manifests directory — gitignored.  Every YAML file applied to a
@@ -765,6 +782,9 @@ if ($RecreateClusters -and -not $SkipClusterCreation) {
         "--memory=$WestMemory",
         "--insecure-registry=host.minikube.internal:5000"
     )
+    if ($FeatBitImageRegistry -and $FeatBitImageRegistry -ne "host.minikube.internal:5000") {
+        $westStartArguments += "--insecure-registry=$FeatBitImageRegistry"
+    }
     if ($MinikubeBaseImage) {
         $westStartArguments += "--base-image=$MinikubeBaseImage"
     }
@@ -784,6 +804,9 @@ if ($RecreateClusters -and -not $SkipClusterCreation) {
         "--memory=$EastMemory",
         "--insecure-registry=host.minikube.internal:5000"
     )
+    if ($FeatBitImageRegistry -and $FeatBitImageRegistry -ne "host.minikube.internal:5000") {
+        $eastStartArguments += "--insecure-registry=$FeatBitImageRegistry"
+    }
     if ($MinikubeBaseImage) {
         $eastStartArguments += "--base-image=$MinikubeBaseImage"
     }
@@ -883,7 +906,8 @@ else {
 
 if ($DeploymentMode -eq "Basic") {
     Write-Step "Starting Host Infrastructure"
-    Start-HostInfrastructure -Components $hostComponentSet -RepositoryRoot $scriptPath
+    Start-HostInfrastructure -Components $hostComponentSet -RepositoryRoot $scriptPath `
+        -CustomImageRegistry $CustomImageRegistry -ImageMap $infraImageMap
 
     Write-Step "Configuring Host Bridge Services"
     foreach ($clusterContext in @("west", "east")) {
@@ -948,6 +972,17 @@ if ($clusterInfraComponentSet.Contains("kafka")) {
     Write-Info "Configuring east kafka-aggregate advertised listeners ($eastSharedClusterIp)..."
     kubectl --context east -n featbit set env deployment/kafka-aggregate `
         "KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka-aggregate:9092,PLAINTEXT_HOST://${eastSharedClusterIp}:30094" | Out-Null
+
+    # Wait for the kafka-aggregate rollouts to finish before patching MirrorMaker.
+    # kafka-aggregate uses Recreate strategy, so there is a window where the old pod is
+    # still serving connections with the placeholder 127.0.0.1:30094 in its broker metadata.
+    # If mirrormaker-remote starts during that window it caches the wrong address and fails
+    # permanently until restarted. Waiting here ensures the new pods (with correct advertised
+    # listeners) are the only ones accepting connections before MirrorMaker bootstraps.
+    Write-Info "Waiting for kafka-aggregate rollout to complete on both clusters..."
+    kubectl --context west rollout status deployment/kafka-aggregate -n featbit --timeout=120s | Out-Null
+    kubectl --context east rollout status deployment/kafka-aggregate -n featbit --timeout=120s | Out-Null
+    Write-Info "kafka-aggregate rollout complete."
 
     Write-Info "Configuring west kafka-mirrormaker-remote -> east kafka-aggregate (${eastSharedClusterIp}:30094)..."
     kubectl --context west -n featbit set env deployment/kafka-mirrormaker-remote `
@@ -1105,17 +1140,30 @@ else {
 
 Write-Step "Deploying Applications"
 
+# Build an image map for FeatBit application images so Invoke-KubectlApplyFile
+# can rewrite them to the configured FeatBit image registry.
+$appImageRegistry = if ($FeatBitImageRegistry) { $FeatBitImageRegistry } else { "host.minikube.internal:5000" }
+$appImageMap = @{
+    "featbit/featbit-api-server:latest"            = "featbit/featbit-api-server:latest"
+    "featbit/featbit-ui:latest"                    = "featbit/featbit-ui:latest"
+    "featbit/featbit-evaluation-server:latest"     = "featbit/featbit-evaluation-server:latest"
+    "featbit/featbit-control-plane:latest"         = "featbit/featbit-control-plane:latest"
+    "featbit/featbit-data-analytics-server:latest" = "featbit/featbit-data-analytics-server:latest"
+}
+
+Write-Info "Using FeatBit image registry: $appImageRegistry"
+
 Write-Info "Deploying FeatBit applications to west cluster..."
 Get-ChildItem (Join-Path $kubernetesProPath "application") -Filter "*.yaml" | Sort-Object Name | ForEach-Object {
     Invoke-KubectlApplyFile -Context "west" -FilePath $_.FullName `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap
 }
 Write-Success "West applications deployed"
 
 Write-Info "Deploying FeatBit applications to east cluster..."
 Get-ChildItem (Join-Path $kubernetesProPath "application") -Filter "*.yaml" | Sort-Object Name | ForEach-Object {
     Invoke-KubectlApplyFile -Context "east" -FilePath $_.FullName `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap
 }
 Write-Success "East applications deployed"
 
@@ -1183,12 +1231,8 @@ if ($DatabaseProvider -eq "MongoDb") {
 
     Write-Info "Setting west MongoDB connection strings..."
     foreach ($deploymentName in $databaseDeployments) {
-        if ($mongoConnectionString) {
-            kubectl --context west -n featbit set env "deployment/$deploymentName" DbProvider=MongoDb MongoDb__ConnectionString=$mongoConnectionString | Out-Null
-        }
-        else {
-            kubectl --context west -n featbit set env "deployment/$deploymentName" DbProvider=MongoDb MongoDb__ConnectionString=mongodb://mongodb-headless:27017/?replicaSet=rs-featbit | Out-Null
-        }
+        $connStr = if ($mongoConnectionString) { $mongoConnectionString } else { "mongodb://mongodb-headless:27017/?replicaSet=rs-featbit" }
+        kubectl --context west -n featbit set env "deployment/$deploymentName" CHECK_DB_LIVNESS=false DB_PROVIDER=MongoDb DbProvider=MongoDb MongoDb__ConnectionString=$connStr | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to set west MongoDB connection string for $deploymentName"
             exit 1
@@ -1197,12 +1241,8 @@ if ($DatabaseProvider -eq "MongoDb") {
 
     Write-Info "Setting east MongoDB connection strings..."
     foreach ($deploymentName in $databaseDeployments) {
-        if ($mongoConnectionString) {
-            kubectl --context east -n featbit set env "deployment/$deploymentName" DbProvider=MongoDb MongoDb__ConnectionString=$mongoConnectionString | Out-Null
-        }
-        else {
-            kubectl --context east -n featbit set env "deployment/$deploymentName" DbProvider=MongoDb MongoDb__ConnectionString=mongodb://mongodb-headless:27017/?replicaSet=rs-featbit | Out-Null
-        }
+        $connStr = if ($mongoConnectionString) { $mongoConnectionString } else { "mongodb://mongodb-headless:27017/?replicaSet=rs-featbit" }
+        kubectl --context east -n featbit set env "deployment/$deploymentName" CHECK_DB_LIVNESS=false DB_PROVIDER=MongoDb DbProvider=MongoDb MongoDb__ConnectionString=$connStr | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to set east MongoDB connection string for $deploymentName"
             exit 1
@@ -1217,7 +1257,7 @@ else {
 
     Write-Info "Setting west PostgreSQL connection strings..."
     foreach ($deploymentName in $databaseDeployments) {
-        kubectl --context west -n featbit set env "deployment/$deploymentName" DbProvider=Postgres Postgres__ConnectionString=$postgreSqlConnectionString | Out-Null
+        kubectl --context west -n featbit set env "deployment/$deploymentName" CHECK_DB_LIVNESS=false DB_PROVIDER=Postgres DbProvider=Postgres Postgres__ConnectionString=$postgreSqlConnectionString | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to set west PostgreSQL connection string for $deploymentName"
             exit 1
@@ -1226,7 +1266,7 @@ else {
 
     Write-Info "Setting east PostgreSQL connection strings..."
     foreach ($deploymentName in $databaseDeployments) {
-        kubectl --context east -n featbit set env "deployment/$deploymentName" DbProvider=Postgres Postgres__ConnectionString=$postgreSqlConnectionString | Out-Null
+        kubectl --context east -n featbit set env "deployment/$deploymentName" CHECK_DB_LIVNESS=false DB_PROVIDER=Postgres DbProvider=Postgres Postgres__ConnectionString=$postgreSqlConnectionString | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to set east PostgreSQL connection string for $deploymentName"
             exit 1
@@ -1236,22 +1276,59 @@ else {
     Write-Success "PostgreSQL connection strings configured"
 }
 
+Write-Step "Configuring App MQ Provider"
+
+# All scripts in control-plane-qa always target a Kafka MQ topology.
+#
+# Advanced mode: Kafka runs inside both clusters with a separate kafka-aggregate broker.
+#   - Apps PRODUCE to kafka:9092  (main broker)
+#   - Apps CONSUME from kafka-aggregate:9092  (aggregate broker)
+#   - MirrorMaker bridges main → local aggregate and main → remote aggregate.
+#
+# Basic mode: Kafka may run on the host or inside the cluster (no aggregate broker / no MirrorMaker).
+#   - Apps PRODUCE to kafka:9092
+#   - Apps CONSUME from kafka:9092  (same broker — no aggregate exists)
 if ($clusterInfraComponentSet.Contains("kafka")) {
-    Write-Step "Configuring Kafka Consumer Endpoints"
-    Write-Info "Directing evaluation-server consumers to kafka-aggregate and enabling Kafka MQ provider..."
-    foreach ($clusterContext in @("west", "east")) {
-        # MqProvider defaults to "Postgres" — must be explicitly set to "Kafka" when running
-        # in-cluster Kafka, otherwise the eval-server registers PostgresMessageConsumer and
-        # never consumes flag-change events, so connected clients don't receive live updates.
-        kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
+    # Kafka is deployed inside the cluster (Advanced mode or Basic mode with in-cluster kafka).
+    # kafka-aggregate exists, so consumers point there.
+    $kafkaConsumerServers = "kafka-aggregate:9092"
+    Write-Info "In-cluster Kafka detected — consumers will use kafka-aggregate:9092"
+}
+else {
+    # Kafka is a host Docker service (Basic mode default).
+    # No kafka-aggregate or MirrorMaker; consumers use the same main broker.
+    $kafkaConsumerServers = "kafka:9092"
+    Write-Info "Host Kafka detected — consumers will use kafka:9092"
+}
+$kafkaProducerServers = "kafka:9092"
+
+Write-Info "Setting Kafka producer/consumer broker endpoints and enabling Kafka MQ provider on all app deployments..."
+foreach ($clusterContext in @("west", "east")) {
+    foreach ($dep in @("api-server", "control-plane")) {
+        kubectl --context $clusterContext -n featbit set env "deployment/$dep" `
             "MqProvider=Kafka" `
-            "Kafka__Consumer__bootstrap.servers=kafka-aggregate:9092" | Out-Null
+            "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
+            "Kafka__Consumer__bootstrap.servers=$kafkaConsumerServers" | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to set evaluation-server Kafka config for $clusterContext"
+            Write-Warning "Failed to set Kafka config on $dep in $clusterContext"
         }
     }
-    Write-Success "Evaluation-server Kafka consumer endpoints configured"
+
+    # api-server uses the control-plane for publishing flag/segment change events.
+    # This is always true when running via the control-plane-qa scripts.
+    kubectl --context $clusterContext -n featbit set env deployment/api-server "UseControlPlane=true" | Out-Null
+
+    # evaluation-server: ControlPlane__UseControlPlane enables the heartbeat service.
+    kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
+        "MqProvider=Kafka" `
+        "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
+        "Kafka__Consumer__bootstrap.servers=$kafkaConsumerServers" `
+        "ControlPlane__UseControlPlane=true" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
+    }
 }
+Write-Success "Kafka MQ provider configured for all app deployments (producer=$kafkaProducerServers, consumer=$kafkaConsumerServers)"
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
 Start-Sleep -Seconds 45

@@ -55,6 +55,7 @@ $keyMap = @{
     "DEPLOYMENT_MODE"              = "DeploymentMode"
     "DATABASE_PROVIDER"            = "DatabaseProvider"
     "CUSTOM_IMAGE_REGISTRY"        = "CustomImageRegistry"
+    "FEATBIT_IMAGE_REGISTRY"       = "FeatBitImageRegistry"
     "INFRA_IMAGE_REPOSITORY"       = "InfraImageRepository"
     "INFRA_IMAGE_MAP_FILE"         = "InfraImageMapFile"
     "CUSTOM_REGISTRY_SECRET_NAME"  = "CustomRegistrySecretName"

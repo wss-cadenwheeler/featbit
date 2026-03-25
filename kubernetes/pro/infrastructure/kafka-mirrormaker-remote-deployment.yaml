@@ -32,7 +32,7 @@ spec:
         runAsGroup: 1001
       containers:
         - name: mirrormaker
-          image: dockerhub.io/bitnamilegacy/kafka:3.5
+          image: bitnami/kafka:3.5
           env:
             # PLACEHOLDER — deploy script sets this to the other cluster's
             # kafka-aggregate NodePort address: <OTHER_NODE_SHARED_IP>:30094

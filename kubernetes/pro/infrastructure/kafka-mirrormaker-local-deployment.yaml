@@ -1,12 +1,14 @@
 # MirrorMaker — Local Replication (kafka → kafka-aggregate, same cluster)
 #
-# Replicates flag and segment change messages from the local main broker
-# (kafka:9092) to the local aggregate broker (kafka-aggregate:9092).
-# This ensures the local eval-server (which consumes from kafka-aggregate)
-# receives changes that originated on this cluster.
+# Replicates ALL featbit-* messages from the local main broker (kafka:9092)
+# to the local aggregate broker (kafka-aggregate:9092).
+#
+# All app consumers (api-server, control-plane, evaluation-server) read from
+# kafka-aggregate; all producers write to kafka (main). This MirrorMaker is
+# the bridge between production and consumption within the same cluster.
 #
 # The remote MirrorMaker instance (kafka-mirrormaker-remote) handles
-# replicating this cluster's changes into the OTHER cluster's aggregate.
+# replicating flag/segment change events into the OTHER cluster's aggregate.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,7 +30,7 @@ spec:
         runAsGroup: 1001
       containers:
         - name: mirrormaker
-          image: dockerhub.io/bitnamilegacy/kafka:3.5
+          image: bitnami/kafka:3.5
           command:
             - /bin/bash
             - -c
@@ -50,7 +52,7 @@ spec:
               exec /opt/bitnami/kafka/bin/kafka-mirror-maker.sh \
                 --consumer.config /tmp/mm/consumer.properties \
                 --producer.config /tmp/mm/producer.properties \
-                --whitelist 'featbit-feature-flag-change|featbit-segment-change|featbit-control-plane-push-full-sync-change' \
+                --whitelist 'featbit-.*' \
                 --num.streams 1
           resources:
             requests:

@@ -33,7 +33,7 @@ spec:
         fsGroup: 1001
       initContainers:
         - name: volume-permissions
-          image: dockerhub.io/bitnamilegacy/kafka:3.5
+          image: bitnami/kafka:3.5
           command:
             - /bin/bash
           args:
@@ -59,7 +59,7 @@ spec:
               mountPath: /bitnami/kafka
       containers:
         - name: kafka-aggregate
-          image: dockerhub.io/bitnamilegacy/kafka:3.5
+          image: bitnami/kafka:3.5
           ports:
             - containerPort: 9092
               name: internal
