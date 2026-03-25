@@ -1330,6 +1330,26 @@ foreach ($clusterContext in @("west", "east")) {
 }
 Write-Success "Kafka MQ provider configured for all app deployments (producer=$kafkaProducerServers, consumer=$kafkaConsumerServers)"
 
+Write-Info "Configuring cross-cluster Redis instances on control-plane deployments..."
+# Each control-plane must update the Redis cache of BOTH clusters when it processes a
+# control-plane topic message. Instance 0 is the local in-cluster Redis; Instance 1 is
+# the remote cluster's Redis reached via the host port-forward on host.minikube.internal.
+#   West control-plane → east Redis on host port 6380
+#   East control-plane → west Redis on host port 6379
+kubectl --context west -n featbit set env deployment/control-plane `
+    "Redis__Instances__0=redis:6379" `
+    "Redis__Instances__1=host.minikube.internal:6380" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Failed to set Redis cross-cluster instance on control-plane in west"
+}
+kubectl --context east -n featbit set env deployment/control-plane `
+    "Redis__Instances__0=redis:6379" `
+    "Redis__Instances__1=host.minikube.internal:6379" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
+}
+Write-Success "Cross-cluster Redis configured (west→east: host.minikube.internal:6380, east→west: host.minikube.internal:6379)"
+
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
 Start-Sleep -Seconds 45
 

@@ -14,9 +14,13 @@
     - featbit.west.local -> West UI
     - featbit-api.west.local -> West API
     - featbit-eval.west.local -> West Evaluation
+    - featbit-kafka.west.local -> West Kafka UI
+    - redis.west.local -> West Redis (port 6379)
     - featbit.east.local -> East UI
     - featbit-api.east.local -> East API
     - featbit-eval.east.local -> East Evaluation
+    - featbit-kafka.east.local -> East Kafka UI
+    - redis.east.local -> East Redis (port 6380)
     
 .PARAMETER NginxPath
     Path to nginx installation. Default: C:\nginx
@@ -163,8 +167,8 @@ Write-Step "Updating Windows Hosts File"
 
 $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
 $hostsEntries = @(
-    "127.0.0.1 featbit.west.local featbit-api.west.local featbit-eval.west.local",
-    "127.0.0.1 featbit.east.local featbit-api.east.local featbit-eval.east.local",
+    "127.0.0.1 featbit.west.local featbit-api.west.local featbit-eval.west.local featbit-kafka.west.local redis.west.local",
+    "127.0.0.1 featbit.east.local featbit-api.east.local featbit-eval.east.local featbit-kafka.east.local redis.east.local",
     "127.0.0.1 mongodb-0.west.local mongodb-1.west.local mongodb-2.east.local"
 )
 
@@ -334,6 +338,11 @@ Write-Host ""
 Write-Host "Direct API Access:" -ForegroundColor Yellow
 Write-Host "  West API: http://featbit-api.west.local" -ForegroundColor Gray
 Write-Host "  East API: http://featbit-api.east.local" -ForegroundColor Gray
+
+Write-Host ""
+Write-Host "Redis Access (via redis-cli):" -ForegroundColor Yellow
+Write-Host "  West Redis: redis-cli -h redis.west.local -p 6379" -ForegroundColor Gray
+Write-Host "  East Redis: redis-cli -h redis.east.local -p 6380" -ForegroundColor Gray
 
 Write-Host ""
 Write-Host "Management Commands:" -ForegroundColor Yellow

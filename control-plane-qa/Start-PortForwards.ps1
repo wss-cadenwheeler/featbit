@@ -16,7 +16,8 @@
     - Kafka: 29092 -> kafka:29092 (West, external listener)
     - West Kafka UI: 18080 -> kafka-ui:8080
     - East Kafka UI: 18081 -> kafka-ui:8080
-    - Redis: 6379 -> redis:6379 (West)
+    - West Redis: 6379 -> redis:6379
+    - East Redis: 6380 -> redis:6379
     - MongoDB-0: 27017 -> mongodb-0-lb:27017 (West)
     - MongoDB-1: 27018 -> mongodb-1-lb:27017 (West)
     - MongoDB-2: 27019 -> mongodb-2-lb:27017 (East)
@@ -138,7 +139,8 @@ $jobs = @(
     @{Name="kafka"; Context="west"; Namespace="featbit"; Service="kafka"; LocalPort="29092"; RemotePort="29092"}
     @{Name="west-kafka-ui"; Context="west"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18080"; RemotePort="8080"}
     @{Name="east-kafka-ui"; Context="east"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18081"; RemotePort="8080"}
-    @{Name="redis"; Context="west"; Namespace="featbit"; Service="redis"; LocalPort="6379"; RemotePort="6379"}
+    @{Name="west-redis"; Context="west"; Namespace="featbit"; Service="redis"; LocalPort="6379"; RemotePort="6379"}
+    @{Name="east-redis"; Context="east"; Namespace="featbit"; Service="redis"; LocalPort="6380"; RemotePort="6379"}
 )
 
 $westMongoPodExists = Test-PodExists -Context "west" -Namespace "featbit" -PodName "mongodb-0"
@@ -223,7 +225,8 @@ Write-Host "  Infrastructure Services:" -ForegroundColor Yellow
 Write-Host "    localhost:29092 → Kafka (West, external listener)" -ForegroundColor Gray
     Write-Host "    localhost:18080 → West Kafka UI (featbit-kafka.west.local)" -ForegroundColor Gray
     Write-Host "    localhost:18081 → East Kafka UI (featbit-kafka.east.local)" -ForegroundColor Gray
-    Write-Host "    localhost:6379  → Redis (West)" -ForegroundColor Gray
+    Write-Host "    localhost:6379  → West Redis (redis.west.local)" -ForegroundColor Gray
+    Write-Host "    localhost:6380  → East Redis (redis.east.local)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  MongoDB Replica Set:" -ForegroundColor Yellow
 if ($westMongoPodExists -and $eastMongoPodExists) {
