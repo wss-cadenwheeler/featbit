@@ -12,14 +12,14 @@ The standard deployment workflow:
 4. **`Initialize-MongoDBReplicaSet.ps1`** — initialise the replica set (in-cluster MongoDB only)
 5. **`Setup-FeatBitProxy.ps1`** — optional nginx reverse proxy for DNS-based access
 
-## Prerequisites
+## Prerequisites (windows)
 
 - Windows 10/11 or Windows Server
-- Docker Desktop installed and running
-- Minikube installed
-- kubectl installed
-- Chocolatey package manager installed (for `Setup-FeatBitProxy.ps1` only)
-- PowerShell 5.1 or later
+- Docker Desktop, or Rancher Desktop installed and running
+- Minikube installed (https://minikube.sigs.k8s.io/docs/)
+- kubectl installed (https://kubernetes.io/docs/reference/kubectl/)
+- Chocolatey package manager installed (for `Setup-FeatBitProxy.ps1` only) (https://chocolatey.org/)
+- PWSH flavored PowerShell 7.6.0 or later (https://github.com/powershell/powershell)
 - Administrator privileges (for `Setup-FeatBitProxy.ps1` only)
 
 ## Architecture

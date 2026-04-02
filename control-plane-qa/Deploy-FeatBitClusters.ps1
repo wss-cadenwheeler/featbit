@@ -6,7 +6,7 @@
     This script performs the following operations:
     1. Verifies the local Docker registry is running
     2. Creates two Minikube clusters with insecure registry support
-    3. Configures ingress and MetalLB on both clusters
+    3. Configures ingress on both clusters
     4. Deploys FeatBit Pro infrastructure and applications to both clusters
 
     Deployment modes:
