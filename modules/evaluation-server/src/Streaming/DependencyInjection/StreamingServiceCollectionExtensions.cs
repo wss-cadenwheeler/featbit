@@ -59,7 +59,7 @@ public static class StreamingServiceCollectionExtensions
         services
             .AddSingleton<IMessageConsumer, FeatureFlagChangeMessageConsumer>()
             .AddSingleton<IMessageConsumer, SegmentChangeMessageConsumer>()
-            .AddSingleton<IMessageConsumer, PushFullSyncChangeMessageConsumer>();
+            .AddSingleton<IMessageConsumer, ControlPlaneCommandMessageConsumer>();
 
         return new StreamingBuilder(services);
     }

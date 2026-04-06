@@ -33,7 +33,7 @@ public partial class KafkaMessageConsumer : BackgroundService
 
     private async Task StartConsumerLoop(CancellationToken cancellationToken)
     {
-        var topics = new[] { Topics.FeatureFlagChange, Topics.SegmentChange, Topics.PushFullSyncChange };
+        var topics = new[] { Topics.FeatureFlagChange, Topics.SegmentChange, Topics.ControlPlaneCommand };
 
         _consumer.Subscribe(topics);
         _logger.LogInformation(

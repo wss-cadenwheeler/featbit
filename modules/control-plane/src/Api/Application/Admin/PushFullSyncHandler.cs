@@ -1,5 +1,6 @@
 using Domain.Messages;
 using MediatR;
+using Action = Domain.Messages.Action;
 
 namespace Api.Application.Admin;
 
@@ -13,7 +14,7 @@ public class PushFullSyncHandler(IMessageProducer messageProducer, ILogger<PushF
     {
         try
         {
-            await messageProducer.PublishAsync(ControlPlaneTopics.PushFullSyncChange, EmptyMessage);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneCommand, new ControlPlaneCommand { Action = Action.PushFullSync });
             return true;
         }
         catch (Exception e)
