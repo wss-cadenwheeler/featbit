@@ -22,6 +22,17 @@ The standard deployment workflow:
 - PWSH flavored PowerShell 7.6.0 or later (https://github.com/powershell/powershell)
 - Administrator privileges (for `Setup-FeatBitProxy.ps1` only)
 
+Run `Install-Prerequisites.ps1` to automatically check for and install any missing prerequisites:
+
+```powershell
+# Core prerequisites only (Docker Desktop, Minikube, kubectl)
+.\Install-Prerequisites.ps1 -SkipChocolatey
+
+# All prerequisites including Chocolatey (required for Setup-FeatBitProxy.ps1)
+# Must be run from an elevated (Administrator) PowerShell session
+.\Install-Prerequisites.ps1
+```
+
 ## Architecture
 
 ```
