@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Maps default Docker Hub image names to registry-relative paths.",
+    "When CustomImageRegistry is set, each image is rewritten as:",
+    "  {CustomImageRegistry}/{registryPath}",
+    "",
+    "The registryPath values default to the standard Docker Hub path so that",
+    "a simple mirror (ECR, Nexus, Artifactory) works without any edits.",
+    "",
+    "For proxies with different namespace conventions (e.g. Harbor's",
+    "/dockerhub/bitnamilegacy/ prefix), update the registryPath values:",
+    "  \"bitnami/kafka:3.5\": \"dockerhub/bitnamilegacy/kafka:3.5\"",
+    "  \"mongo:5.0.32\":     \"dockerhub/library/mongo:5.0.32\""
+  ],
+  "images": {
+    "bitnami/kafka:3.5":                  "bitnami/kafka:3.5",
+    "bitnami/redis:6.2.10":               "bitnami/redis:6.2.10",
+    "mongo:5.0.32":                       "mongo:5.0.32",
+    "mongo:7.0":                          "mongo:7.0",
+    "clickhouse/clickhouse-server:23.7":  "clickhouse/clickhouse-server:23.7",
+    "busybox:1.28":                       "busybox:1.28",
+    "provectuslabs/kafka-ui:latest":      "provectuslabs/kafka-ui:latest",
+    "postgres:15.10":                     "postgres:15.10"
+  }
+}

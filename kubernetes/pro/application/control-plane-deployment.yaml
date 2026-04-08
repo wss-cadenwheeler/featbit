@@ -19,8 +19,12 @@ spec:
         - env:
             - name: IS_PRO
               value: "true"
-            - name: Kafka__BootstrapServers
+            - name: MqProvider
+              value: Kafka
+            - name: Kafka__Producer__bootstrap.servers
               value: kafka:9092
+            - name: Kafka__Consumer__bootstrap.servers
+              value: kafka-aggregate:9092
             - name: MongoDb__ConnectionString
               value: mongodb://admin:password@mongodb:27017
             - name: MongoDb__Database
@@ -28,6 +32,10 @@ spec:
             - name: Redis__Instances__0
               value: redis:6379
           image: featbit/featbit-control-plane:latest
+          # NOTE: The Kafka settings below are overridden at deploy time by Deploy-FeatBitClusters.ps1
+          # based on the deployment mode:
+          #   Advanced — Consumer points to kafka-aggregate:9092 (aggregate broker)
+          #   Basic    — Consumer points to kafka:9092 (no aggregate)
           name: control-plane
           ports:
             - containerPort: 5200
