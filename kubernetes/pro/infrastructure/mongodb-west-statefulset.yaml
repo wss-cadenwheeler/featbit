@@ -77,7 +77,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:5.0.32
+        image: mongo:7.0
         command:
         - mongod
         - "--replSet"
