@@ -909,6 +909,14 @@ else {
 }
 
 Write-Step "Creating Registry Image Pull Secrets"
+if ($CustomImageRegistry -and -not $CustomRegistryCredential) {
+    Write-Info "Enter registry credentials for $CustomImageRegistry when prompted."
+    $CustomRegistryCredential = Get-Credential -Message "Registry credentials ($CustomImageRegistry)"
+    if (-not $CustomRegistryCredential) {
+        Write-Warning "No credentials provided — skipping image pull secret creation."
+        Write-Warning "Pods pulling from $CustomImageRegistry may fail with 'unauthorized'."
+    }
+}
 if ($CustomImageRegistry -and $CustomRegistryCredential) {
     Ensure-CustomRegistryImagePullSecret -ClusterContext "west" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
     Ensure-CustomRegistryImagePullSecret -ClusterContext "east" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
