@@ -416,10 +416,10 @@ function Start-HostInfrastructure {
     # falls back to the bare Docker Hub names when they are absent.
     if ($CustomImageRegistry -and $ImageMap) {
         $composeImageKeys = @{
-            "KAFKA_IMAGE"           = "bitnami/kafka:3.5"
-            "REDIS_IMAGE"           = "bitnami/redis:6.2.10"
-            "CLICKHOUSE_IMAGE"      = "clickhouse/clickhouse-server:23.7"
-            "MONGO_COMPOSE_IMAGE"   = "mongo:5.0.32"
+            "KAFKA_IMAGE"           = "bitnamilegacy/kafka:3.8"
+            "REDIS_IMAGE"           = "bitnamilegacy/redis:7.2"
+            "CLICKHOUSE_IMAGE"      = "clickhouse/clickhouse-server:24.8"
+            "MONGO_COMPOSE_IMAGE"   = "mongo:7.0"
             "POSTGRES_COMPOSE_IMAGE" = "postgres:15.10"
         }
         foreach ($envVar in $composeImageKeys.Keys) {
@@ -682,16 +682,6 @@ if ($DeploymentMode -eq "Basic") {
     Write-Info "Basic mode routes selected infrastructure to host Docker."
 }
 
-$requiresCustomRegistryCredential = $clusterInfraComponentSet.Count -gt 0
-
-if ($requiresCustomRegistryCredential -and $CustomImageRegistry -and -not $CustomRegistryCredential) {
-    Write-Info "Enter registry credentials for $CustomImageRegistry when prompted."
-    $CustomRegistryCredential = Get-Credential -Message "Registry credentials ($CustomImageRegistry)"
-    if (-not $CustomRegistryCredential) {
-        Write-Error "Registry credentials are required to pull infrastructure images."
-        exit 1
-    }
-}
 
 Write-Info "Using infra image repository: $InfraImageRepository"
 Write-Info "Using MongoDB image: $MongoImage"
@@ -919,7 +909,7 @@ else {
 }
 
 Write-Step "Creating Registry Image Pull Secrets"
-if ($requiresCustomRegistryCredential -and $CustomImageRegistry -and $CustomRegistryCredential) {
+if ($CustomImageRegistry -and $CustomRegistryCredential) {
     Ensure-CustomRegistryImagePullSecret -ClusterContext "west" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
     Ensure-CustomRegistryImagePullSecret -ClusterContext "east" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
 
@@ -927,7 +917,7 @@ if ($requiresCustomRegistryCredential -and $CustomImageRegistry -and $CustomRegi
     Ensure-DefaultServiceAccountImagePullSecret -ClusterContext "east" -Namespace "featbit" -SecretName $CustomRegistrySecretName
 }
 else {
-    Write-Info "Skipping registry image pull secret creation (no registry configured or no in-cluster infra components selected)."
+    Write-Info "Skipping registry image pull secret creation (no registry configured or no credentials provided)."
 }
 
 if ($DeploymentMode -eq "Basic") {

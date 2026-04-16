@@ -143,17 +143,29 @@ $jobs = @(
     @{Name="east-redis"; Context="east"; Namespace="featbit"; Service="redis"; LocalPort="6380"; RemotePort="6379"}
 )
 
-$westMongoPodExists = Test-PodExists -Context "west" -Namespace "featbit" -PodName "mongodb-0"
-$eastMongoPodExists = Test-PodExists -Context "east" -Namespace "featbit" -PodName "mongodb-0"
+# Advanced mode: MongoDB runs as a StatefulSet — pods are mongodb-west-0/1 and mongodb-east-0.
+# Basic mode: MongoDB runs on host Docker — no pods in the cluster.
+$mongoAdvanced = (Test-PodExists -Context "west" -Namespace "featbit" -PodName "mongodb-west-0") -and
+                 (Test-PodExists -Context "east" -Namespace "featbit" -PodName "mongodb-east-0")
+$mongoBasic    = -not $mongoAdvanced -and
+                 (Test-PodExists -Context "west" -Namespace "featbit" -PodName "mongodb-0") -and
+                 (Test-PodExists -Context "east" -Namespace "featbit" -PodName "mongodb-0")
 
-if ($westMongoPodExists -and $eastMongoPodExists) {
+if ($mongoAdvanced) {
+    $jobs += @(
+        @{Name="mongodb-0"; Context="west"; Namespace="featbit"; Pod="mongodb-west-0"; LocalPort="27017"; RemotePort="27017"}
+        @{Name="mongodb-1"; Context="west"; Namespace="featbit"; Pod="mongodb-west-1"; LocalPort="27018"; RemotePort="27017"}
+        @{Name="mongodb-2"; Context="east"; Namespace="featbit"; Pod="mongodb-east-0"; LocalPort="27019"; RemotePort="27017"}
+    )
+}
+elseif ($mongoBasic) {
     $jobs += @(
         @{Name="mongodb-0"; Context="west"; Namespace="featbit"; Pod="mongodb-0"; LocalPort="27017"; RemotePort="27017"}
         @{Name="mongodb-1"; Context="east"; Namespace="featbit"; Pod="mongodb-0"; LocalPort="27018"; RemotePort="27017"}
     )
 }
 else {
-    Write-Log "Skipping MongoDB pod port-forwards because mongodb-0 pod was not found in both clusters (expected in basic host-MongoDB mode)." -Level "WARN"
+    Write-Log "Skipping MongoDB pod port-forwards (no MongoDB pods found — host MongoDB mode or pods not ready)." -Level "WARN"
 }
 
 # Start each port forward in a background job
@@ -229,12 +241,17 @@ Write-Host "    localhost:29092 → Kafka (West, external listener)" -Foreground
     Write-Host "    localhost:6380  → East Redis (redis.east.local)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  MongoDB Replica Set:" -ForegroundColor Yellow
-if ($westMongoPodExists -and $eastMongoPodExists) {
+if ($mongoAdvanced) {
+    Write-Host "    localhost:27017 → mongodb-west-0 (West)" -ForegroundColor Gray
+    Write-Host "    localhost:27018 → mongodb-west-1 (West)" -ForegroundColor Gray
+    Write-Host "    localhost:27019 → mongodb-east-0 (East)" -ForegroundColor Gray
+}
+elseif ($mongoBasic) {
     Write-Host "    localhost:27017 → MongoDB-0 (West)" -ForegroundColor Gray
     Write-Host "    localhost:27018 → MongoDB-0 (East)" -ForegroundColor Gray
 }
 else {
-    Write-Host "    Skipped (MongoDB pods not present in both clusters)" -ForegroundColor Gray
+    Write-Host "    Skipped (no MongoDB pods found — host MongoDB mode or pods not ready)" -ForegroundColor Gray
 }
 Write-Host ""
 Write-Host "Press Ctrl+C to stop..." -ForegroundColor Yellow

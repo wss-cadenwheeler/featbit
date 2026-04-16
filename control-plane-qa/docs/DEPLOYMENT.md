@@ -6,13 +6,53 @@ This folder contains automated scripts for deploying FeatBit Pro to two Minikube
 
 The standard deployment workflow:
 
-1. **`deployment.env`** — configure your environment once (see [REGISTRY-SETUP.md](REGISTRY-SETUP.md) if you are unsure what to set)
+1. **`deployment.env`** — configure your environment once
 2. **`Deploy-FeatBitClusters.ps1`** — create clusters and deploy FeatBit
 3. **`Start-PortForwards.ps1`** — expose all services on localhost
 4. **`Initialize-MongoDBReplicaSet.ps1`** — initialise the replica set (in-cluster MongoDB only)
 5. **`Setup-FeatBitProxy.ps1`** — optional nginx reverse proxy for DNS-based access
 
-## Prerequisites (windows)
+---
+
+## Prerequisites
+
+### Ubuntu / Debian Linux
+
+#### 1. Install PowerShell 7.6+
+
+```bash
+source /etc/os-release
+wget -q https://packages.microsoft.com/config/ubuntu/$VERSION_ID/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+
+sudo apt-get update
+sudo apt-get install -y powershell
+```
+
+For other Debian-based distros, see the [official install guide](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-linux).
+
+#### 2. Install remaining prerequisites
+
+Run `Install-Prerequisites.ps1` to automatically install Docker Engine, Minikube, and kubectl. Chocolatey is automatically skipped on Linux — no extra flags needed:
+
+```powershell
+pwsh -File ./Install-Prerequisites.ps1
+```
+
+Run as root, or as a user with sudo access. To preview what would be installed without making changes:
+
+```powershell
+pwsh -File ./Install-Prerequisites.ps1 -WhatIf
+```
+
+> **Note:** After installation, Docker Engine adds your user to the `docker` group. You must start a new shell session before running Docker without sudo.
+
+Chocolatey is automatically skipped on Linux — it is not needed. `Setup-FeatBitProxy.ps1` supports Linux and will install and configure nginx via apt if needed.
+
+---
+
+### Windows
 
 - Windows 10/11 or Windows Server
 - Docker Desktop, or Rancher Desktop installed and running
@@ -33,6 +73,8 @@ Run `Install-Prerequisites.ps1` to automatically check for and install any missi
 .\Install-Prerequisites.ps1
 ```
 
+---
+
 ## Architecture
 
 ```
@@ -48,8 +90,8 @@ FeatBit Pods
 
 Browser (DNS names)
     ↓
-Nginx Reverse Proxy (Windows Host)  ← optional, via Setup-FeatBitProxy.ps1
-    ↓
+Nginx Reverse Proxy (host)  ← optional, via Setup-FeatBitProxy.ps1
+    ↓                          requires port forwards to be running simultaneously
 Port Forwards (kubectl)
     ↓
 Kubernetes Services (Minikube)
@@ -79,12 +121,18 @@ Both clusters share a Docker bridge network (`featbit-cluster-network`) for cros
 | API | http://featbit-api.west.local | http://featbit-api.east.local |
 | Evaluation | http://featbit-eval.west.local | http://featbit-eval.east.local |
 
+---
+
 ## Quick Start
 
 All commands below assume your working directory is the `control-plane-qa` folder:
 
 ```powershell
+# Windows
 cd <repo-root>\control-plane-qa
+
+# Linux
+cd <repo-root>/control-plane-qa
 ```
 
 ### Step 0: Configure deployment.env
@@ -92,16 +140,24 @@ cd <repo-root>\control-plane-qa
 Copy the example file and fill in values for your environment:
 
 ```powershell
+# Windows
 Copy-Item deployment.env.example deployment.env
 notepad deployment.env
+
+# Linux
+cp deployment.env.example deployment.env
+nano deployment.env   # or: $EDITOR deployment.env
 ```
 
 Key settings (all optional — see comments in the file for defaults):
 
 | Variable | Purpose |
 |---|---|
-| `CUSTOM_IMAGE_REGISTRY` | Private registry hostname (leave blank for Docker Hub) |
-| `MINIKUBE_BASE_IMAGE` | Full custom kicbase image reference, including registry/path/tag |
+| `CUSTOM_IMAGE_REGISTRY` | Registry prefix for infrastructure images rewritten from the image map (e.g. `nexus.tekgeek.io/repository/docker-proxy`). Leave blank to pull from Docker Hub directly. |
+| `INFRA_IMAGE_REPOSITORY` | Full registry path used to compute `MongoImage` and `PostgresImage` for `kubectl set image` calls. Defaults to `CUSTOM_IMAGE_REGISTRY/dockerhub/library` — override this whenever your proxy path does not end in `/dockerhub/library` (e.g. a Nexus proxy at `/repository/docker-proxy`). |
+| `FEATBIT_IMAGE_REGISTRY` | Registry hosting the FeatBit application images. Defaults to `host.minikube.internal:5000`. Set this only if your FeatBit images live on a different registry than your infra images. |
+| `CUSTOM_REGISTRY_USERNAME` / `CUSTOM_REGISTRY_PASSWORD` | Credentials for `CUSTOM_IMAGE_REGISTRY`. When set, the script automatically creates image pull secrets in both clusters. |
+| `MINIKUBE_BASE_IMAGE` | Custom kicbase image with corporate certs pre-baked |
 | `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
 | `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
 | `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
@@ -137,7 +193,7 @@ To preview what would happen without making any changes:
 ```
 
 This script will:
-- ✓ Check Docker registry is running (localhost:5000)
+- ✓ Start the local Docker registry on localhost:5000 (creates it automatically if needed)
 - ✓ Verify FeatBit images are available
 - ✓ Create west and east Minikube clusters
 - ✓ Connect both nodes to a shared Docker network
@@ -188,15 +244,57 @@ Open your browser to:
 
 ### Step 6 (Optional): Setup Nginx Reverse Proxy
 
-For DNS name access instead of localhost ports. **Requires an Administrator PowerShell session.**
+For DNS name access instead of localhost ports.
+
+- **Windows:** requires an Administrator PowerShell session
+- **Linux:** requires root or a user with sudo access
 
 ```powershell
+# Windows (Administrator session)
 .\Setup-FeatBitProxy.ps1
+
+# Linux
+sudo pwsh ./Setup-FeatBitProxy.ps1
 ```
 
 After this, FeatBit is accessible at http://featbit.west.local and http://featbit.east.local.
 
+> **Linux note:** `Setup-FeatBitProxy.ps1` attempts to start port forwards automatically, but the background process it spawns may not survive in all terminal environments. If the proxy returns 502 Bad Gateway, restart port forwards manually:
+> ```powershell
+> pwsh ./Start-PortForwards.ps1
+> ```
+> Nginx proxies to the kubectl port-forward ports (8081, 8082, etc.), so both nginx **and** port forwards must be running simultaneously.
+
+---
+
 ## Script Reference
+
+### Build-FeatBitImages.ps1
+
+**Purpose:** Builds FeatBit application images from source and pushes them to the local registry. Starts the local registry automatically if needed.
+
+**Parameters:**
+- `-Images` — Image(s) to build. Valid values: `api-server`, `ui`, `evaluation-server`, `control-plane`, `data-analytics-server`. Defaults to all five.
+- `-Registry` — Registry to push to (default: `localhost:5000`)
+- `-Tag` — Image tag (default: `latest`)
+- `-NoPush` — Build locally without pushing
+- `-Force` — Rebuild even if the image already exists locally
+- `-WhatIf` — Dry-run mode
+
+**Examples:**
+```powershell
+# Build and push all images
+.\Build-FeatBitImages.ps1
+
+# Build specific images only
+.\Build-FeatBitImages.ps1 -Images api-server, control-plane
+
+# Build without pushing
+.\Build-FeatBitImages.ps1 -NoPush
+
+# Push to a custom registry with a version tag
+.\Build-FeatBitImages.ps1 -Registry myregistry.example.com:5000 -Tag 1.2.3
+```
 
 ### Deploy-FeatBitClusters.ps1
 
@@ -211,7 +309,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-HostInfraComponents` — Host Docker infra components in Basic mode (`redis`, `kafka`, `clickhouse`, and one of `mongodb` or `postgresql`)
 - `-WestCpus` / `-WestMemory` / `-EastCpus` / `-EastMemory` — Cluster resource overrides
 - `-CustomImageRegistry` — Private registry hostname
-- `-MinikubeBaseImage` — Full custom kicbase image reference, including registry/path/tag
+- `-MinikubeBaseImage` — Custom kicbase image with corporate certs
 
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
@@ -264,20 +362,25 @@ Keep the window open while using FeatBit. Port mappings are printed on startup.
 
 ### Setup-FeatBitProxy.ps1
 
-**Purpose:** Sets up an nginx reverse proxy with DNS names for local access. **Requires Administrator.**
+**Purpose:** Sets up an nginx reverse proxy with DNS names for local access. Requires elevated privileges (Administrator on Windows, root/sudo on Linux).
 
 **Parameters:**
-- `-NginxPath` — Path to nginx installation (default: `C:\nginx`)
+- `-NginxPath` — *(Windows only)* Path to nginx installation directory (default: `C:\nginx`)
 - `-SkipNginxInstall` — Skip nginx installation if already present
 
 **Examples:**
 ```powershell
-# Full setup (installs nginx via Chocolatey)
+# Full setup
 .\Setup-FeatBitProxy.ps1
 
-# Use existing nginx installation
+# Skip nginx installation (already installed)
 .\Setup-FeatBitProxy.ps1 -SkipNginxInstall
+
+# Windows: use nginx installed at a custom path
+.\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
 ```
+
+On Linux, nginx config is written to `/etc/nginx/sites-available/featbit` and symlinked into `sites-enabled/`. nginx is managed via `systemctl`.
 
 ### Set-InfraImages.ps1
 
