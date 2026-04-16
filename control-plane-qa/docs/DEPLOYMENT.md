@@ -157,7 +157,7 @@ Key settings (all optional — see comments in the file for defaults):
 | `INFRA_IMAGE_REPOSITORY` | Full registry path used to compute `MongoImage` and `PostgresImage` for `kubectl set image` calls. Defaults to `CUSTOM_IMAGE_REGISTRY/dockerhub/library` — override this whenever your proxy path does not end in `/dockerhub/library` (e.g. a Nexus proxy at `/repository/docker-proxy`). |
 | `FEATBIT_IMAGE_REGISTRY` | Registry hosting the FeatBit application images. Defaults to `host.minikube.internal:5000`. Set this only if your FeatBit images live on a different registry than your infra images. |
 | `CUSTOM_REGISTRY_USERNAME` / `CUSTOM_REGISTRY_PASSWORD` | Credentials for `CUSTOM_IMAGE_REGISTRY`. When set, the script automatically creates image pull secrets in both clusters. |
-| `MINIKUBE_BASE_IMAGE` | Custom kicbase image with corporate certs pre-baked |
+| `MINIKUBE_BASE_IMAGE` | Full custom kicbase image reference, including registry/path/tag (e.g. `harbor.example.com/ci/minikube:v0.0.50-corpca`) |
 | `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
 | `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
 | `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
@@ -169,19 +169,19 @@ Build all five FeatBit service images from source, start the local Docker regist
 running), and push the images to it:
 
 ```powershell
-.\Initialize-LocalRegistry.ps1
+.\Build-FeatBitImages.ps1
 ```
 
 To build only specific images:
 
 ```powershell
-.\Initialize-LocalRegistry.ps1 -Images control-plane, evaluation-server
+.\Build-FeatBitImages.ps1 -Images control-plane, evaluation-server
 ```
 
 To preview what would happen without making any changes:
 
 ```powershell
-.\Initialize-LocalRegistry.ps1 -WhatIf
+.\Build-FeatBitImages.ps1 -WhatIf
 ```
 
 **Estimated time:** 5–15 minutes (first build; subsequent builds are faster due to Docker layer caching)
@@ -308,8 +308,9 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-DatabaseProvider` — `MongoDb` (default) or `Postgres`
 - `-HostInfraComponents` — Host Docker infra components in Basic mode (`redis`, `kafka`, `clickhouse`, and one of `mongodb` or `postgresql`)
 - `-WestCpus` / `-WestMemory` / `-EastCpus` / `-EastMemory` — Cluster resource overrides
-- `-CustomImageRegistry` — Private registry hostname
-- `-MinikubeBaseImage` — Custom kicbase image with corporate certs
+- `-CustomImageRegistry` — Private registry hostname for infrastructure images
+- `-FeatBitImageRegistry` — Registry hosting FeatBit application images (defaults to `host.minikube.internal:5000`)
+- `-MinikubeBaseImage` — Full custom kicbase image reference, including registry/path/tag
 
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
@@ -359,28 +360,6 @@ Keep the window open while using FeatBit. Port mappings are printed on startup.
 ```powershell
 .\Initialize-MongoDBReplicaSet.ps1
 ```
-
-### Setup-FeatBitProxy.ps1
-
-**Purpose:** Sets up an nginx reverse proxy with DNS names for local access. Requires elevated privileges (Administrator on Windows, root/sudo on Linux).
-
-**Parameters:**
-- `-NginxPath` — *(Windows only)* Path to nginx installation directory (default: `C:\nginx`)
-- `-SkipNginxInstall` — Skip nginx installation if already present
-
-**Examples:**
-```powershell
-# Full setup
-.\Setup-FeatBitProxy.ps1
-
-# Skip nginx installation (already installed)
-.\Setup-FeatBitProxy.ps1 -SkipNginxInstall
-
-# Windows: use nginx installed at a custom path
-.\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
-```
-
-On Linux, nginx config is written to `/etc/nginx/sites-available/featbit` and symlinked into `sites-enabled/`. nginx is managed via `systemctl`.
 
 ### Set-InfraImages.ps1
 
@@ -439,12 +418,6 @@ Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
 
 # Test with a specific environment server SDK key
 .\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
-```
-.\Deploy-FeatBitClusters.ps1 -WestCpus 6 -WestMemory 16384
-
-# Only redeploy FeatBit
-.\Deploy-FeatBitClusters.ps1 -SkipClusterCreation
-```
 
 ### Configure-FeatBitIngress.ps1
 
@@ -533,7 +506,7 @@ kubectl --context east logs <pod-name> -n featbit
 
 Verify images in local registry:
 ```powershell
-docker images | Select-String "localhost:5000/featbit"
+Invoke-RestMethod http://localhost:5000/v2/_catalog
 ```
 
 Test registry accessibility from Minikube:
