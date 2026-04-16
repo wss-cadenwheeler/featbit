@@ -99,7 +99,7 @@ param(
     [string]$InfraImageMapFile = "",
     [PSCredential]$CustomRegistryCredential,
     [string]$CustomRegistrySecretName = "registry-credentials",
-    [string]$MinikubeBaseImage = "kicbase:v0.0.50-corpca",
+    [string]$MinikubeBaseImage = "",
     [string]$MongoImage = "",
     [string]$PostgresImage = "",
     [int]$WestCpus = 4,
@@ -696,7 +696,12 @@ if ($requiresCustomRegistryCredential -and $CustomImageRegistry -and -not $Custo
 Write-Info "Using infra image repository: $InfraImageRepository"
 Write-Info "Using MongoDB image: $MongoImage"
 Write-Info "Using PostgreSQL image: $PostgresImage"
-Write-Info "Using Minikube base image: $MinikubeBaseImage"
+if ($MinikubeBaseImage) {
+    Write-Info "Using Minikube base image: $MinikubeBaseImage"
+}
+else {
+    Write-Info "Using Minikube default base image"
+}
 
 Write-Info "Checking Docker registry..."
 $registryRunning = docker ps --filter "name=registry" --filter "status=running" --format "{{.Names}}" | Select-String -Pattern "^registry$"
@@ -723,30 +728,51 @@ else {
 
 if (-not $SkipImageCheck) {
     Write-Info "Checking required images in local registry..."
+
+    # Expected repository names as stored inside the registry (not the full pull URI).
     $requiredImages = @(
-        "featbit-api-server",
-        "featbit-ui",
-        "featbit-evaluation-server",
-        "featbit-control-plane",
-        "featbit-data-analytics-server"
+        "featbit/featbit-api-server",
+        "featbit/featbit-ui",
+        "featbit/featbit-evaluation-server",
+        "featbit/featbit-control-plane",
+        "featbit/featbit-data-analytics-server"
     )
-    
+
+    # Query the registry catalog directly so the check works even when the images
+    # are no longer cached in the local Docker daemon (e.g. after a docker system prune).
+    $registryBase = "http://localhost:5000"
+    $catalogJson  = $null
+    try {
+        $catalogJson = Invoke-RestMethod -Uri "$registryBase/v2/_catalog" -TimeoutSec 5
+    }
+    catch {
+        Write-Warning "Could not reach local registry at $registryBase — falling back to docker images cache."
+    }
+
     $missingImages = @()
     foreach ($image in $requiredImages) {
-        $exists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "localhost:5000/featbit/$image"
-        if (-not $exists) {
+        $found = $false
+        if ($catalogJson -and $catalogJson.repositories) {
+            $found = $catalogJson.repositories -contains $image
+        }
+        else {
+            # Fallback: check the local daemon image store.
+            $found = [bool](docker images --format "{{.Repository}}:{{.Tag}}" |
+                Select-String -Pattern "localhost:5000/$image")
+        }
+
+        if (-not $found) {
             $missingImages += $image
         }
     }
-    
+
     if ($missingImages.Count -gt 0) {
         Write-Error "Missing images in local registry:"
         foreach ($img in $missingImages) {
-            Write-Info "  - localhost:5000/featbit/$img:latest"
+            Write-Info "  - localhost:5000/$img:latest"
         }
-        Write-Info "`nPlease tag and push images first:"
-        Write-Info "  docker tag <source-image> localhost:5000/featbit/<image-name>:latest"
-        Write-Info "  docker push localhost:5000/featbit/<image-name>:latest"
+        Write-Info "`nPlease build and push images first:"
+        Write-Info "  .\Initialize-LocalRegistry.ps1"
         exit 1
     }
     Write-Success "All required images found in local registry"

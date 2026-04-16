@@ -10,12 +10,11 @@
     "For proxies with different namespace conventions (e.g. Harbor's",
     "/dockerhub/bitnamilegacy/ prefix), update the registryPath values:",
     "  \"bitnami/kafka:3.5\": \"dockerhub/bitnamilegacy/kafka:3.5\"",
-    "  \"mongo:5.0.32\":     \"dockerhub/library/mongo:5.0.32\""
+    "  \"mongo:7.0\":         \"dockerhub/library/mongo:7.0\""
   ],
   "images": {
     "bitnami/kafka:3.5":                  "bitnami/kafka:3.5",
     "bitnami/redis:6.2.10":               "bitnami/redis:6.2.10",
-    "mongo:5.0.32":                       "mongo:5.0.32",
     "mongo:7.0":                          "mongo:7.0",
     "clickhouse/clickhouse-server:23.7":  "clickhouse/clickhouse-server:23.7",
     "busybox:1.28":                       "busybox:1.28",

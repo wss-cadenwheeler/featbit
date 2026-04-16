@@ -6,7 +6,7 @@ This folder contains automated scripts for deploying FeatBit Pro to two Minikube
 
 The standard deployment workflow:
 
-1. **`deployment.env`** — configure your environment once
+1. **`deployment.env`** — configure your environment once (see [REGISTRY-SETUP.md](REGISTRY-SETUP.md) if you are unsure what to set)
 2. **`Deploy-FeatBitClusters.ps1`** — create clusters and deploy FeatBit
 3. **`Start-PortForwards.ps1`** — expose all services on localhost
 4. **`Initialize-MongoDBReplicaSet.ps1`** — initialise the replica set (in-cluster MongoDB only)
@@ -101,13 +101,36 @@ Key settings (all optional — see comments in the file for defaults):
 | Variable | Purpose |
 |---|---|
 | `CUSTOM_IMAGE_REGISTRY` | Private registry hostname (leave blank for Docker Hub) |
-| `MINIKUBE_BASE_IMAGE` | Custom kicbase image with corporate certs pre-baked |
+| `MINIKUBE_BASE_IMAGE` | Full custom kicbase image reference, including registry/path/tag |
 | `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
 | `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
 | `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
 | `WEST_CPUS` / `WEST_MEMORY` | Cluster resource overrides |
 
-### Step 1: Deploy Clusters and FeatBit
+### Step 1: Build and Push FeatBit Images
+
+Build all five FeatBit service images from source, start the local Docker registry (if not
+running), and push the images to it:
+
+```powershell
+.\Initialize-LocalRegistry.ps1
+```
+
+To build only specific images:
+
+```powershell
+.\Initialize-LocalRegistry.ps1 -Images control-plane, evaluation-server
+```
+
+To preview what would happen without making any changes:
+
+```powershell
+.\Initialize-LocalRegistry.ps1 -WhatIf
+```
+
+**Estimated time:** 5–15 minutes (first build; subsequent builds are faster due to Docker layer caching)
+
+### Step 2: Deploy Clusters and FeatBit
 
 ```powershell
 .\Deploy-FeatBitClusters.ps1
@@ -127,7 +150,7 @@ To redeploy FeatBit without touching clusters: add `-SkipClusterCreation`.
 
 **Estimated time:** 5–10 minutes
 
-### Step 2: Start Port Forwards
+### Step 3: Start Port Forwards
 
 ```powershell
 .\Start-PortForwards.ps1
@@ -141,7 +164,7 @@ To stop all port forwards:
 .\Stop-PortForwards.ps1
 ```
 
-### Step 3: Initialize MongoDB Replica Set (in-cluster MongoDB only)
+### Step 4: Initialize MongoDB Replica Set (in-cluster MongoDB only)
 
 Skip this step if MongoDB is running on the host (`HostInfraComponents` includes `mongodb`) — it is already initialised by Docker Compose.
 
@@ -153,7 +176,7 @@ Run **after** port forwards are active:
 
 **Estimated time:** 1–2 minutes
 
-### Step 4: Access FeatBit
+### Step 5: Access FeatBit
 
 Open your browser to:
 - West Cluster: http://localhost:8081
@@ -163,7 +186,7 @@ Open your browser to:
 - Username: `test@featbit.com`
 - Password: `123456`
 
-### Step 5 (Optional): Setup Nginx Reverse Proxy
+### Step 6 (Optional): Setup Nginx Reverse Proxy
 
 For DNS name access instead of localhost ports. **Requires an Administrator PowerShell session.**
 
@@ -188,7 +211,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-HostInfraComponents` — Host Docker infra components in Basic mode (`redis`, `kafka`, `clickhouse`, and one of `mongodb` or `postgresql`)
 - `-WestCpus` / `-WestMemory` / `-EastCpus` / `-EastMemory` — Cluster resource overrides
 - `-CustomImageRegistry` — Private registry hostname
-- `-MinikubeBaseImage` — Custom kicbase image with corporate certs
+- `-MinikubeBaseImage` — Full custom kicbase image reference, including registry/path/tag
 
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
