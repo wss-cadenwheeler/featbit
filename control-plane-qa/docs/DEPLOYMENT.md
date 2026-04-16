@@ -157,15 +157,36 @@ Key settings (all optional — see comments in the file for defaults):
 | `INFRA_IMAGE_REPOSITORY` | Full registry path used to compute `MongoImage` and `PostgresImage` for `kubectl set image` calls. Defaults to `CUSTOM_IMAGE_REGISTRY/dockerhub/library` — override this whenever your proxy path does not end in `/dockerhub/library` (e.g. a Nexus proxy at `/repository/docker-proxy`). |
 | `FEATBIT_IMAGE_REGISTRY` | Registry hosting the FeatBit application images. Defaults to `host.minikube.internal:5000`. Set this only if your FeatBit images live on a different registry than your infra images. |
 | `CUSTOM_REGISTRY_USERNAME` / `CUSTOM_REGISTRY_PASSWORD` | Credentials for `CUSTOM_IMAGE_REGISTRY`. When set, the script automatically creates image pull secrets in both clusters. |
-| `MINIKUBE_BASE_IMAGE` | Custom kicbase image with corporate certs pre-baked |
+| `MINIKUBE_BASE_IMAGE` | Full custom kicbase image reference, including registry/path/tag (e.g. `harbor.example.com/ci/minikube:v0.0.50-corpca`) |
 | `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
 | `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
 | `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
 | `WEST_CPUS` / `WEST_MEMORY` | Cluster resource overrides |
 
-**Registry note:** `CUSTOM_IMAGE_REGISTRY` and `INFRA_IMAGE_REPOSITORY` serve different purposes and must both be set when using a proxy with a non-standard path. `CUSTOM_IMAGE_REGISTRY` rewrites image references in Kubernetes YAML files via `infra-image-map.json`. `INFRA_IMAGE_REPOSITORY` is used separately to construct the MongoDB and PostgreSQL image references passed directly to `kubectl set image`, which bypass the map. If only `CUSTOM_IMAGE_REGISTRY` is set, those references default to `CUSTOM_IMAGE_REGISTRY/dockerhub/library/...` which will be wrong for most proxies.
+### Step 1: Build and Push FeatBit Images
 
-### Step 1: Deploy Clusters and FeatBit
+Build all five FeatBit service images from source, start the local Docker registry (if not
+running), and push the images to it:
+
+```powershell
+.\Build-FeatBitImages.ps1
+```
+
+To build only specific images:
+
+```powershell
+.\Build-FeatBitImages.ps1 -Images control-plane, evaluation-server
+```
+
+To preview what would happen without making any changes:
+
+```powershell
+.\Build-FeatBitImages.ps1 -WhatIf
+```
+
+**Estimated time:** 5–15 minutes (first build; subsequent builds are faster due to Docker layer caching)
+
+### Step 2: Deploy Clusters and FeatBit
 
 ```powershell
 .\Deploy-FeatBitClusters.ps1
@@ -185,7 +206,7 @@ To redeploy FeatBit without touching clusters: add `-SkipClusterCreation`.
 
 **Estimated time:** 5–10 minutes
 
-### Step 2: Start Port Forwards
+### Step 3: Start Port Forwards
 
 ```powershell
 .\Start-PortForwards.ps1
@@ -199,7 +220,7 @@ To stop all port forwards:
 .\Stop-PortForwards.ps1
 ```
 
-### Step 3: Initialize MongoDB Replica Set (in-cluster MongoDB only)
+### Step 4: Initialize MongoDB Replica Set (in-cluster MongoDB only)
 
 Skip this step if MongoDB is running on the host (`HostInfraComponents` includes `mongodb`) — it is already initialised by Docker Compose.
 
@@ -211,7 +232,7 @@ Run **after** port forwards are active:
 
 **Estimated time:** 1–2 minutes
 
-### Step 4: Access FeatBit
+### Step 5: Access FeatBit
 
 Open your browser to:
 - West Cluster: http://localhost:8081
@@ -221,7 +242,7 @@ Open your browser to:
 - Username: `test@featbit.com`
 - Password: `123456`
 
-### Step 5 (Optional): Setup Nginx Reverse Proxy
+### Step 6 (Optional): Setup Nginx Reverse Proxy
 
 For DNS name access instead of localhost ports.
 
@@ -287,8 +308,9 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-DatabaseProvider` — `MongoDb` (default) or `Postgres`
 - `-HostInfraComponents` — Host Docker infra components in Basic mode (`redis`, `kafka`, `clickhouse`, and one of `mongodb` or `postgresql`)
 - `-WestCpus` / `-WestMemory` / `-EastCpus` / `-EastMemory` — Cluster resource overrides
-- `-CustomImageRegistry` — Private registry hostname
-- `-MinikubeBaseImage` — Custom kicbase image with corporate certs
+- `-CustomImageRegistry` — Private registry hostname for infrastructure images
+- `-FeatBitImageRegistry` — Registry hosting FeatBit application images (defaults to `host.minikube.internal:5000`)
+- `-MinikubeBaseImage` — Full custom kicbase image reference, including registry/path/tag
 
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
@@ -338,28 +360,6 @@ Keep the window open while using FeatBit. Port mappings are printed on startup.
 ```powershell
 .\Initialize-MongoDBReplicaSet.ps1
 ```
-
-### Setup-FeatBitProxy.ps1
-
-**Purpose:** Sets up an nginx reverse proxy with DNS names for local access. Requires elevated privileges (Administrator on Windows, root/sudo on Linux).
-
-**Parameters:**
-- `-NginxPath` — *(Windows only)* Path to nginx installation directory (default: `C:\nginx`)
-- `-SkipNginxInstall` — Skip nginx installation if already present
-
-**Examples:**
-```powershell
-# Full setup
-.\Setup-FeatBitProxy.ps1
-
-# Skip nginx installation (already installed)
-.\Setup-FeatBitProxy.ps1 -SkipNginxInstall
-
-# Windows: use nginx installed at a custom path
-.\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
-```
-
-On Linux, nginx config is written to `/etc/nginx/sites-available/featbit` and symlinked into `sites-enabled/`. nginx is managed via `systemctl`.
 
 ### Set-InfraImages.ps1
 
@@ -418,70 +418,33 @@ Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
 
 # Test with a specific environment server SDK key
 .\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
-```
 
 ### Configure-FeatBitIngress.ps1
 
 > **Deprecated.** This script is no longer part of the standard workflow. Use `Start-PortForwards.ps1` for service access. It is retained for reference only.
 
----
+### Setup-FeatBitProxy.ps1
+
+**Purpose:** Sets up nginx reverse proxy with DNS names. **Requires Administrator.**
+
+**Parameters:**
+- `-NginxPath` - Path to nginx installation (default: C:\nginx)
+- `-SkipNginxInstall` - Skip nginx installation if already present
+
+**Examples:**
+```powershell
+# Full setup (requires admin)
+.\Setup-FeatBitProxy.ps1
+
+# Use existing nginx installation
+.\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
+```
 
 ## Image Management
 
-### Infrastructure Image Versions and Docker Hub Namespaces
-
-The infrastructure images used by FeatBit (Kafka, Redis, ClickHouse, etc.) are pinned in `kubernetes/infra-image-map.json`. A few things to be aware of when updating versions or configuring a registry mirror:
-
-**Bitnami image namespace migration**
-
-Bitnami moved their Docker Hub images from the `bitnami/` namespace to `bitnamilegacy/`. Versioned tags under `bitnami/kafka`, `bitnami/redis`, etc. have been removed from Docker Hub and will return `manifest unknown`. Use `bitnamilegacy/kafka` and `bitnamilegacy/redis` instead:
-
-```json
-"bitnamilegacy/kafka:3.8": "bitnamilegacy/kafka:3.8",
-"bitnamilegacy/redis:7.2": "bitnamilegacy/redis:7.2"
-```
-
-If you are configuring a registry mirror (Nexus, Artifactory, Harbor), ensure it proxies `bitnamilegacy/` in addition to `bitnami/`. For Harbor the path is typically `dockerhub/bitnamilegacy/`.
-
-**Verifying an image tag exists before updating**
-
-Before bumping a version in `infra-image-map.json`, confirm the tag exists on Docker Hub:
-
-```bash
-docker manifest inspect bitnamilegacy/kafka:3.8
-docker manifest inspect redis:7.2
-```
-
-A `no such manifest` error means the tag does not exist and will cause `ImagePullBackOff` at deploy time.
-
----
-
-### Local Docker Registry
-
-FeatBit application images are served from a local Docker registry running on the host at `localhost:5000`. `Deploy-FeatBitClusters.ps1` manages this registry automatically:
-
-- If a container named `registry` is already stopped, it starts it.
-- If no `registry` container exists, it creates one:
-  ```
-  docker run -d --restart=always --name registry -p 5000:5000 registry:2
-  ```
-
-You do not need to start the registry manually. If you want to start or verify it independently:
-
-```powershell
-# Start (if container already exists)
-docker start registry
-
-# Or create from scratch
-docker run -d --restart=always --name registry -p 5000:5000 registry:2
-
-# Verify it is running
-docker ps --filter "name=registry"
-```
-
 ### Required Images
 
-The following FeatBit images must be available in the local registry before deploying:
+The following FeatBit images must be available in the local Docker registry at `localhost:5000/featbit/*`:
 
 - featbit-api-server:latest
 - featbit-ui:latest
@@ -489,32 +452,9 @@ The following FeatBit images must be available in the local registry before depl
 - featbit-control-plane:latest
 - featbit-data-analytics-server:latest
 
-### Building Images from Source
+### Pushing Images to Local Registry
 
-Use `Build-FeatBitImages.ps1` to build all images from the repository source and push them to the local registry in one step:
-
-```powershell
-# Build and push all images
-.\Build-FeatBitImages.ps1
-
-# Build specific images only
-.\Build-FeatBitImages.ps1 -Images api-server, control-plane
-
-# Build without pushing (local only)
-.\Build-FeatBitImages.ps1 -NoPush
-
-# Force rebuild even if images already exist locally
-.\Build-FeatBitImages.ps1 -Force
-
-# Preview what would be built without making changes
-.\Build-FeatBitImages.ps1 -WhatIf
-```
-
-The script starts the local registry automatically if it is not already running.
-
-### Pushing Pre-built Images to Local Registry
-
-If you have images already built (e.g. pulled from Docker Hub or another registry), tag and push them manually:
+If images are not in the local registry, tag and push them:
 
 ```powershell
 # Tag images
@@ -532,24 +472,21 @@ docker push localhost:5000/featbit/featbit-control-plane:latest
 docker push localhost:5000/featbit/featbit-data-analytics-server:latest
 ```
 
----
-
 ## Troubleshooting
 
-### Can't Connect to Cluster with kubectl
+### can't connect to cluster with kubectl
 
-If you get an error like:
-
+If you get an error similar to the following
 ```
-E0305 13:08:56.969153   36228 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: ..."
+E0305 13:08:56.969153   36228 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:32771/api?timeout=32s\": read tcp 127.0.0.1:55946->127.0.0.1:32771: wsarecv: An existing connection was forcibly closed by the remote host."
 ```
 
-Check the port numbers assigned to your cluster containers via `docker ps` against the ports in your kubeconfig file:
+or
+```
+E0305 13:17:37.244838   35172 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:32771/api?timeout=32s\": net/http: TLS handshake timeout"
+```
 
-- **Windows:** `%USERPROFILE%\.kube\config`
-- **Linux:** `~/.kube/config`
-
-Update the port in your kubeconfig if they don't match.
+Check the port numbers that have been assigned to your "cluster" pods using `docker ps` against the ports set in your %userprofile$/.kube/config file for the east and west cluster.  If needed set the correct port in your .kube/config file.
 
 ### Pods Not Starting
 
@@ -569,11 +506,7 @@ kubectl --context east logs <pod-name> -n featbit
 
 Verify images in local registry:
 ```powershell
-# Windows
-docker images | Select-String "localhost:5000/featbit"
-
-# Linux
-docker images | grep "localhost:5000/featbit"
+Invoke-RestMethod http://localhost:5000/v2/_catalog
 ```
 
 Test registry accessibility from Minikube:
@@ -586,116 +519,55 @@ minikube -p east ssh -- "curl -I http://host.minikube.internal:5000/v2/"
 
 List active port forwards:
 ```powershell
-# Windows
 Get-Process | Where-Object {$_.ProcessName -eq "kubectl"}
-
-# Linux
-pgrep -a kubectl
 ```
 
 Stop all port forwards:
 ```powershell
-# Windows
 Get-Process kubectl | Stop-Process
-
-# Linux
-pkill kubectl
 ```
 
 Restart port forwarding:
+
 ```powershell
 .\Start-PortForwards.ps1
 ```
-
-### ImagePullBackOff — `manifest unknown`
-
-If pods are stuck in `ImagePullBackOff` with `manifest unknown` in the events:
-
-```powershell
-kubectl --context west describe pod <pod-name> -n featbit | Select-String "Failed" -Context 3
-```
-
-This usually means the image tag does not exist at the registry being used. Common causes:
-
-- **Bitnami namespace migration**: `bitnami/kafka` and `bitnami/redis` versioned tags were removed from Docker Hub. Use `bitnamilegacy/kafka` and `bitnamilegacy/redis` instead (see [Infrastructure Image Versions](#infrastructure-image-versions-and-docker-hub-namespaces)).
-- **Tag not cached by proxy**: if using a registry mirror, the tag may not be cached yet. Try pulling it directly first: `docker pull <image>:<tag>`.
-- **Wrong registry path**: verify your `CUSTOM_IMAGE_REGISTRY` and `INFRA_IMAGE_REPOSITORY` settings match your proxy's actual path structure.
-
-### `Setup-FeatBitProxy.ps1` — kubectl context not found (Linux)
-
-When running `sudo pwsh ./Setup-FeatBitProxy.ps1`, kubectl runs as root, which uses `/root/.kube/config`. This file may not contain the `west` and `east` contexts. The script detects this automatically via `$SUDO_USER` and sets `KUBECONFIG` to the calling user's config. If you still see `error: context "west" does not exist`, run:
-
-```bash
-sudo KUBECONFIG=$HOME/.kube/config pwsh ./Setup-FeatBitProxy.ps1
-```
-
-### `apt-get update` warnings during nginx install (Linux)
-
-On systems with third-party APT repositories (e.g. printer or hardware vendor repos), `apt-get update` may print warnings about mismatched distributions. These are non-fatal — the script will proceed with the nginx install. If the nginx install itself fails, install it manually:
-
-```bash
-sudo apt-get install -y nginx
-```
-
-Then re-run `Setup-FeatBitProxy.ps1` — it will detect the existing nginx installation and skip the install step.
 
 ### Nginx Issues
 
 Check nginx status:
 ```powershell
-# Windows
 Get-Process nginx -ErrorAction SilentlyContinue
-
-# Linux
-sudo systemctl status nginx
 ```
 
 Test nginx configuration:
 ```powershell
-# Windows
-cd C:\nginx; .\nginx.exe -t
-
-# Linux
-sudo nginx -t
+cd C:\nginx
+.\nginx.exe -t
 ```
 
 View nginx logs:
 ```powershell
-# Windows
 Get-Content C:\nginx\logs\error.log -Tail 50
-
-# Linux
-sudo tail -50 /var/log/nginx/error.log
 ```
 
 Restart nginx:
 ```powershell
-# Windows
 Stop-Process -Name nginx
-cd C:\nginx; .\nginx.exe
-
-# Linux
-sudo systemctl restart nginx
+cd C:\nginx
+.\nginx.exe
 ```
 
 ### CORS Errors
 
 Ensure nginx is running and configured correctly:
 ```powershell
-# Windows
 Get-Process nginx
-
-# Linux
-sudo systemctl is-active nginx
 ```
 
 Verify hosts file entries:
 ```powershell
-# Windows
 Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String "featbit"
-
-# Linux
-grep "featbit" /etc/hosts
 ```
 
 Check UI environment variables:
@@ -707,11 +579,7 @@ kubectl --context west get deployment ui -n featbit -o yaml | Select-String "API
 
 Verify hosts file entries:
 ```powershell
-# Windows
 Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String "127.0.0.1"
-
-# Linux
-grep "127.0.0.1" /etc/hosts
 ```
 
 Test DNS resolution:
@@ -721,8 +589,6 @@ ping featbit.east.local
 ```
 
 Clear browser cache and restart browser if DNS changes don't take effect.
-
----
 
 ## Management Commands
 
@@ -764,6 +630,10 @@ kubectl --context east get pods -n featbit
 kubectl --context west get svc -n featbit
 kubectl --context east get svc -n featbit
 
+# View ingress
+kubectl --context west get ingress -n featbit
+kubectl --context east get ingress -n featbit
+
 # Describe pod
 kubectl --context west describe pod <pod-name> -n featbit
 
@@ -777,39 +647,27 @@ kubectl --context west rollout restart deployment <deployment-name> -n featbit
 ### Service Management
 
 ```powershell
-# Stop nginx (Windows)
+# Stop nginx
 Stop-Process -Name nginx
 
-# Stop nginx (Linux)
-# sudo systemctl stop nginx
+# Start nginx
+cd C:\nginx
+.\nginx.exe
 
-# Start nginx (Windows)
-cd C:\nginx; .\nginx.exe
+# Reload nginx configuration
+cd C:\nginx
+.\nginx.exe -s reload
 
-# Start nginx (Linux)
-# sudo systemctl start nginx
-
-# Reload nginx configuration (Windows)
-cd C:\nginx; .\nginx.exe -s reload
-
-# Reload nginx configuration (Linux)
-# sudo systemctl reload nginx
-
-# Stop port forwards (Windows)
+# Stop port forwards
 Get-Process kubectl | Stop-Process
-
-# Stop port forwards (Linux)
-# pkill kubectl
 
 # Check Docker registry
 docker ps --filter "name=registry"
 ```
 
----
-
 ## Complete Cleanup
 
-### Windows
+To completely remove everything:
 
 ```powershell
 # Stop nginx
@@ -831,31 +689,6 @@ choco uninstall nginx -y
 ```
 
 Then manually remove the FeatBit entries from `C:\Windows\System32\drivers\etc\hosts` (requires admin).
-
-### Linux
-
-```bash
-# Stop port forwards
-pkill kubectl
-
-# Stop nginx (if running)
-sudo systemctl stop nginx
-
-# Delete Minikube clusters
-minikube delete -p west
-minikube delete -p east
-
-# Stop Docker registry (optional)
-docker stop registry
-docker rm registry
-
-# Remove nginx proxy config (optional)
-sudo rm /etc/nginx/sites-enabled/featbit /etc/nginx/sites-available/featbit
-```
-
-Then manually remove the FeatBit entries from `/etc/hosts` (requires sudo).
-
----
 
 ## Architecture Details
 
@@ -879,7 +712,7 @@ Each cluster runs:
 
 ### Network Flow
 
-1. Browser requests `http://featbit.west.local` *(nginx proxy, Windows only)*
+1. Browser requests `http://featbit.west.local`
 2. DNS resolves to `127.0.0.1` (via hosts file)
 3. Nginx receives request on port 80
 4. Nginx proxies to `localhost:8081` (kubectl port-forward)
@@ -889,7 +722,9 @@ Each cluster runs:
 
 The nginx proxy adds CORS headers automatically, eliminating cross-origin issues.
 
----
+## License
+
+See repository LICENSE file.
 
 ## Support
 

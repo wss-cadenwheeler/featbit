@@ -22,12 +22,27 @@ param(
     [string]$EnvFile = ""
 )
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$resolved = if ($EnvFile) { $EnvFile } else { Join-Path $repoRoot "deployment.env" }
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot  = Split-Path -Parent $scriptDir
 
-if (-not (Test-Path $resolved)) {
+# Resolve the env file path. Search order:
+#   1. Explicit -EnvFile argument.
+#   2. deployment.env next to the scripts (control-plane-qa/).
+#   3. deployment.env at the repository root.
+if ($EnvFile) {
+    $resolved = $EnvFile
+}
+elseif (Test-Path (Join-Path $scriptDir "deployment.env")) {
+    $resolved = Join-Path $scriptDir "deployment.env"
+}
+elseif (Test-Path (Join-Path $repoRoot "deployment.env")) {
+    $resolved = Join-Path $repoRoot "deployment.env"
+}
+else {
     return @{}
 }
+
+Write-Host "  Loading deployment config from: $resolved" -ForegroundColor DarkGray
 
 # Parse KEY=VALUE lines.
 $raw = @{}
