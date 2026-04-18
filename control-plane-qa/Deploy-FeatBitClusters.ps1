@@ -160,6 +160,24 @@ function Write-Error {
     Write-Host "✗ $Message" -ForegroundColor Red
 }
 
+function Invoke-WithRetry {
+    param(
+        [scriptblock]$Action,
+        [int]$MaxAttempts  = 3,
+        [int]$DelaySeconds = 15,
+        [string]$Description = "operation"
+    )
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        & $Action
+        if ($LASTEXITCODE -eq 0) { return }
+        if ($i -lt $MaxAttempts) {
+            Write-Warning "Attempt $i/$MaxAttempts failed for $Description. Retrying in ${DelaySeconds}s..."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    throw "All $MaxAttempts attempts failed for $Description."
+}
+
 # Loads the infrastructure image map from the JSON file.
 # Automatically merges infra-image-map.local.json (gitignored) on top of the
 # base map so users can override registry paths without touching committed files.
@@ -724,6 +742,36 @@ else {
     Write-Success "Docker registry is running"
 }
 
+# Determine effective registries for infra images.
+# When no CustomImageRegistry is configured but infra images have been pre-seeded into
+# localhost:5000 via Seed-LocalRegistry.ps1, route all infra pulls through the local
+# registry to avoid Docker Hub rate limits.
+# Two URLs are needed because docker-compose runs on the host (localhost:5000) while
+# Kubernetes pods inside minikube reach the host registry via host.minikube.internal:5000.
+$effectiveInfraRegistryHost    = $CustomImageRegistry
+$effectiveInfraRegistryCluster = $CustomImageRegistry
+
+if (-not $CustomImageRegistry -and $infraImageMap) {
+    $sampleImage = ($infraImageMap.Keys | Select-Object -First 1)
+    $seeded = docker images --format "{{.Repository}}:{{.Tag}}" |
+              Select-String -SimpleMatch "localhost:5000/$sampleImage"
+    if ($seeded) {
+        $effectiveInfraRegistryHost    = "localhost:5000"
+        $effectiveInfraRegistryCluster = "host.minikube.internal:5000"
+        Write-Info "Infra images found in local registry — routing pulls through localhost:5000"
+    }
+}
+
+# Fix MongoImage/PostgresImage that result from a blank InfraImageRepository.
+# When both InfraImageRepository and CustomImageRegistry are unset, the interpolation
+# "$InfraImageRepository/mongo:7.0" produces "/mongo:7.0" which is invalid.
+if ($MongoImage.StartsWith("/")) {
+    $MongoImage = if ($effectiveInfraRegistryCluster) { "$effectiveInfraRegistryCluster/mongo:7.0" } else { "mongo:7.0" }
+}
+if ($PostgresImage.StartsWith("/")) {
+    $PostgresImage = if ($effectiveInfraRegistryCluster) { "$effectiveInfraRegistryCluster/postgres:15.10" } else { "postgres:15.10" }
+}
+
 if (-not $SkipImageCheck) {
     Write-Info "Checking required images in local registry..."
     $requiredImages = @(
@@ -916,7 +964,7 @@ else {
 if ($DeploymentMode -eq "Basic") {
     Write-Step "Starting Host Infrastructure"
     Start-HostInfrastructure -Components $hostComponentSet -RepositoryRoot $scriptPath `
-        -CustomImageRegistry $CustomImageRegistry -ImageMap $infraImageMap
+        -CustomImageRegistry $effectiveInfraRegistryHost -ImageMap $infraImageMap
 
     Write-Step "Configuring Host Bridge Services"
     foreach ($clusterContext in @("west", "east")) {
@@ -954,7 +1002,7 @@ else {
             foreach ($filePattern in $infraPatternByComponent[$componentName]) {
                 Get-ChildItem ".\infrastructure\$filePattern" | ForEach-Object {
                     Invoke-KubectlApplyFile -Context $clusterContext -FilePath $_.FullName `
-                        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+                        -Namespace "featbit" -Registry $effectiveInfraRegistryCluster -ImageMap $infraImageMap
                 }
             }
         }
@@ -1024,13 +1072,13 @@ $imagePullSecretPatch = @{
     Write-Info "Deploying MongoDB ConfigMap..."
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-init-configMap.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $effectiveInfraRegistryCluster -ImageMap $infraImageMap
     Write-Success "MongoDB ConfigMap deployed"
 
     Write-Info "Deploying MongoDB to west cluster (2 replicas)..."
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-west-statefulset.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $effectiveInfraRegistryCluster -ImageMap $infraImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB west StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
@@ -1041,7 +1089,7 @@ $imagePullSecretPatch = @{
     Write-Info "Deploying MongoDB to east cluster (1 replica)..."
     Invoke-KubectlApplyFile -Context "east" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-east-statefulset.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $effectiveInfraRegistryCluster -ImageMap $infraImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB east StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
