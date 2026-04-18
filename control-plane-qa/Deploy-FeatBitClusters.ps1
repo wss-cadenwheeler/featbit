@@ -122,6 +122,11 @@ if (-not $InfraImageRepository -and $CustomImageRegistry) {
     $InfraImageRepository = "$CustomImageRegistry/dockerhub/library"
 }
 
+# TODO: InfraImageRepository bypasses infra-image-map.json entirely — MongoImage/PostgresImage
+# are resolved here before the map is loaded, so any library/ prefix remappings in the map are
+# ignored when InfraImageRepository is set explicitly. Options: (a) resolve these images through
+# the map as well, or (b) deprecate InfraImageRepository in favour of always using
+# CustomImageRegistry + map, which already handles per-image path remapping correctly.
 if (-not $MongoImage) {
     $MongoImage = "$InfraImageRepository/mongo:7.0"
 }
