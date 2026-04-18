@@ -476,7 +476,14 @@ function Ensure-SharedClusterNetwork {
     docker network inspect $NetworkName 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Info "Shared cluster network already exists: $NetworkName"
-        return
+        $actualSubnet = docker network inspect $NetworkName --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not $actualSubnet) {
+            throw "Failed to inspect existing network '$NetworkName' to determine subnet."
+        }
+        if ($actualSubnet -ne $Subnet) {
+            Write-Warning "Existing network subnet ($actualSubnet) differs from expected ($Subnet). Using actual subnet."
+        }
+        return $actualSubnet
     }
 
     Write-Info "Creating shared cluster network: $NetworkName ($Subnet)"
@@ -486,6 +493,7 @@ function Ensure-SharedClusterNetwork {
     }
 
     Write-Success "Shared cluster network ready: $NetworkName"
+    return $Subnet
 }
 
 function Connect-ClusterToSharedNetwork {
@@ -844,13 +852,19 @@ foreach ($clusterContext in @("west", "east")) {
 Write-Success "Both clusters are reachable"
 
 Write-Step "Configuring Shared Cluster Network"
-Ensure-SharedClusterNetwork -NetworkName $sharedClusterNetwork -Subnet $sharedClusterSubnet
-Connect-ClusterToSharedNetwork -ClusterName "west" -NetworkName $sharedClusterNetwork -NodeIp $westSharedClusterIp
-Connect-ClusterToSharedNetwork -ClusterName "east" -NetworkName $sharedClusterNetwork -NodeIp $eastSharedClusterIp
+$actualSubnet = Ensure-SharedClusterNetwork -NetworkName $sharedClusterNetwork -Subnet $sharedClusterSubnet
+
+$subnetBase = ($actualSubnet -split '/')[0]
+$octets = $subnetBase -split '\.'
+$westIp = "$($octets[0]).$($octets[1]).$($octets[2]).10"
+$eastIp  = "$($octets[0]).$($octets[1]).$($octets[2]).20"
+
+Connect-ClusterToSharedNetwork -ClusterName "west" -NetworkName $sharedClusterNetwork -NodeIp $westIp
+Connect-ClusterToSharedNetwork -ClusterName "east" -NetworkName $sharedClusterNetwork -NodeIp $eastIp
 
 Write-Info "Configuring cross-cluster pod masquerade rules..."
-Set-CrossClusterMasqueradeRules -ClusterName "west" -SharedNetworkSubnet $sharedClusterSubnet
-Set-CrossClusterMasqueradeRules -ClusterName "east" -SharedNetworkSubnet $sharedClusterSubnet
+Set-CrossClusterMasqueradeRules -ClusterName "west" -SharedNetworkSubnet $actualSubnet
+Set-CrossClusterMasqueradeRules -ClusterName "east" -SharedNetworkSubnet $actualSubnet
 
 Write-Step "Refreshing Kubeconfig"
 Write-Info "Refreshing kubeconfig context endpoints for west/east clusters..."
