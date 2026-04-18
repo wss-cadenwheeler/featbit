@@ -1,0 +1,669 @@
+<#
+.SYNOPSIS
+    Full quickstart wizard for FeatBit Pro — run INSIDE a WSL2 Linux distro.
+
+.DESCRIPTION
+    This wizard is intended to be executed from a PowerShell 7 session running
+    *inside* a WSL2 distribution (e.g. Ubuntu), not from Windows PowerShell.
+    Running the deployment inside WSL gives the Linux kernel direct access to
+    iptables, which is required for cross-cluster Minikube pod networking
+    (MongoDB replica set between the west and east clusters).
+
+    The script is resumable: completed phases are saved to
+    .quickstart-state-wsl.json in this directory and skipped on subsequent
+    runs, so you can re-run after an interruption and pick up where you left off.
+
+    Phases (in order):
+      1. ensure-pwsh        — verify PowerShell 7+ is active on Linux
+      2. system-prereqs     — install git via apt                     [root]
+      3. dev-tools          — Docker Engine, Minikube, kubectl, k9s (optional)
+      4. repo-setup         — clone repo, checkout control-plane, configure deployment.env
+      5. build-images       — build FeatBit images and push to localhost:5000  (~10-15 min)
+      6. proxy-first-run    — first run of Setup-FeatBitProxy.ps1     [root]
+      7. deploy-clusters    — Deploy-FeatBitClusters.ps1 Advanced + MongoDB   (~20 min)
+      8. proxy-second-run   — second run of Setup-FeatBitProxy.ps1    [root]
+      9. port-forwards      — instructions + launch Start-PortForwards.ps1
+     10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
+
+    Run the wizard as your normal user (NOT sudo). Phases that need root
+    (apt install, nginx, /etc/hosts) call sudo themselves. Minikube's docker
+    driver refuses to run as root, so the wizard refuses too.
+
+.PARAMETER Reset
+    Clears the saved progress state and starts from the beginning.
+
+.PARAMETER SkipOptional
+    Skips optional installations (k9s).
+
+.EXAMPLE
+    pwsh ./Quickstart-WSL.ps1
+    Run (or resume) the wizard. You will be prompted for sudo as needed.
+
+.EXAMPLE
+    pwsh ./Quickstart-WSL.ps1 -Reset
+    Wipe saved progress and start over.
+#>
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [switch]$Reset,
+    [switch]$SkipOptional
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# This wizard is Linux-only. The sibling Quickstart-HyperV.ps1 covers Windows.
+if (-not $IsLinux) {
+    Write-Host ""
+    Write-Host "  ✗ Quickstart-WSL.ps1 must be run from inside a WSL2 Linux distro." -ForegroundColor Red
+    Write-Host ""
+    if ($IsWindows) {
+        Write-Host "  You appear to be on Windows PowerShell. Either:" -ForegroundColor Yellow
+        Write-Host "    • Open a WSL2 terminal, install pwsh, and re-run this script from there, or" -ForegroundColor Gray
+        Write-Host "    • Use ..\Quickstart-HyperV.ps1 for a pure-Windows (Hyper-V) deployment." -ForegroundColor Gray
+    } else {
+        Write-Host "  This script expects a Linux environment (\$IsLinux = true)." -ForegroundColor Gray
+    }
+    Write-Host ""
+    exit 1
+}
+
+# Minikube's docker driver refuses root, and state written as root leaves stale
+# certs in /root/.minikube and container volumes — subsequent non-root runs fail
+# with "certificate signed by unknown authority". Require a normal user and
+# escalate per-command via sudo.
+if (((id -u) -as [int]) -eq 0) {
+    Write-Host ""
+    Write-Host "  ✗ Do not run this wizard as root (or via sudo)." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Minikube's docker driver refuses root, and running as root writes" -ForegroundColor Gray
+    Write-Host "  state to /root/.minikube that corrupts later non-root runs with" -ForegroundColor Gray
+    Write-Host "  'certificate signed by unknown authority' errors." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Re-run as your normal user:" -ForegroundColor Yellow
+    Write-Host "    pwsh $PSCommandPath" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  The wizard will invoke sudo itself for phases that need it." -ForegroundColor Gray
+    Write-Host ""
+    exit 1
+}
+
+$script:StateFile  = Join-Path $PSScriptRoot ".quickstart-state-wsl.json"
+$script:SiblingDir = Split-Path $PSScriptRoot -Parent  # control-plane-qa/
+
+# ── Console helpers ────────────────────────────────────────────────────────────
+
+function Write-Step    { param([string]$M) Write-Host "`n════════════════════════════════════════════════════════════" -ForegroundColor DarkCyan
+                         Write-Host "  $M" -ForegroundColor Cyan
+                         Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor DarkCyan }
+function Write-Success { param([string]$M) Write-Host "  ✓ $M" -ForegroundColor Green }
+function Write-Info    { param([string]$M) Write-Host "  $M" -ForegroundColor Gray }
+function Write-Warn    { param([string]$M) Write-Host "  ⚠ $M" -ForegroundColor Yellow }
+function Write-Fail    { param([string]$M) Write-Host "  ✗ $M" -ForegroundColor Red }
+function Write-Banner  {
+    Write-Host ""
+    Write-Host "  ███████╗███████╗ █████╗ ████████╗██████╗ ██╗████████╗" -ForegroundColor Cyan
+    Write-Host "  ██╔════╝██╔════╝██╔══██╗╚══██╔══╝██╔══██╗██║╚══██╔══╝" -ForegroundColor Cyan
+    Write-Host "  █████╗  █████╗  ███████║   ██║   ██████╔╝██║   ██║   " -ForegroundColor Cyan
+    Write-Host "  ██╔══╝  ██╔══╝  ██╔══██║   ██║   ██╔══██╗██║   ██║   " -ForegroundColor Cyan
+    Write-Host "  ██║     ███████╗██║  ██║   ██║   ██████╔╝██║   ██║   " -ForegroundColor Cyan
+    Write-Host "  ╚═╝     ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═════╝ ╚═╝   ╚═╝   " -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Quickstart Wizard — inside WSL2 (Linux)" -ForegroundColor White
+    Write-Host "  This script is resumable. Re-run it to continue from the last phase." -ForegroundColor Gray
+    Write-Host ""
+}
+
+# ── State management ──────────────────────────────────────────────────────────
+
+function Get-State {
+    if (Test-Path $script:StateFile) {
+        return Get-Content $script:StateFile -Raw | ConvertFrom-Json
+    }
+    return [PSCustomObject]@{
+        completedPhases = @()
+        lastUpdated     = ""
+    }
+}
+
+function Save-State([PSCustomObject]$State) {
+    $State.lastUpdated = (Get-Date -Format "o")
+    $State | ConvertTo-Json -Depth 5 | Set-Content $script:StateFile -Encoding UTF8
+}
+
+function Test-PhaseComplete([PSCustomObject]$State, [string]$Phase) {
+    return $State.completedPhases -contains $Phase
+}
+
+function Complete-Phase([PSCustomObject]$State, [string]$Phase) {
+    if ($State.completedPhases -notcontains $Phase) {
+        $State.completedPhases = @($State.completedPhases) + $Phase
+    }
+    Save-State $State
+}
+
+# ── Pause helpers ─────────────────────────────────────────────────────────────
+
+function Wait-UserConfirm([string]$Prompt = "Press Enter to continue...") {
+    Write-Host ""
+    Write-Host "  ► $Prompt" -ForegroundColor Yellow -NoNewline
+    $null = Read-Host
+}
+
+function Wait-UserChoice([string]$Prompt, [string[]]$Choices) {
+    do {
+        Write-Host "  ► $Prompt [$(($Choices | ForEach-Object { $_.ToUpper() }) -join '/')] " -ForegroundColor Yellow -NoNewline
+        $r = (Read-Host).Trim().ToLower()
+    } while ($r -notin $Choices)
+    return $r
+}
+
+# ── Phase implementations ─────────────────────────────────────────────────────
+
+function Invoke-EnsurePwsh {
+    Write-Step "Phase 1 — Verify PowerShell 7+"
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Fail "This script must run in PowerShell 7+.  You are running $($PSVersionTable.PSVersion)."
+        Write-Info ""
+        Write-Info "Install PowerShell 7 in WSL (Ubuntu example):"
+        Write-Info "  sudo snap install powershell --classic"
+        Write-Info "Or follow Microsoft's apt-based instructions at:"
+        Write-Info "  https://learn.microsoft.com/powershell/scripting/install/install-ubuntu"
+        Write-Info ""
+        Write-Info "Then open a new 'pwsh' session and re-run this script."
+        exit 1
+    }
+    Write-Success "PowerShell $($PSVersionTable.PSVersion) — OK"
+}
+
+function Invoke-SystemPrereqs([PSCustomObject]$State) {
+    Write-Step "Phase 2 — System Prerequisites (git)"
+
+    $gitInstalled = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitInstalled) {
+        Write-Success "Git is already installed ($((git --version) -replace 'git version ', ''))"
+    } else {
+        Write-Info "Installing git via sudo apt-get..."
+        if ($PSCmdlet.ShouldProcess("git", "sudo apt-get install")) {
+            & sudo apt-get update
+            if ($LASTEXITCODE -ne 0) { throw "sudo apt-get update failed" }
+            & sudo apt-get install -y git
+            if ($LASTEXITCODE -ne 0) { throw "git installation failed" }
+        }
+        Write-Success "Git installed"
+    }
+
+    Complete-Phase $State "system-prereqs"
+    Write-Success "System prerequisites complete"
+}
+
+function Invoke-DevTools([PSCustomObject]$State) {
+    Write-Step "Phase 3 — Developer Tools (Docker, Minikube, kubectl)"
+
+    Write-Info "Calling Install-Prerequisites.ps1 (Linux mode: apt + direct downloads)..."
+    $prereqScript = Join-Path $script:SiblingDir "Install-Prerequisites.ps1"
+    if (-not (Test-Path $prereqScript)) { throw "Install-Prerequisites.ps1 not found at $prereqScript" }
+    & $prereqScript
+    if ($LASTEXITCODE -ne 0) { throw "Install-Prerequisites.ps1 failed" }
+
+    if (-not $SkipOptional) {
+        $k9s = Get-Command k9s -ErrorAction SilentlyContinue
+        if ($k9s) {
+            Write-Success "k9s is already installed"
+        } elseif (Get-Command snap -ErrorAction SilentlyContinue) {
+            Write-Info "Installing k9s via sudo snap (optional, useful for troubleshooting)..."
+            if ($PSCmdlet.ShouldProcess("k9s", "sudo snap install")) {
+                & sudo snap install k9s
+                if ($LASTEXITCODE -eq 0) { Write-Success "k9s installed" }
+                else { Write-Warn "sudo snap install k9s exited $LASTEXITCODE — skipping" }
+            }
+        } else {
+            Write-Warn "snap not available — skipping k9s. See https://k9scli.io/ for install options."
+        }
+    }
+
+    Complete-Phase $State "dev-tools"
+    Write-Success "Developer tools ready"
+    Write-Warn "Ensure the Docker daemon is running before continuing (e.g. 'sudo service docker start' or enable systemd in WSL)."
+    Wait-UserConfirm "Press Enter once 'docker ps' succeeds..."
+}
+
+function Invoke-RepoSetup([PSCustomObject]$State) {
+    Write-Step "Phase 4 — Repository Setup"
+
+    # windows-wsl → control-plane-qa → repo root
+    $repoRoot = $null
+    $candidate = Split-Path -Parent $script:SiblingDir
+    if (Test-Path (Join-Path $candidate ".git")) {
+        $repoRoot = $candidate
+        Write-Success "Already inside repo: $repoRoot"
+    } else {
+        Write-Info "Repository not found at expected location."
+        $defaultBase = Join-Path $HOME "source"
+        Write-Info "Enter the directory where you want to clone the repository"
+        Write-Info "(default: $defaultBase)"
+        Write-Host "  ► Clone location: " -ForegroundColor Yellow -NoNewline
+        $cloneBase = (Read-Host).Trim()
+        if (-not $cloneBase) { $cloneBase = $defaultBase }
+        if (-not (Test-Path $cloneBase)) { New-Item $cloneBase -ItemType Directory -Force | Out-Null }
+
+        $repoDir = Join-Path $cloneBase "featbit"
+        if (-not (Test-Path $repoDir)) {
+            Write-Info "Cloning repository..."
+            git clone https://github.com/wss-cadenwheeler/featbit "$repoDir"
+            if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
+        }
+        $repoRoot = $repoDir
+        Write-Success "Repository at $repoRoot"
+    }
+
+    Push-Location $repoRoot
+    try {
+        $currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+        if ($currentBranch -ne "control-plane") {
+            Write-Info "Switching to control-plane branch..."
+            git fetch origin control-plane
+            git checkout control-plane
+            if ($LASTEXITCODE -ne 0) { throw "Failed to checkout control-plane" }
+        }
+        Write-Success "On branch: control-plane"
+    } finally {
+        Pop-Location
+    }
+
+    $qaDir  = Join-Path $repoRoot "control-plane-qa"
+    $envDst = Join-Path $qaDir "deployment.env"
+    $envEx  = Join-Path $qaDir "deployment.env.example"
+    if (-not (Test-Path $envDst)) {
+        if (Test-Path $envEx) {
+            Copy-Item $envEx $envDst
+            Write-Success "Created deployment.env from example"
+        } else {
+            Write-Warn "deployment.env.example not found — create deployment.env manually in $qaDir"
+        }
+    } else {
+        Write-Success "deployment.env already exists"
+    }
+
+    Write-Warn "IMPORTANT: Review and configure deployment.env before continuing."
+    Write-Info "File path: $envDst"
+    Write-Info ""
+    Write-Info "Key settings to verify:"
+    Write-Info "  • CUSTOM_IMAGE_REGISTRY  — leave blank to pull from Docker Hub"
+    Write-Info "  • WEST_CPUS / WEST_MEMORY, EAST_CPUS / EAST_MEMORY  — match your WSL2 capacity"
+    Write-Info "  • DEPLOYMENT_MODE        — set to Advanced for this quickstart"
+    Write-Info "  • DATABASE_PROVIDER      — set to MongoDb for this quickstart"
+    Write-Info ""
+    $editor = if ($env:EDITOR) { $env:EDITOR } else { "nano" }
+    Write-Info "Edit it now with your preferred editor, e.g.:"
+    Write-Info "  $editor $envDst"
+    Wait-UserConfirm "Press Enter when you have finished configuring deployment.env..."
+
+    Complete-Phase $State "repo-setup"
+    Write-Success "Repository configured"
+}
+
+function Invoke-BuildImages([PSCustomObject]$State) {
+    Write-Step "Phase 5 — Build and Push FeatBit Images  (~10-15 minutes)"
+    Write-Info "This builds all 5 FeatBit service images from source and pushes them"
+    Write-Info "to the local Docker registry at localhost:5000."
+    Write-Info ""
+
+    $initScript = Join-Path $script:SiblingDir "Initialize-LocalRegistry.ps1"
+    if (-not (Test-Path $initScript)) { throw "Initialize-LocalRegistry.ps1 not found at $initScript" }
+
+    if ($PSCmdlet.ShouldProcess("FeatBit images", "Build and push to localhost:5000")) {
+        & $initScript
+        if ($LASTEXITCODE -ne 0) { throw "Initialize-LocalRegistry.ps1 failed" }
+    }
+
+    Complete-Phase $State "build-images"
+    Write-Success "All FeatBit images built and pushed to localhost:5000"
+}
+
+function Invoke-ProxyFirstRun([PSCustomObject]$State) {
+    Write-Step "Phase 6 — Nginx Proxy First Run"
+
+    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh (first run)."
+    Write-Warn "Some failures on the first run are expected — that is normal."
+    Write-Info "The proxy will be fully configured after the second run (Phase 8)."
+    Write-Info ""
+
+    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
+    if (-not (Test-Path $proxyScript)) { throw "Setup-FeatBitProxy.ps1 not found at $proxyScript" }
+
+    if ($PSCmdlet.ShouldProcess("nginx proxy", "First run setup")) {
+        & sudo pwsh -File $proxyScript
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Setup-FeatBitProxy.ps1 exited with code $LASTEXITCODE (expected on first run)"
+        }
+    }
+
+    Complete-Phase $State "proxy-first-run"
+    Write-Success "Proxy first run complete"
+}
+
+function Repair-ClusterNetwork {
+    # Defensive: Initialize-LocalRegistry.ps1 historically created featbit-cluster-network
+    # without --subnet, causing Docker to auto-assign one (e.g. 172.18.0.0/16).
+    # Deploy-FeatBitClusters.ps1 hard-codes 172.19.0.10 / 172.19.0.20 for the clusters,
+    # so an auto-assigned subnet breaks cluster attachment. Detect & fix before deploying.
+    $name       = "featbit-cluster-network"
+    $wantSubnet = "172.19.0.0/16"
+
+    $exists = & docker network ls --filter "name=^$name$" --format "{{.Name}}" 2>$null
+    if (-not $exists) {
+        Write-Info "Network '$name' does not exist yet — the deploy script will create it."
+        return
+    }
+
+    $currentSubnet = ((& docker network inspect $name --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>$null) | Out-String).Trim()
+    if ($currentSubnet -eq $wantSubnet) {
+        Write-Success "Network '$name' already has correct subnet $wantSubnet"
+        return
+    }
+
+    Write-Warn "Network '$name' has subnet '$currentSubnet' — expected '$wantSubnet'. Recreating..."
+
+    $attached = ((& docker network inspect $name --format '{{range .Containers}}{{.Name}} {{end}}' 2>$null) | Out-String).Trim()
+    $containers = if ($attached) { $attached -split '\s+' | Where-Object { $_ } } else { @() }
+
+    foreach ($c in $containers) {
+        Write-Info "  Disconnecting '$c' from '$name'..."
+        & docker network disconnect $name $c 2>$null | Out-Null
+    }
+
+    Write-Info "  Removing network '$name'..."
+    & docker network rm $name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to remove network '$name' — manual cleanup required" }
+
+    Write-Info "  Creating network '$name' with subnet $wantSubnet..."
+    & docker network create --driver bridge --subnet $wantSubnet $name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create network '$name' with subnet $wantSubnet" }
+
+    foreach ($c in $containers) {
+        Write-Info "  Reconnecting '$c' to '$name'..."
+        & docker network connect $name $c 2>$null | Out-Null
+    }
+
+    # Disconnect/reconnect leaves docker's published-port proxy in a wedged state
+    # (listener bound, packets don't reach the container). Restart affected
+    # containers so port forwarding is re-initialized.
+    foreach ($c in $containers) {
+        Write-Info "  Restarting '$c' to refresh port forwarding..."
+        & docker restart $c 2>$null | Out-Null
+    }
+
+    Write-Success "Network '$name' recreated with subnet $wantSubnet"
+}
+
+function Show-DeploymentEnvSummary {
+    # Surface the deployment.env values Deploy-FeatBitClusters.ps1 will pick up,
+    # so the user can confirm their edits are in effect before a 20-min deploy.
+    $envFile = Join-Path $script:SiblingDir "deployment.env"
+    if (-not (Test-Path $envFile)) {
+        Write-Warn "deployment.env not found at $envFile — script defaults will be used."
+        return
+    }
+
+    $keys = @{}
+    foreach ($line in Get-Content $envFile) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith("#")) { continue }
+        $i = $t.IndexOf("=")
+        if ($i -lt 1) { continue }
+        $keys[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
+    }
+
+    Write-Info "Effective deployment.env settings ($envFile):"
+    foreach ($k in @("DEPLOYMENT_MODE","DATABASE_PROVIDER","CUSTOM_IMAGE_REGISTRY","MINIKUBE_BASE_IMAGE","WEST_CPUS","WEST_MEMORY","EAST_CPUS","EAST_MEMORY")) {
+        if ($keys.ContainsKey($k)) {
+            Write-Info ("  {0,-24} = {1}" -f $k, $keys[$k])
+        } else {
+            Write-Info ("  {0,-24} = (default — not set in deployment.env)" -f $k)
+        }
+    }
+    Write-Info ""
+}
+
+function Invoke-DeployClusters([PSCustomObject]$State) {
+    Write-Step "Phase 7 — Deploy FeatBit Clusters  (~20 minutes)"
+    Write-Info "Creates the west and east Minikube clusters, then deploys FeatBit."
+    Write-Info "Deployment mode, database, CPU/memory, and image registry are all"
+    Write-Info "driven by deployment.env (no overrides from this wizard)."
+    Write-Info ""
+    Write-Warn "This is the longest phase. Do not interrupt it."
+    Write-Info ""
+
+    Show-DeploymentEnvSummary
+    Repair-ClusterNetwork
+
+    $deployScript = Join-Path $script:SiblingDir "Deploy-FeatBitClusters.ps1"
+    if (-not (Test-Path $deployScript)) { throw "Deploy-FeatBitClusters.ps1 not found at $deployScript" }
+
+    if ($PSCmdlet.ShouldProcess("west + east clusters", "Deploy FeatBit per deployment.env")) {
+        & $deployScript -RecreateClusters
+        if ($LASTEXITCODE -ne 0) { throw "Deploy-FeatBitClusters.ps1 failed with exit code $LASTEXITCODE" }
+    }
+
+    Complete-Phase $State "deploy-clusters"
+    Write-Success "Clusters deployed successfully"
+}
+
+function Invoke-ProxySecondRun([PSCustomObject]$State) {
+    Write-Step "Phase 8 — Nginx Proxy Second Run"
+
+    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh a second time to apply"
+    Write-Info "the cluster endpoints that were created in the previous phase."
+    Write-Info ""
+
+    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
+    if ($PSCmdlet.ShouldProcess("nginx proxy", "Second run setup")) {
+        & sudo pwsh -File $proxyScript
+        if ($LASTEXITCODE -ne 0) { throw "Setup-FeatBitProxy.ps1 failed on second run" }
+    }
+
+    Complete-Phase $State "proxy-second-run"
+    Write-Success "Proxy fully configured"
+}
+
+function Stop-StalePortForwards {
+    # Clears any leftover Start-PortForwards.ps1 supervisors and their kubectl
+    # port-forward workers. They're usually root-owned (Setup-FeatBitProxy.ps1
+    # starts some under sudo), so we use sudo pkill.
+    # Parents must die before children, otherwise the supervisor respawns them.
+    $svcCount = @(& pgrep -f 'Start-PortForwards\.ps1' 2>$null).Count
+    $pfCount  = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
+
+    if ($svcCount -eq 0 -and $pfCount -eq 0) {
+        Write-Success "No stale port-forward processes found."
+        return
+    }
+
+    Write-Info "Cleaning up stale port-forward processes..."
+    if ($svcCount -gt 0) {
+        Write-Info "  Stopping $svcCount Start-PortForwards supervisor(s) (sudo)..."
+        & sudo pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+    }
+
+    $pfCount = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
+    if ($pfCount -gt 0) {
+        Write-Info "  Stopping $pfCount kubectl port-forward worker(s) (sudo)..."
+        & sudo pkill -f 'kubectl.*port-forward' 2>$null | Out-Null
+        Start-Sleep -Seconds 1
+    }
+
+    $remaining = @(& pgrep -f 'kubectl.*port-forward|Start-PortForwards\.ps1' 2>$null)
+    if ($remaining.Count -gt 0) {
+        Write-Warn "  $($remaining.Count) process(es) still running after cleanup — may need manual kill: $($remaining -join ', ')"
+    } else {
+        Write-Success "All stale port-forwards cleared."
+    }
+}
+
+function Invoke-PortForwards([PSCustomObject]$State) {
+    Write-Step "Phase 9 — Start Port Forwards"
+    Write-Info "Port forwards must run in a separate terminal and stay open while"
+    Write-Info "you are using FeatBit."
+    Write-Info ""
+
+    Stop-StalePortForwards
+
+    Write-Info ""
+    Write-Info "Port mappings:"
+    Write-Info "  UI:          http://localhost:8081 (west)   http://localhost:8082 (east)"
+    Write-Info "  API:         http://localhost:15000 (west)  http://localhost:15001 (east)"
+    Write-Info "  Evaluation:  http://localhost:5100 (west)   http://localhost:5101 (east)"
+    Write-Info "  Kafka UI:    http://localhost:18080 (west)  http://localhost:18081 (east)"
+    Write-Info ""
+
+    $pfScript = Join-Path $script:SiblingDir "Start-PortForwards.ps1"
+    Write-Info "Open a second WSL terminal and run exactly ONE instance:"
+    Write-Info "  pwsh $pfScript"
+    Write-Info ""
+    Wait-UserConfirm "Press Enter once port forwards are running in another terminal..."
+
+    Complete-Phase $State "port-forwards"
+}
+
+function Invoke-MongoReplicaSet([PSCustomObject]$State) {
+    Write-Step "Phase 10 — Initialize MongoDB Replica Set"
+    Write-Info "Configuring the MongoDB replica set that spans the west and east clusters."
+    Write-Info "This is required for FeatBit Pro data replication between clusters."
+    Write-Info ""
+
+    $mongoScript = Join-Path $script:SiblingDir "Initialize-MongoDBReplicaSet.ps1"
+    if (-not (Test-Path $mongoScript)) { throw "Initialize-MongoDBReplicaSet.ps1 not found at $mongoScript" }
+
+    if ($PSCmdlet.ShouldProcess("MongoDB", "Initialize replica set")) {
+        & $mongoScript
+        if ($LASTEXITCODE -ne 0) { throw "Initialize-MongoDBReplicaSet.ps1 failed" }
+    }
+
+    Complete-Phase $State "mongo-replica-set"
+    Write-Success "MongoDB replica set initialized"
+}
+
+function Publish-WindowsHelper {
+    # Copy Configure-WindowsHostAccess.ps1 into the Windows user profile so it
+    # runs locally (no UNC path, no ExecutionPolicy Bypass needed).
+    # Returns the Windows-style destination path, or $null if not possible.
+    $helperSrc = Join-Path $PSScriptRoot "Configure-WindowsHostAccess.ps1"
+    if (-not (Test-Path $helperSrc)) { return $null }
+
+    # Resolve the Windows user profile path from inside WSL.
+    $winProfile = $null
+    try {
+        $winProfile = ((& cmd.exe /c 'echo %USERPROFILE%' 2>$null) | Out-String).Trim()
+    } catch {}
+    if (-not $winProfile) { return $null }
+
+    $linuxTarget = (& wslpath -u $winProfile 2>$null).Trim()
+    if (-not $linuxTarget -or -not (Test-Path $linuxTarget)) { return $null }
+
+    $destDir = Join-Path $linuxTarget "featbit-quickstart"
+    if (-not (Test-Path $destDir)) {
+        New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+    }
+    Copy-Item $helperSrc $destDir -Force
+
+    $destLinux = Join-Path $destDir "Configure-WindowsHostAccess.ps1"
+    $destWin   = (& wslpath -w $destLinux 2>$null).Trim()
+    return $destWin
+}
+
+function Invoke-Done {
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Green
+    Write-Host "  ║          FeatBit Pro is ready!                          ║" -ForegroundColor Green
+    Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Access URLs (port forwards must be running):" -ForegroundColor White
+    Write-Host "    West cluster UI  →  http://localhost:8081" -ForegroundColor Cyan
+    Write-Host "    East cluster UI  →  http://localhost:8082" -ForegroundColor Cyan
+    Write-Host "    West API         →  http://localhost:15000" -ForegroundColor Cyan
+    Write-Host "    East API         →  http://localhost:15001" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Default credentials:" -ForegroundColor White
+    Write-Host "    Email:    test@featbit.com" -ForegroundColor Gray
+    Write-Host "    Password: (set during first login)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Useful commands:" -ForegroundColor White
+    Write-Host "    pwsh ../Start-PortForwards.ps1          — restart port forwards" -ForegroundColor Gray
+    Write-Host "    k9s --context west                      — inspect west cluster" -ForegroundColor Gray
+    Write-Host "    k9s --context east                      — inspect east cluster" -ForegroundColor Gray
+    Write-Host "    pwsh ../Deploy-FeatBitClusters.ps1 -SkipClusterCreation  — redeploy apps only" -ForegroundColor Gray
+    Write-Host ""
+
+    $winHelper = Publish-WindowsHelper
+    if ($winHelper) {
+        Write-Host "  Windows host access:" -ForegroundColor White
+        Write-Host "    Helper copied to:  $winHelper" -ForegroundColor Gray
+        Write-Host "    From Windows PowerShell (will self-elevate):" -ForegroundColor Gray
+        Write-Host "      pwsh -File `"$winHelper`"" -ForegroundColor Cyan
+        Write-Host ""
+    }
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+Write-Banner
+
+if ($Reset) {
+    if (Test-Path $script:StateFile) {
+        Remove-Item $script:StateFile -Force
+        Write-Warn "Progress state cleared. Starting from the beginning."
+    }
+}
+
+$state = Get-State
+
+$allPhases = @(
+    @{ Key = "ensure-pwsh";       Fn = { Invoke-EnsurePwsh } }
+    @{ Key = "system-prereqs";    Fn = { Invoke-SystemPrereqs $state } }
+    @{ Key = "dev-tools";         Fn = { Invoke-DevTools $state } }
+    @{ Key = "repo-setup";        Fn = { Invoke-RepoSetup $state } }
+    @{ Key = "build-images";      Fn = { Invoke-BuildImages $state } }
+    @{ Key = "proxy-first-run";   Fn = { Invoke-ProxyFirstRun $state } }
+    @{ Key = "deploy-clusters";   Fn = { Invoke-DeployClusters $state } }
+    @{ Key = "proxy-second-run";  Fn = { Invoke-ProxySecondRun $state } }
+    @{ Key = "port-forwards";     Fn = { Invoke-PortForwards $state } }
+    @{ Key = "mongo-replica-set"; Fn = { Invoke-MongoReplicaSet $state } }
+)
+
+$allComplete = $true
+foreach ($phase in $allPhases) {
+    if (Test-PhaseComplete $state $phase.Key) {
+        Write-Host "  ✓ $($phase.Key) — already complete" -ForegroundColor DarkGreen
+        continue
+    }
+    $allComplete = $false
+    try {
+        & $phase.Fn
+        if ($phase.Key -ne "ensure-pwsh") { Complete-Phase $state $phase.Key }
+    } catch {
+        Write-Fail "Phase '$($phase.Key)' failed: $_"
+        Write-Info ""
+        Write-Info "Fix the issue above, then re-run this script to resume from this phase."
+        exit 1
+    }
+}
+
+if ($allComplete) {
+    Write-Host ""
+    Write-Host "  All phases already complete." -ForegroundColor DarkGreen
+    Write-Info "Run with -Reset to start over, or run individual scripts manually."
+    Write-Host ""
+
+    $winHelper = Publish-WindowsHelper
+    if ($winHelper) {
+        Write-Host "  Windows host access helper refreshed at:" -ForegroundColor White
+        Write-Host "    $winHelper" -ForegroundColor Gray
+        Write-Host "  Run from Windows PowerShell (will self-elevate):" -ForegroundColor Gray
+        Write-Host "    pwsh -File `"$winHelper`"" -ForegroundColor Cyan
+        Write-Host ""
+    }
+} else {
+    Invoke-Done
+}
