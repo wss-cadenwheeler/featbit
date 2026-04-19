@@ -27,6 +27,12 @@
 .PARAMETER SkipOptional
     Skips optional installations (K9s, VS Code).
 
+.PARAMETER SkipRepoSetup
+    Skip Phase 4 — don't switch branches, touch deployment.env, or prompt for
+    clone location. Use this when you're actively developing in this repo and
+    managing its state yourself. The skip is not persisted; omit the flag on
+    a future run to re-enable the phase.
+
 .EXAMPLE
     .\Quickstart-HyperV.ps1
     Run (or resume) the wizard.
@@ -34,17 +40,23 @@
 .EXAMPLE
     .\Quickstart-HyperV.ps1 -Reset
     Wipe saved progress and start over.
+
+.EXAMPLE
+    .\Quickstart-HyperV.ps1 -Reset -SkipRepoSetup
+    Start over, but leave the repository (branch, deployment.env) alone.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Reset,
-    [switch]$SkipOptional
+    [switch]$SkipOptional,
+    [switch]$SkipRepoSetup
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$script:StateFile = Join-Path $PSScriptRoot ".quickstart-state-hyperv.json"
+$script:StateFile  = Join-Path $PSScriptRoot ".quickstart-state-hyperv.json"
+$script:SiblingDir = Split-Path $PSScriptRoot -Parent  # control-plane-qa/
 
 # ── Console helpers ────────────────────────────────────────────────────────────
 
@@ -209,7 +221,7 @@ function Invoke-DevTools([PSCustomObject]$State) {
     Write-Step "Phase 3 — Developer Tools"
 
     Write-Info "Calling Install-Prerequisites.ps1 (Docker Desktop, Minikube, kubectl, Chocolatey)..."
-    $prereqScript = Join-Path $PSScriptRoot "Install-Prerequisites.ps1"
+    $prereqScript = Join-Path $script:SiblingDir "Install-Prerequisites.ps1"
     if (-not (Test-Path $prereqScript)) { throw "Install-Prerequisites.ps1 not found at $prereqScript" }
     & $prereqScript
     if ($LASTEXITCODE -ne 0) { throw "Install-Prerequisites.ps1 failed" }
@@ -252,9 +264,10 @@ function Invoke-DevTools([PSCustomObject]$State) {
 function Invoke-RepoSetup([PSCustomObject]$State) {
     Write-Step "Phase 4 — Repository Setup"
 
-    # Detect if we're already inside the repo
+    # Detect if we're already inside the repo.
+    # windows-hyperv → control-plane-qa → repo root
     $repoRoot = $null
-    $candidate = Split-Path -Parent $PSScriptRoot
+    $candidate = Split-Path -Parent $script:SiblingDir
     if (Test-Path (Join-Path $candidate ".git")) {
         $repoRoot = $candidate
         Write-Success "Already inside repo: $repoRoot"
@@ -331,7 +344,7 @@ function Invoke-BuildImages([PSCustomObject]$State) {
     Write-Info "to the local Docker registry at localhost:5000."
     Write-Info ""
 
-    $initScript = Join-Path $PSScriptRoot "Initialize-LocalRegistry.ps1"
+    $initScript = Join-Path $script:SiblingDir "Initialize-LocalRegistry.ps1"
     if (-not (Test-Path $initScript)) { throw "Initialize-LocalRegistry.ps1 not found at $initScript" }
 
     if ($PSCmdlet.ShouldProcess("FeatBit images", "Build and push to localhost:5000")) {
@@ -352,7 +365,7 @@ function Invoke-ProxyFirstRun([PSCustomObject]$State) {
     Write-Info "The proxy will be fully configured after the second run (Phase 8)."
     Write-Info ""
 
-    $proxyScript = Join-Path $PSScriptRoot "Setup-FeatBitProxy.ps1"
+    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
     if (-not (Test-Path $proxyScript)) { throw "Setup-FeatBitProxy.ps1 not found at $proxyScript" }
 
     if ($PSCmdlet.ShouldProcess("nginx proxy", "First run setup")) {
@@ -375,7 +388,7 @@ function Invoke-DeployClusters([PSCustomObject]$State) {
     Write-Warn "This is the longest phase. Do not interrupt it."
     Write-Info ""
 
-    $deployScript = Join-Path $PSScriptRoot "Deploy-FeatBitClusters.ps1"
+    $deployScript = Join-Path $script:SiblingDir "Deploy-FeatBitClusters.ps1"
     if (-not (Test-Path $deployScript)) { throw "Deploy-FeatBitClusters.ps1 not found at $deployScript" }
 
     if ($PSCmdlet.ShouldProcess("west + east clusters", "Deploy FeatBit Advanced + MongoDB")) {
@@ -395,7 +408,7 @@ function Invoke-ProxySecondRun([PSCustomObject]$State) {
     Write-Info "endpoints that were created in the previous phase."
     Write-Info ""
 
-    $proxyScript = Join-Path $PSScriptRoot "Setup-FeatBitProxy.ps1"
+    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
     if ($PSCmdlet.ShouldProcess("nginx proxy", "Second run setup")) {
         & $proxyScript
         if ($LASTEXITCODE -ne 0) { throw "Setup-FeatBitProxy.ps1 failed on second run" }
@@ -417,7 +430,7 @@ function Invoke-PortForwards([PSCustomObject]$State) {
     Write-Info "  Kafka UI:    http://localhost:18080 (west)  http://localhost:18081 (east)"
     Write-Info ""
 
-    $pfScript = Join-Path $PSScriptRoot "Start-PortForwards.ps1"
+    $pfScript = Join-Path $script:SiblingDir "Start-PortForwards.ps1"
     $choice = Wait-UserChoice "Open Start-PortForwards.ps1 in a new terminal window now?" @("y","n")
     if ($choice -eq "y") {
         if ($PSCmdlet.ShouldProcess("Start-PortForwards.ps1", "Open in new terminal")) {
@@ -438,7 +451,7 @@ function Invoke-MongoReplicaSet([PSCustomObject]$State) {
     Write-Info "This is required for FeatBit Pro data replication between clusters."
     Write-Info ""
 
-    $mongoScript = Join-Path $PSScriptRoot "Initialize-MongoDBReplicaSet.ps1"
+    $mongoScript = Join-Path $script:SiblingDir "Initialize-MongoDBReplicaSet.ps1"
     if (-not (Test-Path $mongoScript)) { throw "Initialize-MongoDBReplicaSet.ps1 not found at $mongoScript" }
 
     if ($PSCmdlet.ShouldProcess("MongoDB", "Initialize replica set")) {
@@ -512,6 +525,12 @@ $allComplete = $true
 foreach ($phase in $allPhases) {
     if (Test-PhaseComplete $state $phase.Key) {
         Write-Host "  ✓ $($phase.Key) — already complete" -ForegroundColor DarkGreen
+        continue
+    }
+    # Runtime skip — does not write to state, so the phase re-enables
+    # automatically on a future run that omits the flag.
+    if ($phase.Key -eq "repo-setup" -and $SkipRepoSetup) {
+        Write-Host "  → $($phase.Key) — skipped by -SkipRepoSetup" -ForegroundColor DarkYellow
         continue
     }
     $allComplete = $false
