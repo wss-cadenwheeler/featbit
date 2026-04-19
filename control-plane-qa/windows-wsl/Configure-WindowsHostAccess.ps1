@@ -19,9 +19,15 @@
 
 .PARAMETER Remove
     Remove the managed block from the hosts file instead of adding/updating it.
+    Also strips west/east contexts/clusters/users from the Windows kubeconfig
+    (skipped if -SkipKubeConfig is also passed).
 
 .PARAMETER SkipTest
     Skip the post-configuration HTTP reachability test.
+
+.PARAMETER SkipKubeConfig
+    Skip installing (or removing) the west/east kubectl contexts in
+    %USERPROFILE%\.kube\config.
 
 .EXAMPLE
     pwsh -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\<user>\...\Configure-WindowsHostAccess.ps1
@@ -36,7 +42,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Remove,
-    [switch]$SkipTest
+    [switch]$SkipTest,
+    [switch]$SkipKubeConfig
 )
 
 Set-StrictMode -Version Latest
@@ -74,8 +81,9 @@ if (-not (Test-Administrator)) {
     # ExecutionPolicy Bypass is required because the script often lives on a
     # WSL UNC share (\\wsl.localhost\...), which PowerShell treats as remote.
     $argList = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
-    if ($Remove)   { $argList += "-Remove" }
-    if ($SkipTest) { $argList += "-SkipTest" }
+    if ($Remove)         { $argList += "-Remove" }
+    if ($SkipTest)       { $argList += "-SkipTest" }
+    if ($SkipKubeConfig) { $argList += "-SkipKubeConfig" }
     Start-Process pwsh -Verb RunAs -ArgumentList $argList
     Write-Info "Close this window and continue in the new elevated terminal."
     exit 0
@@ -129,6 +137,125 @@ function Remove-Block([string[]]$Lines) {
     return ,$out.ToArray()
 }
 
+# ── Kubeconfig helpers ────────────────────────────────────────────────────────
+
+function Install-KubeConfig {
+    # Read the flattened kubeconfig that Quickstart-WSL.ps1 published alongside
+    # this script. Calling `wsl -- kubectl ...` from elevated Windows PowerShell
+    # is unreliable (hangs on cold-start / profile quirks), so we rely on the
+    # wizard to produce the file on its WSL side.
+    $srcKube = Join-Path $PSScriptRoot "kubeconfig.yaml"
+    $winKubeDir = Join-Path $env:USERPROFILE ".kube"
+    $mainCfg    = Join-Path $winKubeDir "config"
+    $sideCfg    = Join-Path $winKubeDir "config.featbit-wsl"
+
+    if (-not (Test-Path $srcKube)) {
+        Write-Warn "No kubeconfig found at $srcKube."
+        Write-Info "Run (or re-run) Quickstart-WSL.ps1 in WSL — it publishes the"
+        Write-Info "flattened kubeconfig next to this script on every run."
+        return
+    }
+
+    $flat = Get-Content -Path $srcKube -Raw -Encoding UTF8
+    if (-not $flat -or $flat -notmatch 'apiVersion\s*:') {
+        Write-Warn "Kubeconfig file at $srcKube is empty or malformed — skipping."
+        return
+    }
+    if ($flat -notmatch 'name:\s*west' -or $flat -notmatch 'name:\s*east') {
+        Write-Warn "Kubeconfig doesn't contain both west and east contexts — clusters not provisioned yet?"
+        return
+    }
+
+    Write-Info "Using kubeconfig from $srcKube"
+
+    if (-not (Test-Path $winKubeDir)) {
+        if ($PSCmdlet.ShouldProcess($winKubeDir, "create directory")) {
+            New-Item -ItemType Directory -Path $winKubeDir -Force | Out-Null
+        }
+    }
+
+    if (-not (Test-Path $mainCfg)) {
+        if ($PSCmdlet.ShouldProcess($mainCfg, "write new kubeconfig from WSL")) {
+            Set-Content -Path $mainCfg -Value $flat -Encoding UTF8
+            Write-Success "Installed kubeconfig at $mainCfg (no prior config existed)."
+        }
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess($sideCfg, "write sidecar kubeconfig")) {
+        Set-Content -Path $sideCfg -Value $flat -Encoding UTF8
+    }
+
+    $kubectl = Get-Command kubectl -ErrorAction SilentlyContinue
+    if (-not $kubectl) {
+        Write-Warn "kubectl not found on Windows PATH — cannot auto-merge."
+        Write-Info "Sidecar kubeconfig written to: $sideCfg"
+        Write-Info "To use it alongside your existing config:"
+        Write-Info "  `$env:KUBECONFIG = '$mainCfg;$sideCfg'"
+        Write-Info "Or replace manually:"
+        Write-Info "  Copy-Item '$sideCfg' '$mainCfg' -Force"
+        return
+    }
+
+    $backup = "$mainCfg.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    if ($PSCmdlet.ShouldProcess($mainCfg, "merge WSL west/east into existing kubeconfig (backup: $backup)")) {
+        Copy-Item $mainCfg $backup -Force
+        $prevKc = $env:KUBECONFIG
+        try {
+            $env:KUBECONFIG = "$mainCfg;$sideCfg"
+            $merged = & kubectl config view --raw --flatten
+            if ($LASTEXITCODE -ne 0 -or -not $merged) {
+                Write-Fail "kubectl config view merge failed (exit $LASTEXITCODE). Restoring backup."
+                Copy-Item $backup $mainCfg -Force
+                return
+            }
+            # kubectl returns an array of lines; write as a single text block.
+            Set-Content -Path $mainCfg -Value ($merged -join [Environment]::NewLine) -Encoding UTF8
+            Write-Success "Merged west/east contexts into $mainCfg"
+            Write-Info "  Backup: $backup"
+            Remove-Item $sideCfg -Force -ErrorAction SilentlyContinue
+        } finally {
+            $env:KUBECONFIG = $prevKc
+        }
+    }
+}
+
+function Remove-FeatBitKubeConfig {
+    $mainCfg = Join-Path $env:USERPROFILE ".kube\config"
+    $sideCfg = Join-Path $env:USERPROFILE ".kube\config.featbit-wsl"
+
+    if (Test-Path $sideCfg) {
+        if ($PSCmdlet.ShouldProcess($sideCfg, "remove sidecar kubeconfig")) {
+            Remove-Item $sideCfg -Force
+            Write-Success "Removed sidecar: $sideCfg"
+        }
+    }
+
+    if (-not (Test-Path $mainCfg)) {
+        Write-Info "No Windows kubeconfig at $mainCfg — nothing to strip."
+        return
+    }
+
+    $kubectl = Get-Command kubectl -ErrorAction SilentlyContinue
+    if (-not $kubectl) {
+        Write-Warn "kubectl not found on Windows PATH — cannot surgically remove west/east entries."
+        Write-Info "Edit $mainCfg manually to remove contexts/clusters/users named 'west' and 'east'."
+        return
+    }
+
+    $backup = "$mainCfg.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    if ($PSCmdlet.ShouldProcess($mainCfg, "delete west/east contexts/clusters/users (backup: $backup)")) {
+        Copy-Item $mainCfg $backup -Force
+        foreach ($ctx in @("west","east")) {
+            & kubectl config delete-context $ctx 2>$null | Out-Null
+            & kubectl config delete-cluster $ctx 2>$null | Out-Null
+            & kubectl config delete-user    $ctx 2>$null | Out-Null
+        }
+        Write-Success "Stripped west/east entries from $mainCfg"
+        Write-Info "  Backup: $backup"
+    }
+}
+
 Write-Step "Configure-WindowsHostAccess — $(if ($Remove) { 'REMOVE' } else { 'UPDATE' })"
 Write-Info "Hosts file: $HostsFile"
 
@@ -145,6 +272,11 @@ if ($Remove) {
             Set-Content -Path $HostsFile -Value $stripped -Encoding ASCII
             Write-Success "Managed block removed."
         }
+    }
+
+    if (-not $SkipKubeConfig) {
+        Write-Step "Kubeconfig cleanup"
+        Remove-FeatBitKubeConfig
     }
     return
 }
@@ -168,6 +300,13 @@ $final += $newBlock.ToArray()
 if ($PSCmdlet.ShouldProcess($HostsFile, "Write managed FeatBit host block")) {
     Set-Content -Path $HostsFile -Value $final -Encoding ASCII
     Write-Success "Hosts file updated with $($AllHostNames.Count) entries."
+}
+
+# ── Kubeconfig install ────────────────────────────────────────────────────────
+
+if (-not $SkipKubeConfig) {
+    Write-Step "Kubeconfig install (west + east)"
+    Install-KubeConfig
 }
 
 # ── Connectivity test ─────────────────────────────────────────────────────────
@@ -211,8 +350,8 @@ foreach ($h in @($WestHttpHosts + $EastHttpHosts)) {
 }
 
 Write-Info ""
-$okCount   = ($results | Where-Object { $_.Ok }).Count
-$failCount = ($results | Where-Object { -not $_.Ok }).Count
+$okCount   = @($results | Where-Object { $_.Ok }).Count
+$failCount = @($results | Where-Object { -not $_.Ok }).Count
 
 if ($failCount -eq 0) {
     Write-Success "All $okCount endpoints reachable."

@@ -35,6 +35,12 @@
 .PARAMETER SkipOptional
     Skips optional installations (k9s).
 
+.PARAMETER SkipRepoSetup
+    Skip Phase 4 — don't switch branches, touch deployment.env, or prompt for
+    clone location. Use this when you're actively developing in this repo and
+    managing its state yourself. The skip is not persisted; omit the flag on
+    a future run to re-enable the phase.
+
 .EXAMPLE
     pwsh ./Quickstart-WSL.ps1
     Run (or resume) the wizard. You will be prompted for sudo as needed.
@@ -42,11 +48,16 @@
 .EXAMPLE
     pwsh ./Quickstart-WSL.ps1 -Reset
     Wipe saved progress and start over.
+
+.EXAMPLE
+    pwsh ./Quickstart-WSL.ps1 -Reset -SkipRepoSetup
+    Start over, but leave the repository (branch, deployment.env) alone.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Reset,
-    [switch]$SkipOptional
+    [switch]$SkipOptional,
+    [switch]$SkipRepoSetup
 )
 
 Set-StrictMode -Version Latest
@@ -547,8 +558,11 @@ function Invoke-MongoReplicaSet([PSCustomObject]$State) {
 
 function Publish-WindowsHelper {
     # Copy Configure-WindowsHostAccess.ps1 into the Windows user profile so it
-    # runs locally (no UNC path, no ExecutionPolicy Bypass needed).
-    # Returns the Windows-style destination path, or $null if not possible.
+    # runs locally (no UNC path, no ExecutionPolicy Bypass needed), and write
+    # a flattened kubeconfig alongside it for Configure-WindowsHostAccess to
+    # pick up — avoids needing to call `wsl -- kubectl ...` from elevated
+    # Windows PowerShell, which hangs in some environments.
+    # Returns the Windows-style path to the PS1, or $null if not possible.
     $helperSrc = Join-Path $PSScriptRoot "Configure-WindowsHostAccess.ps1"
     if (-not (Test-Path $helperSrc)) { return $null }
 
@@ -567,6 +581,19 @@ function Publish-WindowsHelper {
         New-Item -Path $destDir -ItemType Directory -Force | Out-Null
     }
     Copy-Item $helperSrc $destDir -Force
+
+    # Flat kubeconfig (with inline certs). Silent skip if kubectl isn't present
+    # or has no contexts yet — user can re-run the wizard to refresh it.
+    $kubeDest = Join-Path $destDir "kubeconfig.yaml"
+    if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+        $flat = (& kubectl config view --raw --flatten 2>$null | Out-String)
+        if ($flat -and $flat -match 'name:\s*west' -and $flat -match 'name:\s*east') {
+            Set-Content -Path $kubeDest -Value $flat -Encoding UTF8
+        } elseif (Test-Path $kubeDest) {
+            # Older, stale kubeconfig would mislead Configure-WindowsHostAccess.
+            Remove-Item -Force $kubeDest
+        }
+    }
 
     $destLinux = Join-Path $destDir "Configure-WindowsHostAccess.ps1"
     $destWin   = (& wslpath -w $destLinux 2>$null).Trim()
@@ -636,6 +663,12 @@ $allComplete = $true
 foreach ($phase in $allPhases) {
     if (Test-PhaseComplete $state $phase.Key) {
         Write-Host "  ✓ $($phase.Key) — already complete" -ForegroundColor DarkGreen
+        continue
+    }
+    # Runtime skip — does not write to state, so the phase re-enables
+    # automatically on a future run that omits the flag.
+    if ($phase.Key -eq "repo-setup" -and $SkipRepoSetup) {
+        Write-Host "  → $($phase.Key) — skipped by -SkipRepoSetup" -ForegroundColor DarkYellow
         continue
     }
     $allComplete = $false
