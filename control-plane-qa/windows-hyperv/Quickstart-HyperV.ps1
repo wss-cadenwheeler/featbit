@@ -165,15 +165,23 @@ function Invoke-SystemPrereqs([PSCustomObject]$State) {
     Write-Step "Phase 2 — System Prerequisites (Hyper-V, WSL, Git)  [requires admin]"
     Request-Elevation -Reason "Hyper-V and WSL installation"
 
-    # Hyper-V
-    $hvState = (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State
-    if ($hvState -eq "Enabled") {
+    # Hyper-V — use dism.exe directly. Get-WindowsOptionalFeature throws
+    # "Class not registered" under PowerShell 7 because the DISM module's
+    # COM interop doesn't load cleanly outside Windows PowerShell 5.1.
+    $hvInfo = & dism.exe /online /get-featureinfo /featurename:Microsoft-Hyper-V-All 2>&1
+    $hvEnabled = ($hvInfo | Select-String -Pattern '^\s*State\s*:\s*Enabled\s*$' -Quiet)
+    if ($hvEnabled) {
         Write-Success "Hyper-V is already enabled"
     } else {
         Write-Info "Enabling Hyper-V (this will require a reboot)..."
         if ($PSCmdlet.ShouldProcess("Hyper-V", "Enable Windows Feature")) {
-            $result = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart
-            if ($result.RestartNeeded) {
+            & dism.exe /online /enable-feature /featurename:Microsoft-Hyper-V-All /all /norestart | Out-Host
+            $dismExit = $LASTEXITCODE
+            # dism exit codes: 0 = success, 3010 = success but reboot required
+            if ($dismExit -ne 0 -and $dismExit -ne 3010) {
+                throw "dism.exe failed to enable Hyper-V (exit code $dismExit)"
+            }
+            if ($dismExit -eq 3010) {
                 Write-Warn "A reboot is required to finish enabling Hyper-V."
                 $State.rebootPending = $true
                 Complete-Phase $State "system-prereqs"

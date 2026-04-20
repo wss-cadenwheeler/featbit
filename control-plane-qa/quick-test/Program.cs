@@ -3,7 +3,7 @@ using FeatBit.Sdk.Server.Model;
 using FeatBit.Sdk.Server.Options;
 
 // setup sdk options
-var options = new FbOptionsBuilder("NoXKnAA4hkyy2RsZzPP7cALfy-u6eidkK4sCNnkkh67Q")
+var options = new FbOptionsBuilder("CGz8HbYg0UOMLZExZtLOSwqsCDPKrSGE2zzI333dqu9g")
     .Event(new Uri("http://featbit-eval.east.local"))
     .Streaming(new Uri("ws://featbit-eval.east.local"))
     .Build();
