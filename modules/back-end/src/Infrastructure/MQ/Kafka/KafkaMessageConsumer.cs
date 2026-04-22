@@ -63,15 +63,15 @@ public partial class KafkaMessageConsumer : BackgroundService
                 }
 
                 using var scope = _serviceProvider.CreateScope();
-                var sp = scope.ServiceProvider;
-                
-                var handler = sp.GetKeyedService<IMessageHandler>(topic);
+
+                var handler = scope.ServiceProvider.GetKeyedService<IMessageHandler>(consumeResult.Topic);
                 if (handler == null)
+
                 {
-                    Log.NoHandlerForTopic(_logger, topic);
+                    Log.NoHandlerForTopic(_logger, consumeResult.Topic);
                     continue;
                 }
-                
+
                 await handler.HandleAsync(message);
             }
             catch (ConsumeException ex)
