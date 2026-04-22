@@ -1,8 +1,5 @@
-using System.Text.Json;
 using Confluent.Kafka;
-using Domain.EndUsers;
 using Domain.Messages;
-using Domain.Utils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,12 +47,10 @@ public partial class KafkaMessageConsumer : BackgroundService
                 consumeResult = _consumer.Consume(cancellationToken);
                 if (consumeResult.IsPartitionEOF)
                 {
-                    // reached end of topic
                     continue;
                 }
 
                 message = consumeResult.Message.Value;
-                
                 if (string.IsNullOrWhiteSpace(message))
                 {
                     continue;

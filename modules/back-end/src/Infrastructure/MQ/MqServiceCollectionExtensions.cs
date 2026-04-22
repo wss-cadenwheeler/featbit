@@ -34,6 +34,8 @@ public static class MqServiceCollectionExtensions
                 break;
         }
 
+        AddMessageHandlers();
+
         return;
 
         void AddNone()
@@ -128,8 +130,11 @@ public static class MqServiceCollectionExtensions
                 return new PostgresMessageConsumer(scopeFactory, dataSource, logger, topics);
             });
 
+        void AddMessageHandlers()
+        {
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
+            services.AddKeyedTransient<IMessageHandler, UsageMessageHandler>(Topics.Usage);
         }
     }
 }

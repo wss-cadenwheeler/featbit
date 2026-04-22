@@ -1,3 +1,4 @@
+using Application.Usages;
 using Application.Configuration;
 using Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 using Application.Segments;
@@ -26,6 +27,14 @@ public static class ConfigureServices
 
         // flag schedule worker
         services.AddHostedService<AppServices.FlagScheduleWorker>();
+
+        // track usage
+        services.AddOptions<UsageTrackingOptions>()
+            .Bind(configuration.GetSection(UsageTrackingOptions.UsageTracking))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddSingleton<UsageTracker>();
+        services.AddHostedService<AppServices.UsageFlushWorker>();
 
         // messaging services
         services.AddMq(configuration);
