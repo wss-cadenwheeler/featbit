@@ -123,7 +123,11 @@ function Request-Elevation {
     if (-not (Test-Administrator)) {
         Write-Warn "This phase requires administrator privileges: $Reason"
         Write-Info "Re-launching as administrator..."
-        Start-Process pwsh -Verb RunAs -ArgumentList "-NoExit", "-File", "`"$PSCommandPath`""
+        $fwdArgs = [System.Collections.Generic.List[string]]@("-NoExit", "-File", "`"$PSCommandPath`"")
+        if ($Reset)         { $fwdArgs.Add("-Reset") }
+        if ($SkipOptional)  { $fwdArgs.Add("-SkipOptional") }
+        if ($SkipRepoSetup) { $fwdArgs.Add("-SkipRepoSetup") }
+        Start-Process pwsh -Verb RunAs -ArgumentList $fwdArgs
         Write-Info "Close this window and continue in the new elevated terminal."
         exit 0
     }
