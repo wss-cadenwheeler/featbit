@@ -388,6 +388,58 @@ function Invoke-ProxyFirstRun([PSCustomObject]$State) {
     Write-Success "Proxy first run complete"
 }
 
+function Repair-ClusterNetwork {
+    # Defensive: Initialize-LocalRegistry.ps1 creates featbit-cluster-network, but
+    # an earlier run or manual creation may have used an auto-assigned subnet instead
+    # of the expected 172.19.0.0/16. Deploy-FeatBitClusters.ps1 hard-codes IPs
+    # 172.19.0.10 / 172.19.0.20, so a mismatched subnet breaks cluster attachment.
+    $name       = "featbit-cluster-network"
+    $wantSubnet = "172.19.0.0/16"
+
+    $exists = & docker network ls --filter "name=^$name$" --format "{{.Name}}" 2>$null
+    if (-not $exists) {
+        Write-Info "Network '$name' does not exist yet — the deploy script will create it."
+        return
+    }
+
+    $currentSubnet = ((& docker network inspect $name --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>$null) | Out-String).Trim()
+    if ($currentSubnet -eq $wantSubnet) {
+        Write-Success "Network '$name' already has correct subnet $wantSubnet"
+        return
+    }
+
+    Write-Warn "Network '$name' has subnet '$currentSubnet' — expected '$wantSubnet'. Recreating..."
+
+    $attached   = ((& docker network inspect $name --format '{{range .Containers}}{{.Name}} {{end}}' 2>$null) | Out-String).Trim()
+    $containers = if ($attached) { $attached -split '\s+' | Where-Object { $_ } } else { @() }
+
+    foreach ($c in $containers) {
+        Write-Info "  Disconnecting '$c' from '$name'..."
+        & docker network disconnect $name $c 2>$null | Out-Null
+    }
+
+    Write-Info "  Removing network '$name'..."
+    & docker network rm $name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to remove network '$name' — manual cleanup required" }
+
+    Write-Info "  Creating network '$name' with subnet $wantSubnet..."
+    & docker network create --driver bridge --subnet $wantSubnet $name | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create network '$name' with subnet $wantSubnet" }
+
+    foreach ($c in $containers) {
+        Write-Info "  Reconnecting '$c' to '$name'..."
+        & docker network connect $name $c 2>$null | Out-Null
+    }
+
+    # Restart affected containers so Docker's port-forwarding proxy is re-initialized.
+    foreach ($c in $containers) {
+        Write-Info "  Restarting '$c' to refresh port forwarding..."
+        & docker restart $c 2>$null | Out-Null
+    }
+
+    Write-Success "Network '$name' recreated with subnet $wantSubnet"
+}
+
 function Invoke-DeployClusters([PSCustomObject]$State) {
     Write-Step "Phase 7 — Deploy FeatBit Clusters  (~20 minutes)"
     Write-Info "This creates the west and east Minikube clusters, deploys all FeatBit"
@@ -395,6 +447,8 @@ function Invoke-DeployClusters([PSCustomObject]$State) {
     Write-Info ""
     Write-Warn "This is the longest phase. Do not interrupt it."
     Write-Info ""
+
+    Repair-ClusterNetwork
 
     $deployScript = Join-Path $script:SiblingDir "Deploy-FeatBitClusters.ps1"
     if (-not (Test-Path $deployScript)) { throw "Deploy-FeatBitClusters.ps1 not found at $deployScript" }
