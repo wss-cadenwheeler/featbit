@@ -195,17 +195,31 @@ if ($script:onWindows)
     }
     elseif (-not $SkipNginxInstall)
     {
-        if (-not (Test-Path $NginxPath))
+        Write-Info "Installing nginx via Chocolatey..."
+        choco install nginx -y
+        if ($LASTEXITCODE -ne 0) { Write-Fail "Failed to install nginx."; exit 1 }
+
+        # Chocolatey may install to a versioned directory (e.g. C:\tools\nginx-1.29.8)
+        # rather than the default $NginxPath. Re-run detection to find the real path.
+        $detectedNginxPath = $null
+        foreach ($path in $searchPaths)
         {
-            Write-Info "Installing nginx via Chocolatey..."
-            choco install nginx -y
-            if ($LASTEXITCODE -ne 0) { Write-Fail "Failed to install nginx."; exit 1 }
-            Write-Success "nginx installed."
+            $resolved = Resolve-Path $path -ErrorAction SilentlyContinue
+            if ($resolved)
+            {
+                foreach ($resolvedPath in $resolved)
+                {
+                    if (Test-Path "$resolvedPath\nginx.exe")
+                    {
+                        $detectedNginxPath = $resolvedPath.Path
+                        break
+                    }
+                }
+            }
+            if ($detectedNginxPath) { break }
         }
-        else
-        {
-            Write-Success "nginx already present at $NginxPath"
-        }
+        if ($detectedNginxPath) { $NginxPath = $detectedNginxPath }
+        Write-Success "nginx installed at $NginxPath"
     }
 }
 else
