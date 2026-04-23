@@ -605,20 +605,14 @@ if ($script:onWindows)
     $nginxRunning = Get-Process nginx -ErrorAction SilentlyContinue
     if ($nginxRunning)
     {
-        Write-Info "nginx is already running — reloading configuration..."
-        $reloadOut = & "$NginxPath\nginx.exe" -s reload 2>&1
-        if ($LASTEXITCODE -ne 0)
-        {
-            Write-Warn "nginx reload returned exit code $LASTEXITCODE — attempting full restart."
-            Write-Info $reloadOut
-            & "$NginxPath\nginx.exe" -s quit 2>&1 | Out-Null
-            Start-Sleep -Seconds 2
-            Start-Process -FilePath "$NginxPath\nginx.exe" -WorkingDirectory $NginxPath -WindowStyle Hidden
-        }
-        else
-        {
-            Write-Success "nginx configuration reloaded."
-        }
+        # nginx -s reload uses a named Win32 event tied to the master's PID and session.
+        # If nginx was started in a different elevated session the OpenEvent call fails
+        # with "Access is denied" even from an admin prompt. Always stop + restart so
+        # the new master is owned by the current session and future reloads work.
+        Write-Info "Stopping existing nginx to pick up new configuration..."
+        taskkill /F /IM nginx.exe 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        Start-Process -FilePath "$NginxPath\nginx.exe" -WorkingDirectory $NginxPath -WindowStyle Hidden
     }
     else
     {
