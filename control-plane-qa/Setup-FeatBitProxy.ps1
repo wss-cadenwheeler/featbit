@@ -606,7 +606,19 @@ if ($script:onWindows)
     if ($nginxRunning)
     {
         Write-Info "nginx is already running — reloading configuration..."
-        & "$NginxPath\nginx.exe" -s reload | Out-Null
+        $reloadOut = & "$NginxPath\nginx.exe" -s reload 2>&1
+        if ($LASTEXITCODE -ne 0)
+        {
+            Write-Warn "nginx reload returned exit code $LASTEXITCODE — attempting full restart."
+            Write-Info $reloadOut
+            & "$NginxPath\nginx.exe" -s quit 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+            Start-Process -FilePath "$NginxPath\nginx.exe" -WorkingDirectory $NginxPath -WindowStyle Hidden
+        }
+        else
+        {
+            Write-Success "nginx configuration reloaded."
+        }
     }
     else
     {
