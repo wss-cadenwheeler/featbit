@@ -195,17 +195,31 @@ if ($script:onWindows)
     }
     elseif (-not $SkipNginxInstall)
     {
-        if (-not (Test-Path $NginxPath))
+        Write-Info "Installing nginx via Chocolatey..."
+        choco install nginx -y
+        if ($LASTEXITCODE -ne 0) { Write-Fail "Failed to install nginx."; exit 1 }
+
+        # Chocolatey may install to a versioned directory (e.g. C:\tools\nginx-1.29.8)
+        # rather than the default $NginxPath. Re-run detection to find the real path.
+        $detectedNginxPath = $null
+        foreach ($path in $searchPaths)
         {
-            Write-Info "Installing nginx via Chocolatey..."
-            choco install nginx -y
-            if ($LASTEXITCODE -ne 0) { Write-Fail "Failed to install nginx."; exit 1 }
-            Write-Success "nginx installed."
+            $resolved = Resolve-Path $path -ErrorAction SilentlyContinue
+            if ($resolved)
+            {
+                foreach ($resolvedPath in $resolved)
+                {
+                    if (Test-Path "$resolvedPath\nginx.exe")
+                    {
+                        $detectedNginxPath = $resolvedPath.Path
+                        break
+                    }
+                }
+            }
+            if ($detectedNginxPath) { break }
         }
-        else
-        {
-            Write-Success "nginx already present at $NginxPath"
-        }
+        if ($detectedNginxPath) { $NginxPath = $detectedNginxPath }
+        Write-Success "nginx installed at $NginxPath"
     }
 }
 else
@@ -507,6 +521,71 @@ else
 
 Start-Sleep -Seconds 10
 
+# ── Port 80 pre-flight (Windows) ──────────────────────────────────────────────
+# WSL's wslrelay.exe will bind 127.0.0.1:80 whenever a process inside a running
+# distro listens on :80. That loopback listener is more specific than Windows
+# nginx's 0.0.0.0:80 bind, so browser requests to featbit.*.local (which
+# resolve to 127.0.0.1) get routed into WSL instead of our proxy — users see
+# the WSL distro's default "Welcome to nginx!" page. Detect and remediate.
+
+if ($script:onWindows)
+{
+    Write-Step "Checking port 80 availability"
+
+    $loopbackListeners = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1' }
+
+    $hijacker = $null
+    foreach ($conn in $loopbackListeners)
+    {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $($conn.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($proc -and $proc.Name -ne 'nginx.exe')
+        {
+            $hijacker = $proc
+            break
+        }
+    }
+
+    if (-not $hijacker)
+    {
+        Write-Success "127.0.0.1:80 is free (or held by nginx) — nothing to do."
+    }
+    elseif ($hijacker.Name -ieq 'wslrelay.exe')
+    {
+        Write-Warn "127.0.0.1:80 is held by wslrelay.exe (PID $($hijacker.ProcessId))."
+        Write-Info "A service inside WSL is listening on port 80 — requests to featbit.*.local"
+        Write-Info "would be routed into WSL instead of the Windows nginx proxy."
+        Write-Info "Attempting to stop nginx inside WSL..."
+
+        & wsl -u root -- bash -c "service nginx stop 2>/dev/null; systemctl stop nginx 2>/dev/null; systemctl disable nginx 2>/dev/null; true" 2>$null | Out-Null
+        Start-Sleep -Seconds 3
+
+        $stillBlocked = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1' } |
+            Where-Object {
+                $p = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.OwningProcess)" -ErrorAction SilentlyContinue
+                $p -and $p.Name -ne 'nginx.exe'
+            }
+
+        if ($stillBlocked)
+        {
+            Write-Fail "127.0.0.1:80 is still held by a non-nginx process after stopping WSL nginx."
+            Write-Info "Remediate manually, then re-run this script:"
+            Write-Info "  wsl -u root service nginx stop"
+            Write-Info "  wsl -u root systemctl disable nginx"
+            Write-Info "  wsl --shutdown    # last resort — kills the wslrelay forwarder"
+            exit 1
+        }
+        Write-Success "WSL port 80 listener stopped."
+    }
+    else
+    {
+        Write-Fail "127.0.0.1:80 is held by $($hijacker.Name) (PID $($hijacker.ProcessId)) — not nginx, not WSL."
+        Write-Info "Stop that process, then re-run this script."
+        exit 1
+    }
+}
+
 # ── nginx test and start ──────────────────────────────────────────────────────
 
 Write-Step "Starting nginx"
@@ -526,8 +605,14 @@ if ($script:onWindows)
     $nginxRunning = Get-Process nginx -ErrorAction SilentlyContinue
     if ($nginxRunning)
     {
-        Write-Info "nginx is already running — reloading configuration..."
-        & "$NginxPath\nginx.exe" -s reload | Out-Null
+        # nginx -s reload uses a named Win32 event tied to the master's PID and session.
+        # If nginx was started in a different elevated session the OpenEvent call fails
+        # with "Access is denied" even from an admin prompt. Always stop + restart so
+        # the new master is owned by the current session and future reloads work.
+        Write-Info "Stopping existing nginx to pick up new configuration..."
+        taskkill /F /IM nginx.exe 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        Start-Process -FilePath "$NginxPath\nginx.exe" -WorkingDirectory $NginxPath -WindowStyle Hidden
     }
     else
     {

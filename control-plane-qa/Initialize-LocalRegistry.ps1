@@ -300,7 +300,7 @@ function Initialize-Registry
         else
         {
             Write-Info "Creating bridge network 'featbit-cluster-network'..."
-            & $script:runtime network create featbit-cluster-network | Out-Null
+            & $script:runtime network create --driver bridge --subnet 172.19.0.0/16 featbit-cluster-network | Out-Null
             Write-Success "Network created."
         }
     }
