@@ -18,3 +18,27 @@ benchmark/k6-scripts/test-results/
 
 #Ignore IntelliJ IDEA files
 .idea/
+/kubernetes/.generated/west/infrastructure/clickhouse-configmap-etc.yaml
+/kubernetes/.generated/west/infrastructure/clickhouse-server-persistentvolumeclaim.yaml
+/kubernetes/.generated/west/infrastructure/clickhouse-server-pod.yaml
+/kubernetes/.generated/west/infrastructure/clickhouse-server-service.yaml
+/kubernetes/.generated/west/infrastructure/kafka-aggregate-deployment.yaml
+/kubernetes/.generated/west/infrastructure/kafka-aggregate-persistentvolumeclaim.yaml
+/kubernetes/.generated/west/infrastructure/kafka-aggregate-service.yaml
+/kubernetes/.generated/west/infrastructure/kafka-mirrormaker-local-deployment.yaml
+/kubernetes/.generated/west/infrastructure/kafka-mirrormaker-remote-deployment.yaml
+/kubernetes/.generated/west/infrastructure/kafka-persistentvolumeclaim.yaml
+/kubernetes/.generated/west/infrastructure/kafka-pod.yaml
+/kubernetes/.generated/west/infrastructure/kafka-service.yaml
+/kubernetes/.generated/west/infrastructure/kafka-ui-deployment.yaml
+/kubernetes/.generated/west/infrastructure/mongodb-init-configMap.yaml
+/kubernetes/.generated/west/infrastructure/mongodb-west-statefulset.yaml
+/kubernetes/.generated/west/infrastructure/redis-persistentvolumeclaim.yaml
+/kubernetes/.generated/west/infrastructure/redis-pod.yaml
+/kubernetes/.generated/west/infrastructure/redis-service.yaml
+/kubernetes/.generated
+/control-plane-qa/deployment.env
+/control-plane-qa/port-forwards.log
+/control-plane-qa/windows-hyperv/.quickstart-state-hyperv.json
+/control-plane-qa/Setup Challenges.txt
+/build-featbit-images.ps1
