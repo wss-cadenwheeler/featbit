@@ -1,8 +1,5 @@
-using System.Text.Json;
 using Confluent.Kafka;
-using Domain.EndUsers;
 using Domain.Messages;
-using Domain.Utils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,12 +47,10 @@ public partial class KafkaMessageConsumer : BackgroundService
                 consumeResult = _consumer.Consume(cancellationToken);
                 if (consumeResult.IsPartitionEOF)
                 {
-                    // reached end of topic
                     continue;
                 }
 
                 message = consumeResult.Message.Value;
-                
                 if (string.IsNullOrWhiteSpace(message))
                 {
                     continue;
@@ -68,15 +63,15 @@ public partial class KafkaMessageConsumer : BackgroundService
                 }
 
                 using var scope = _serviceProvider.CreateScope();
-                var sp = scope.ServiceProvider;
-                
-                var handler = sp.GetKeyedService<IMessageHandler>(topic);
+
+                var handler = scope.ServiceProvider.GetKeyedService<IMessageHandler>(consumeResult.Topic);
                 if (handler == null)
+
                 {
-                    Log.NoHandlerForTopic(_logger, topic);
+                    Log.NoHandlerForTopic(_logger, consumeResult.Topic);
                     continue;
                 }
-                
+
                 await handler.HandleAsync(message);
             }
             catch (ConsumeException ex)

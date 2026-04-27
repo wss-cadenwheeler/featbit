@@ -1,0 +1,103 @@
+# FeatBit Proxy Setup - Manual Steps
+# NOTE: These steps are now automated by Setup-FeatBitProxy.ps1.
+# This file is retained as a reference for environments where the script cannot run.
+# Run as Administrator
+
+# STEP 1: Install nginx
+choco install nginx -y
+
+# STEP 2: Copy nginx config
+# Copy nginx.conf from the control-plane-qa directory to C:\nginx\conf\nginx.conf
+
+# STEP 3: Update hosts file
+# Add these lines to C:\Windows\System32\drivers\etc\hosts:
+# 127.0.0.1 featbit.west.local featbit-api.west.local featbit-eval.west.local
+# 127.0.0.1 featbit.east.local featbit-api.east.local featbit-eval.east.local
+
+# STEP 4: Update FeatBit UI deployments
+# Run these kubectl commands:
+
+kubectl --context west apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: featbit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      containers:
+        - env:
+            - name: API_URL
+              value: http://featbit-api.west.local
+            - name: DEMO_URL
+              value: https://featbit-samples.vercel.app
+            - name: EVALUATION_URL
+              value: http://featbit-eval.west.local
+          image: host.minikube.internal:5000/featbit/featbit-ui:latest
+          name: ui
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+EOF
+
+kubectl --context east apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: featbit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      containers:
+        - env:
+            - name: API_URL
+              value: http://featbit-api.east.local
+            - name: DEMO_URL
+              value: https://featbit-samples.vercel.app
+            - name: EVALUATION_URL
+              value: http://featbit-eval.east.local
+          image: host.minikube.internal:5000/featbit/featbit-ui:latest
+          name: ui
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+EOF
+
+# STEP 5: Start port forwarding (in separate PowerShell windows)
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/ui 8081:8081"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/ui 8082:8081"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/api-server 5000:5000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/api-server 5001:5000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/evaluation-server 5100:5100"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/evaluation-server 5101:5100"
+
+# STEP 6: Start nginx
+cd C:\nginx
+.\nginx.exe
+
+# STEP 7: Access FeatBit
+# Open browser to:
+#   http://featbit.west.local
+#   http://featbit.east.local

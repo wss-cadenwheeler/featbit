@@ -24,14 +24,21 @@ public partial class RedisMessageConsumer : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Subscribe Topics.FeatureFlagChange, Topics.SegmentChange, Topics.PushFullSyncChange
-        var channel = new RedisChannel(Topics.DataChangePattern, RedisChannel.PatternMode.Pattern);
-        var queue = await _redisClient.GetSubscriber().SubscribeAsync(channel);
+        var subscriber = _redisClient.GetSubscriber();
+
+        // Subscribe to both the pattern-based data changes and the explicit control-plane command topic
+        var dataChangeChannel = new RedisChannel(Topics.DataChangePattern, RedisChannel.PatternMode.Pattern);
+        var controlPlaneCommandChannel = new RedisChannel(Topics.ControlPlaneCommand, RedisChannel.PatternMode.Literal);
+
+        var queue = await subscriber.SubscribeAsync(dataChangeChannel);
+        await subscriber.SubscribeAsync(controlPlaneCommandChannel);
 
         _logger.LogInformation(
-            "Start consuming flag & segment change messages through channel {Channel}.",
-            channel.ToString()
+            "Start consuming flag & segment change messages through channel {Channel}, and control plane command messages through channel {ControlPlaneChannel}.",
+            dataChangeChannel.ToString(),
+            controlPlaneCommandChannel.ToString()
         );
+
         // process messages sequentially. ref: https://stackexchange.github.io/StackExchange.Redis/PubSubOrder.html
         queue.OnMessage(HandleMessageAsync);
         return;

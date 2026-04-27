@@ -20,7 +20,7 @@ public class PushFullSyncHandlerTests
 
         _producer
             .Setup(x => x.PublishAsync(
-                ControlPlaneTopics.PushFullSyncChange,
+                ControlPlaneTopics.ControlPlaneCommand,
                 It.IsAny<object>()))
             .Returns(Task.CompletedTask);
 
@@ -29,7 +29,7 @@ public class PushFullSyncHandlerTests
         Assert.True(result);
 
         _producer.Verify(x => x.PublishAsync(
-            ControlPlaneTopics.PushFullSyncChange,
+            ControlPlaneTopics.ControlPlaneCommand,
             It.IsAny<object>()), Times.Once);
 
         _logger.Verify(
@@ -51,7 +51,7 @@ public class PushFullSyncHandlerTests
 
         _producer
             .Setup(x => x.PublishAsync(
-                ControlPlaneTopics.PushFullSyncChange,
+                ControlPlaneTopics.ControlPlaneCommand,
                 It.IsAny<object>()))
             .ThrowsAsync(ex);
 
@@ -60,7 +60,7 @@ public class PushFullSyncHandlerTests
         Assert.False(result);
 
         _producer.Verify(x => x.PublishAsync(
-            ControlPlaneTopics.PushFullSyncChange,
+            ControlPlaneTopics.ControlPlaneCommand,
             It.IsAny<object>()), Times.Once);
 
         _logger.Verify(

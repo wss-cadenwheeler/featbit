@@ -10,7 +10,7 @@ public static class ControlPlaneTopics
     
     public const string ControlPlaneLicenseChange = "featbit-control-plane-license-change";
     
-    public const string PushFullSyncChange = "featbit-control-plane-push-full-sync-change";
+    public const string ControlPlaneCommand = "featbit-control-plane-command";
 
     public const string ConnectionMade = "featbit-connection-made";
     
