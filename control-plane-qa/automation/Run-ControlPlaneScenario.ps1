@@ -14,11 +14,23 @@ param(
 
     [string]$ApiVersion = "1",
 
-    [string]$WestApiBaseUrl = "http://localhost:15000",
+    [string]$WestApiBaseUrl = "https://featbit-api.west.local",
 
-    [string]$EastApiBaseUrl = "http://localhost:15001",
+    [string]$EastApiBaseUrl = "https://featbit-api.east.local",
+
+    [string]$LoginApiBaseUrl,
 
     [string]$ApiAuthorizationHeader,
+
+    [string]$LoginEmail = "test@featbit.com",
+
+    [string]$LoginPassword = "123456",
+
+    [string]$WorkspaceKey = "",
+
+    [string]$OrganizationKey = "playground",
+
+    [bool]$SkipCertificateCheck = $true,
 
     [string]$FlagKey,
 
@@ -49,6 +61,141 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+function Invoke-ApiRequest {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [hashtable]$Headers,
+        [object]$Body = $null
+    )
+
+    $invokeArgs = @{
+        Method = $Method
+        Uri = $Uri
+        Headers = $Headers
+    }
+
+    if ($SkipCertificateCheck) {
+        $invokeArgs["SkipCertificateCheck"] = $true
+    }
+
+    if ($null -ne $Body) {
+        if ($Body -is [string]) {
+            $invokeArgs["Body"] = $Body
+        }
+        else {
+            $invokeArgs["Body"] = ($Body | ConvertTo-Json -Depth 20)
+        }
+    }
+
+    return Invoke-RestMethod @invokeArgs
+}
+
+function Get-ApiData {
+    param([object]$Response)
+
+    if ($null -eq $Response) {
+        return $null
+    }
+
+    if ($Response.PSObject.Properties.Name -contains "data") {
+        return $Response.data
+    }
+
+    if ($Response.PSObject.Properties.Name -contains "Data") {
+        return $Response.Data
+    }
+
+    return $Response
+}
+
+function Resolve-AuthorizationHeader {
+    param([string]$DefaultBaseUrl)
+
+    if (-not [string]::IsNullOrWhiteSpace($ApiAuthorizationHeader)) {
+        return $ApiAuthorizationHeader
+    }
+
+    $loginBaseUrl = if ([string]::IsNullOrWhiteSpace($LoginApiBaseUrl)) { $DefaultBaseUrl } else { $LoginApiBaseUrl.TrimEnd('/') }
+    $loginUri = "{0}/api/v{1}/identity/login-by-email" -f $loginBaseUrl, $ApiVersion
+
+    $loginPayload = [PSCustomObject]@{
+        email = $LoginEmail
+        password = $LoginPassword
+        workspaceKey = $WorkspaceKey
+    }
+
+    $loginHeaders = @{ "Content-Type" = "application/json" }
+    $response = Invoke-ApiRequest -Method "Post" -Uri $loginUri -Headers $loginHeaders -Body $loginPayload
+    $data = Get-ApiData -Response $response
+    $token = $null
+
+    if ($null -ne $data) {
+        if ($data.PSObject.Properties.Name -contains "token") {
+            $token = $data.token
+        }
+        elseif ($data.PSObject.Properties.Name -contains "Token") {
+            $token = $data.Token
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw "Login succeeded but access token was not found in response payload."
+    }
+
+    return "Bearer $token"
+}
+
+function Resolve-RequestContext {
+    param(
+        [string]$BaseUrl,
+        [string]$AuthorizationHeader
+    )
+
+    if (-not $AuthorizationHeader.StartsWith("Bearer ")) {
+        return [PSCustomObject]@{
+            workspaceId = $null
+            organizationId = $null
+        }
+    }
+
+    $authHeaders = @{
+        "Content-Type" = "application/json"
+        "Authorization" = $AuthorizationHeader
+    }
+
+    $profileUri = "{0}/api/v{1}/user/profile" -f $BaseUrl, $ApiVersion
+    $profileResponse = Invoke-ApiRequest -Method "Get" -Uri $profileUri -Headers $authHeaders
+    $profile = Get-ApiData -Response $profileResponse
+
+    $workspaceId = $null
+    if ($null -ne $profile) {
+        $workspaceId = if ($profile.PSObject.Properties.Name -contains "workspaceId") { $profile.workspaceId } else { $profile.WorkspaceId }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($workspaceId)) {
+        throw "Unable to resolve workspace id from /user/profile for bearer authentication."
+    }
+
+    $authHeaders["Workspace"] = $workspaceId
+    $orgListUri = "{0}/api/v{1}/organizations" -f $BaseUrl, $ApiVersion
+    $orgListResponse = Invoke-ApiRequest -Method "Get" -Uri $orgListUri -Headers $authHeaders
+    $organizations = @(Get-ApiData -Response $orgListResponse)
+    if (-not $organizations -or $organizations.Count -eq 0) {
+        throw "No organizations available for the current login. Seed data first or provide an API token."
+    }
+
+    $organization = $organizations | Where-Object { $_.key -eq $OrganizationKey } | Select-Object -First 1
+    if ($null -eq $organization) {
+        $organization = $organizations | Select-Object -First 1
+    }
+
+    return [PSCustomObject]@{
+        workspaceId = $workspaceId
+        organizationId = $organization.id
+    }
+}
 
 function Get-ScenarioDefinition {
     param(
@@ -110,12 +257,26 @@ function Get-ApiBaseUrl {
 }
 
 function New-Headers {
+    param(
+        [string]$AuthorizationHeader,
+        [string]$WorkspaceId,
+        [string]$OrganizationId
+    )
+
     $headers = @{
         "Content-Type" = "application/json"
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($ApiAuthorizationHeader)) {
-        $headers["Authorization"] = $ApiAuthorizationHeader
+    if (-not [string]::IsNullOrWhiteSpace($AuthorizationHeader)) {
+        $headers["Authorization"] = $AuthorizationHeader
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($WorkspaceId)) {
+        $headers["Workspace"] = $WorkspaceId
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($OrganizationId)) {
+        $headers["Organization"] = $OrganizationId
     }
 
     return $headers
@@ -132,7 +293,7 @@ function Invoke-ToggleFlag {
 
     $uri = "{0}/api/v{1}/envs/{2}/feature-flags/{3}/toggle/{4}" -f $BaseUrl, $ApiVersion, $EnvironmentId, $FeatureFlagKey, $Status.ToString().ToLowerInvariant()
 
-    return Invoke-RestMethod -Method Put -Uri $uri -Headers $Headers -Body "{}"
+    return Invoke-ApiRequest -Method "Put" -Uri $uri -Headers $Headers -Body "{}"
 }
 
 function Get-FlagState {
@@ -147,8 +308,8 @@ function Get-FlagState {
     $uri = "{0}/api/v{1}/envs/{2}/feature-flags/{3}" -f $BaseUrl, $ApiVersion, $EnvironmentId, $FeatureFlagKey
 
     try {
-        $result = Invoke-RestMethod -Method Get -Uri $uri -Headers $Headers
-        $data = $result.data
+        $result = Invoke-ApiRequest -Method "Get" -Uri $uri -Headers $Headers
+        $data = Get-ApiData -Response $result
 
         return [PSCustomObject]@{
             region = $Region
@@ -298,10 +459,13 @@ function Wait-ForConvergence {
 
 $definition = Get-ScenarioDefinition -ScenarioName $Scenario -CustomFlagKey $FlagKey -CustomTargetStatus $TargetStatus
 $effectiveFlagKey = if ([string]::IsNullOrWhiteSpace($FlagKey)) { $definition.DefaultFlagKey } else { $FlagKey }
-$headers = New-Headers
 
 $sourceBaseUrl = Get-ApiBaseUrl -Region $definition.SourceRegion
 $targetBaseUrl = Get-ApiBaseUrl -Region $definition.TargetRegion
+
+$effectiveAuthorizationHeader = Resolve-AuthorizationHeader -DefaultBaseUrl $sourceBaseUrl
+$requestContext = Resolve-RequestContext -BaseUrl $sourceBaseUrl -AuthorizationHeader $effectiveAuthorizationHeader
+$headers = New-Headers -AuthorizationHeader $effectiveAuthorizationHeader -WorkspaceId $requestContext.workspaceId -OrganizationId $requestContext.organizationId
 
 $runId = [Guid]::NewGuid().ToString()
 $runStartedUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -320,9 +484,14 @@ $timeline.Add([PSCustomObject]@{
     scenario = $Scenario
     sourceRegion = $definition.SourceRegion
     targetRegion = $definition.TargetRegion
+    apiBaseUrlSource = $sourceBaseUrl
+    apiBaseUrlTarget = $targetBaseUrl
     envId = $EnvId
     flagKey = $effectiveFlagKey
     expectedStatus = $definition.TargetStatus
+    authType = if ($effectiveAuthorizationHeader.StartsWith("Bearer ")) { "bearer" } else { "openapi" }
+    workspaceId = $requestContext.workspaceId
+    organizationId = $requestContext.organizationId
 })
 
 try {
