@@ -42,7 +42,11 @@ param(
 
     [string]$StartEastDisruptionCommand,
 
-    [string]$StopEastDisruptionCommand
+    [string]$StopEastDisruptionCommand,
+
+    [string]$RedisWestCheckCommand,
+
+    [string]$RedisEastCheckCommand
 )
 
 Set-StrictMode -Version Latest
@@ -88,19 +92,19 @@ if ($effectiveEnvId -eq [Guid]::Empty) {
 }
 
 if ($Suite -eq "cp02") {
-    & $runnerPath -Scenario "cp02-west-to-east" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck
+    & $runnerPath -Scenario "cp02-west-to-east" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -RedisWestCheckCommand $RedisWestCheckCommand -RedisEastCheckCommand $RedisEastCheckCommand
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 
-    & $runnerPath -Scenario "cp02-east-to-west" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck
+    & $runnerPath -Scenario "cp02-east-to-west" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -RedisWestCheckCommand $RedisWestCheckCommand -RedisEastCheckCommand $RedisEastCheckCommand
     exit $LASTEXITCODE
 }
 
-& $runnerPath -Scenario "cp03-west-with-east-redis-outage" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -StartDisruptionCommand $StartEastDisruptionCommand -StopDisruptionCommand $StopEastDisruptionCommand
+& $runnerPath -Scenario "cp03-west-with-east-redis-outage" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -StartDisruptionCommand $StartEastDisruptionCommand -StopDisruptionCommand $StopEastDisruptionCommand -RedisWestCheckCommand $RedisWestCheckCommand -RedisEastCheckCommand $RedisEastCheckCommand
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-& $runnerPath -Scenario "cp03-east-with-west-redis-outage" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -StartDisruptionCommand $StartWestDisruptionCommand -StopDisruptionCommand $StopWestDisruptionCommand
+& $runnerPath -Scenario "cp03-east-with-west-redis-outage" -EnvId $effectiveEnvId -ApiAuthorizationHeader $ApiAuthorizationHeader -WestApiBaseUrl $WestApiBaseUrl -EastApiBaseUrl $EastApiBaseUrl -LoginEmail $LoginEmail -LoginPassword $LoginPassword -WorkspaceKey $WorkspaceKey -OrganizationKey $OrganizationKey -SkipCertificateCheck $SkipCertificateCheck -StartDisruptionCommand $StartWestDisruptionCommand -StopDisruptionCommand $StopWestDisruptionCommand -RedisWestCheckCommand $RedisWestCheckCommand -RedisEastCheckCommand $RedisEastCheckCommand
 exit $LASTEXITCODE

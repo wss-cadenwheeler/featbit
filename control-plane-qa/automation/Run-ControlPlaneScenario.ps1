@@ -316,7 +316,7 @@ function Get-FlagState {
             observedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
             isEnabled = $data.isEnabled
             key = $data.key
-            version = $data.version
+            version = if ($data.PSObject.Properties.Name -contains "version") { $data.version } else { $null }
             id = $data.id
             raw = $result
             error = $null
@@ -359,10 +359,16 @@ function Invoke-OptionalCheck {
         [string]$Command,
         [System.Collections.Generic.List[object]]$Assertions,
         [System.Collections.Generic.List[object]]$Timeline,
-        [string]$RunId
+        [string]$RunId,
+        [bool]$Required = $false
     )
 
     if ([string]::IsNullOrWhiteSpace($Command)) {
+        if ($Required) {
+            Add-Assertion -Assertions $Assertions -Name $Name -Passed $false -Details "Command is required but was not provided."
+            return
+        }
+
         Add-Assertion -Assertions $Assertions -Name $Name -Passed $true -Details "Not configured." -Status "skipped"
         return
     }
@@ -538,8 +544,8 @@ try {
     Invoke-OptionalCheck -Name "source-topic-check" -Command $SourceTopicCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId
     Invoke-OptionalCheck -Name "downstream-topic-check" -Command $DownstreamTopicCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId
     Invoke-OptionalCheck -Name "retry-log-check" -Command $RetryLogCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId
-    Invoke-OptionalCheck -Name "redis-west-check" -Command $RedisWestCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId
-    Invoke-OptionalCheck -Name "redis-east-check" -Command $RedisEastCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId
+    Invoke-OptionalCheck -Name "redis-west-check" -Command $RedisWestCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId -Required $true
+    Invoke-OptionalCheck -Name "redis-east-check" -Command $RedisEastCheckCommand -Assertions $assertions -Timeline $timeline -RunId $runId -Required $true
 }
 catch {
     Add-Assertion -Assertions $assertions -Name "runner-execution" -Passed $false -Details $_.Exception.Message
@@ -552,7 +558,7 @@ finally {
     $timeline | ConvertTo-Json -Depth 20 | Set-Content -Path $timelinePath -Encoding utf8
     $assertions | ConvertTo-Json -Depth 20 | Set-Content -Path $assertionsPath -Encoding utf8
 
-    $failedAssertions = $assertions | Where-Object { $_.status -eq "evaluated" -and -not $_.passed }
+    $failedAssertions = @($assertions | Where-Object { $_.status -eq "evaluated" -and -not $_.passed })
     $overallPassed = ($failedAssertions.Count -eq 0)
 
     $summary = [PSCustomObject]@{
@@ -583,6 +589,30 @@ finally {
     }
 
     Write-Host "FAIL: $Scenario" -ForegroundColor Red
-    Write-Host "Artifacts: $artifactDir"
+    Write-Host ""
+    
+    $passedCount = ($assertions | Where-Object { $_.status -eq "evaluated" -and $_.passed }).Count
+    $failedCount = $failedAssertions.Count
+    $skippedCount = ($assertions | Where-Object { $_.status -eq "skipped" }).Count
+    
+    Write-Host "Results: $passedCount passed | $failedCount FAILED | $skippedCount skipped" -ForegroundColor Yellow
+    Write-Host ""
+    
+    if ($failedAssertions.Count -gt 0) {
+        Write-Host "Failed Assertions:" -ForegroundColor Red
+        foreach ($assertion in $failedAssertions) {
+            Write-Host "  ✗ $($assertion.name)" -ForegroundColor Red
+            if (-not [string]::IsNullOrWhiteSpace($assertion.details)) {
+                Write-Host "    └─ $($assertion.details)" -ForegroundColor Yellow
+            }
+        }
+        Write-Host ""
+    }
+    
+    Write-Host "Artifacts Directory: $artifactDir" -ForegroundColor Gray
+    Write-Host "  timeline.json ........... detailed event log" -ForegroundColor Gray
+    Write-Host "  assertions.json ........ all assertion details" -ForegroundColor Gray
+    Write-Host "  summary.json ........... overall result summary" -ForegroundColor Gray
+    
     exit 1
 }
