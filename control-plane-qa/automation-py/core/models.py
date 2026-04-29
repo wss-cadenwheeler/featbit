@@ -1,0 +1,114 @@
+"""Pydantic models for scenarios, assertions, and timeline events."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+
+class FlagState(BaseModel):
+    """State of a feature flag from API poll."""
+
+    region: str
+    observed_at_utc: str
+    is_enabled: Optional[bool] = None
+    key: Optional[str] = None
+    version: Optional[Any] = None
+    id: Optional[str] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class AssertionResult(BaseModel):
+    """Result of a single assertion."""
+
+    name: str
+    passed: bool
+    status: str = "evaluated"  # evaluated, skipped
+    details: str = ""
+
+    class Config:
+        populate_by_name = True
+
+
+class TimelineEvent(BaseModel):
+    """Single event in scenario timeline."""
+
+    type: str  # run-start, api-toggle, poll, optional-check, disruption-command, outage-poll
+    timestamp_utc: str
+    run_id: Optional[str] = None
+    scenario: Optional[str] = None
+    source_region: Optional[str] = None
+    target_region: Optional[str] = None
+    api_base_url_source: Optional[str] = None
+    api_base_url_target: Optional[str] = None
+    env_id: Optional[str] = None
+    flag_key: Optional[str] = None
+    expected_status: Optional[bool] = None
+    auth_type: Optional[str] = None
+    workspace_id: Optional[str] = None
+    organization_id: Optional[str] = None
+    source: Optional[Dict[str, Any]] = None
+    target: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+    check: Optional[str] = None
+    output: Optional[str] = None
+    phase: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@dataclass
+class ScenarioConfig:
+    """Configuration for a scenario run."""
+
+    scenario_name: str
+    env_id: str
+    west_api_base_url: str
+    east_api_base_url: str
+    login_api_base_url: str
+    api_authorization_header: Optional[str]
+    login_email: str
+    login_password: str
+    workspace_key: str
+    organization_key: str
+    skip_certificate_check: bool
+    flag_key: Optional[str]
+    target_status: bool
+    timeout_seconds: int
+    poll_interval_ms: int
+    disruption_hold_seconds: int
+    start_disruption_command: Optional[str]
+    stop_disruption_command: Optional[str]
+    source_topic_check_command: Optional[str]
+    downstream_topic_check_command: Optional[str]
+    retry_log_check_command: Optional[str]
+    redis_west_check_command: Optional[str]
+    redis_east_check_command: Optional[str]
+    artifacts_root: str
+    api_version: str = "1"
+    flag_ids_by_key: Optional[Dict[str, str]] = None
+
+
+class ScenariosummaryJson(BaseModel):
+    """Overall scenario run summary."""
+
+    run_id: str
+    scenario: str
+    started_utc: str
+    finished_utc: str
+    env_id: str
+    flag_key: str
+    source_region: str
+    target_region: str
+    expected_status: bool
+    passed: bool
+    failed_assertions: list[AssertionResult] = Field(default_factory=list)
+    artifacts: Dict[str, str]
+
+    class Config:
+        populate_by_name = True
