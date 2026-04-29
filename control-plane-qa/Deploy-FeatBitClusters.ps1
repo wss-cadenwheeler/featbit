@@ -1340,7 +1340,13 @@ foreach ($clusterContext in @("west", "east")) {
 
     # api-server uses the control-plane for publishing flag/segment change events.
     # This is always true when running via the control-plane-qa scripts.
-    kubectl --context $clusterContext -n featbit set env deployment/api-server "UseControlPlane=true" | Out-Null
+    # api-server cache must use Redis in this topology.
+    kubectl --context $clusterContext -n featbit set env deployment/api-server `
+        "UseControlPlane=true" `
+        "CacheProvider=Redis" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set UseControlPlane/CacheProvider on api-server in $clusterContext"
+    }
 
     # evaluation-server: ControlPlane__UseControlPlane enables the heartbeat service.
     kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
