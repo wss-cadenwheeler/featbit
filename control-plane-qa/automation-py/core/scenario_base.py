@@ -43,6 +43,7 @@ class BaseScenario(ABC):
         self.timeline: list[TimelineEvent] = []
         self.assertions = AssertionRegistry()
         self.artifact_dir: Optional[Path] = None
+        self._on_step: Optional[Any] = None
 
     @abstractmethod
     def definition(self) -> ScenarioDefinition:
@@ -53,6 +54,11 @@ class BaseScenario(ABC):
     def run(self) -> bool:
         """Execute scenario. Return True if passed, False if failed."""
         raise NotImplementedError
+
+    def _notify_step(self, name: str, status: str, detail: str = "") -> None:
+        """Fire step callback if one is configured."""
+        if self._on_step is not None:
+            self._on_step(name, status, detail)
 
     def setup_artifacts(self) -> None:
         """Create artifact directory."""
@@ -272,13 +278,16 @@ class BaseScenario(ABC):
             command: Shell command to run
             required: If True, fail if command not provided or fails
         """
+        self._notify_step(name, "running")
         if not command:
             if required:
                 self.assertions.add_fail(
                     name, "Command is required but was not provided."
                 )
+                self._notify_step(name, "failed", "command not provided")
             else:
                 self.assertions.add_skip(name, "Not configured.")
+                self._notify_step(name, "skipped")
             return
 
         try:
@@ -299,16 +308,20 @@ class BaseScenario(ABC):
 
             if result.returncode == 0:
                 self.assertions.add_pass(name, "Command executed successfully.")
+                self._notify_step(name, "ok")
             else:
                 self.assertions.add_fail(
                     name,
                     f"Command failed with exit code {result.returncode}. "
                     f"Output: {output.strip()}",
                 )
+                self._notify_step(name, "failed", f"exit {result.returncode}")
         except subprocess.TimeoutExpired:
             self.assertions.add_fail(name, "Command timed out after 30 seconds.")
+            self._notify_step(name, "failed", "timed out")
         except Exception as e:
             self.assertions.add_fail(name, f"Command execution error: {e}")
+            self._notify_step(name, "failed", str(e)[:40])
 
     def _run_kubectl(self, args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
         """Run kubectl command and capture output."""
@@ -382,6 +395,7 @@ class BaseScenario(ABC):
             self.run_optional_check(assertion_name, command, required=True)
             return
 
+        self._notify_step(assertion_name, "running")
         context = region
         namespace = "featbit"
         service_name = "redis"
@@ -405,6 +419,7 @@ class BaseScenario(ABC):
                     assertion_name,
                     f"Auto-discovery failed: could not read service '{service_name}' in context '{context}'. {svc_result.stderr.strip()}",
                 )
+                self._notify_step(assertion_name, "failed", "service discovery failed")
                 return
 
             svc = json.loads(svc_result.stdout)
@@ -418,6 +433,7 @@ class BaseScenario(ABC):
                     assertion_name,
                     f"Auto-discovery failed: no running redis pod found in context '{context}' namespace '{namespace}'.",
                 )
+                self._notify_step(assertion_name, "failed", "no redis pod found")
                 return
 
             ping_result = self._run_kubectl(
@@ -445,6 +461,7 @@ class BaseScenario(ABC):
                     assertion_name,
                     f"Auto-check failed for context={context}, namespace={namespace}, pod={pod_name}, endpoint={cluster_ip}:{redis_port}. Output: {output}",
                 )
+                self._notify_step(assertion_name, "failed", "redis ping failed")
                 return
 
             if not flag_id:
@@ -452,6 +469,7 @@ class BaseScenario(ABC):
                     assertion_name,
                     f"Redis check requires flag_id for GUID lookup in context={context}.",
                 )
+                self._notify_step(assertion_name, "failed", "flag_id not resolved")
                 return
 
             keys: list[str] = []
@@ -510,11 +528,8 @@ class BaseScenario(ABC):
                         assertion_name,
                         f"Redis key scan failed for flag_id={flag_id} (key=featbit:flag:{flag_id}) in context={context}. Output: {(scan_result.stdout + scan_result.stderr).strip()}",
                     )
+                    self._notify_step(assertion_name, "failed", "key scan failed")
                     return
-
-            if not keys:
-                # Wildcard scan to surface the actual key format stored in Redis so the
-                # expected prefix can be corrected.
                 diag_scan = self._run_kubectl(
                     [
                         "--context",
@@ -545,6 +560,7 @@ class BaseScenario(ABC):
                     f"Redis is reachable but no keys found for flag_id={flag_id} "
                     f"(tried key=featbit:flag:{flag_id}) in context={context}.{diag_hint}",
                 )
+                self._notify_step(assertion_name, "failed", "no keys found")
                 return
 
             for key in keys[:5]:
@@ -601,19 +617,102 @@ class BaseScenario(ABC):
                     assertion_name,
                     f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context}.",
                 )
+                self._notify_step(assertion_name, "ok")
                 return
 
             self.assertions.add_fail(
                 assertion_name,
                 f"Redis contains keys for flag_key={flag_key} in context={context}, but sampled values did not include expected isEnabled={expected_status}.",
             )
+            self._notify_step(assertion_name, "failed", "isEnabled mismatch")
         except subprocess.TimeoutExpired:
             self.assertions.add_fail(
                 assertion_name,
                 f"Auto-check timed out while querying Redis in context '{context}'.",
             )
+            self._notify_step(assertion_name, "failed", "timed out")
         except Exception as e:
             self.assertions.add_fail(assertion_name, f"Auto-check error: {e}")
+            self._notify_step(assertion_name, "failed", str(e)[:40])
+
+    _KAFKA_POD = "kafka"
+    _KAFKA_BIN = "/opt/bitnami/kafka/bin"
+    _KAFKA_BOOTSTRAP = "kafka:9092"
+    _KAFKA_AGGREGATE_BOOTSTRAP = "kafka-aggregate:9092"
+
+    def run_kafka_topic_check(
+        self,
+        name: str,
+        command: Optional[str],
+        context: str,
+        bootstrap: str,
+        topic: str,
+        flag_id: Optional[str] = None,
+        namespace: str = "featbit",
+    ) -> None:
+        """Assert a flag-change message exists on a Kafka topic.
+
+        Uses kubectl exec into the main kafka pod with kafka-console-consumer.sh.
+        Delegates to a custom shell command when one is provided.
+        """
+        if command:
+            self.run_optional_check(name, command)
+            return
+
+        self._notify_step(name, "running")
+
+        if not flag_id:
+            self.assertions.add_fail(name, f"Kafka topic check requires flag_id in context={context}.")
+            self._notify_step(name, "failed", "flag_id not resolved")
+            return
+
+        try:
+            result = self._run_kubectl(
+                [
+                    "--context", context,
+                    "-n", namespace,
+                    "exec", self._KAFKA_POD, "--",
+                    f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
+                    "--bootstrap-server", bootstrap,
+                    "--topic", topic,
+                    "--from-beginning",
+                    "--timeout-ms", "5000",
+                ],
+                timeout=30,
+            )
+
+            # kafka-console-consumer exits 1 on timeout even when messages were found;
+            # treat any output as potentially valid and rely on content search.
+            output = result.stdout + result.stderr
+            if result.returncode != 0 and not result.stdout.strip():
+                self.assertions.add_fail(
+                    name,
+                    f"Kafka consumer failed for topic={topic} on bootstrap={bootstrap} "
+                    f"in context={context}. Output: {output.strip()[:200]}",
+                )
+                self._notify_step(name, "failed", "consumer error")
+                return
+
+            if flag_id in output:
+                self.assertions.add_pass(
+                    name,
+                    f"Flag GUID found in topic={topic} on bootstrap={bootstrap} in context={context}.",
+                )
+                self._notify_step(name, "ok")
+            else:
+                self.assertions.add_fail(
+                    name,
+                    f"Flag GUID not found in topic={topic} on bootstrap={bootstrap} "
+                    f"in context={context}. Consumed {len(result.stdout.splitlines())} message(s).",
+                )
+                self._notify_step(name, "failed", "guid not in messages")
+
+        except subprocess.TimeoutExpired:
+            self.assertions.add_fail(name, f"Kafka topic check timed out for topic={topic} in context={context}.")
+            self._notify_step(name, "failed", "timed out")
+        except Exception as e:
+            self.assertions.add_fail(name, f"Kafka topic check error: {e}")
+            self._notify_step(name, "failed", str(e)[:40])
 
     def run_disruption_command(
         self,

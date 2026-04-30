@@ -1063,6 +1063,7 @@ def reset_for_suite_sequence(
     skip_certificate_check: bool = True,
     health_timeout_seconds: int = 120,
     health_poll_interval_seconds: int = 5,
+    on_step=None,
 ) -> Dict[str, Any]:
     """Run deterministic reset sequence for suite execution.
 
@@ -1094,7 +1095,16 @@ def reset_for_suite_sequence(
         "steps": [],
     }
 
-    api_scale_down = scale_down_api_pods(contexts, namespace)
+    def _step(name: str, fn, *args, **kwargs):
+        if on_step:
+            on_step(name, "running")
+        result = fn(*args, **kwargs)
+        success = result.get("success", False) if isinstance(result, dict) else bool(result)
+        if on_step:
+            on_step(name, "ok" if success else "failed")
+        return result
+
+    api_scale_down = _step("api_scale_down", scale_down_api_pods, contexts, namespace)
     results["api_scale_down"] = api_scale_down
     results["steps"].append({"name": "api_scale_down", "success": api_scale_down.get("success", False)})
     if not api_scale_down.get("success", False):
@@ -1103,7 +1113,7 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="api_scale_down", results=results)
         return results
 
-    mongodb = reset_mongodb_flags(contexts, namespace)
+    mongodb = _step("mongodb_delete_flags", reset_mongodb_flags, contexts, namespace)
     results["mongodb"] = mongodb
     results["steps"].append({"name": "mongodb_delete_flags", "success": mongodb.get("success", False)})
     if not mongodb.get("success", False):
@@ -1112,11 +1122,15 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="mongodb_delete_flags", results=results)
         return results
 
+    if on_step:
+        on_step("redis_readiness", "running")
     redis_west_ready = ensure_redis_running("west", namespace)
     redis_east_ready = ensure_redis_running("east", namespace)
     results["redis_west_ready"] = redis_west_ready
     results["redis_east_ready"] = redis_east_ready
     redis_ready_success = redis_west_ready.get("success", False) and redis_east_ready.get("success", False)
+    if on_step:
+        on_step("redis_readiness", "ok" if redis_ready_success else "failed")
     results["steps"].append({"name": "redis_readiness", "success": redis_ready_success})
     if not redis_ready_success:
         results["success"] = False
@@ -1124,11 +1138,15 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="redis_readiness", results=results)
         return results
 
+    if on_step:
+        on_step("redis_flush", "running")
     redis_west = reset_redis("west", namespace)
     redis_east = reset_redis("east", namespace)
     results["redis_west"] = redis_west
     results["redis_east"] = redis_east
     redis_success = redis_west.get("success", False) and redis_east.get("success", False)
+    if on_step:
+        on_step("redis_flush", "ok" if redis_success else "failed")
     results["steps"].append({"name": "redis_flush", "success": redis_success})
     if not redis_success:
         results["success"] = False
@@ -1137,7 +1155,7 @@ def reset_for_suite_sequence(
         return results
 
     kafka_topics = topics_for_suite(suite_name)
-    kafka = reset_kafka_topics(contexts, namespace, topics=kafka_topics)
+    kafka = _step("kafka_topics_reset", reset_kafka_topics, contexts, namespace, topics=kafka_topics)
     results["kafka"] = kafka
     results["kafka_topics"] = kafka_topics
     results["steps"].append({"name": "kafka_topics_reset", "success": kafka.get("success", False)})
@@ -1147,7 +1165,7 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="kafka_topics_reset", results=results)
         return results
 
-    mirrormakers = restart_mirrormakers(contexts, namespace)
+    mirrormakers = _step("mirrormaker_restart", restart_mirrormakers, contexts, namespace)
     results["mirrormakers"] = mirrormakers
     results["steps"].append({"name": "mirrormaker_restart", "success": mirrormakers.get("success", False)})
     if not mirrormakers.get("success", False):
@@ -1156,11 +1174,15 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="mirrormaker_restart", results=results)
         return results
 
+    if on_step:
+        on_step("redis_readiness_pre_api_scale_up", "running")
     redis_west_ready_pre_scale_up = ensure_redis_running("west", namespace)
     redis_east_ready_pre_scale_up = ensure_redis_running("east", namespace)
     results["redis_west_ready_pre_scale_up"] = redis_west_ready_pre_scale_up
     results["redis_east_ready_pre_scale_up"] = redis_east_ready_pre_scale_up
     redis_ready_pre_scale_up_success = redis_west_ready_pre_scale_up.get("success", False) and redis_east_ready_pre_scale_up.get("success", False)
+    if on_step:
+        on_step("redis_readiness_pre_api_scale_up", "ok" if redis_ready_pre_scale_up_success else "failed")
     results["steps"].append({"name": "redis_readiness_pre_api_scale_up", "success": redis_ready_pre_scale_up_success})
     if not redis_ready_pre_scale_up_success:
         results["success"] = False
@@ -1168,7 +1190,9 @@ def reset_for_suite_sequence(
         logger.error("reset.sequence.failed", step="redis_readiness_pre_api_scale_up", results=results)
         return results
 
-    api_scale_up = scale_up_api_pods(
+    api_scale_up = _step(
+        "api_scale_up",
+        scale_up_api_pods,
         api_scale_down.get("snapshots", {}),
         namespace,
     )
@@ -1182,6 +1206,8 @@ def reset_for_suite_sequence(
 
     if stabilization_seconds > 0:
         logger.info("reset.sequence.stabilizing", wait_seconds=stabilization_seconds)
+        if on_step:
+            on_step("stabilization_wait", "running")
         stabilization_started = time.perf_counter()
         time.sleep(stabilization_seconds)
         results["stabilization"] = {
@@ -1189,8 +1215,12 @@ def reset_for_suite_sequence(
             "wait_seconds": stabilization_seconds,
             "duration_seconds": round(time.perf_counter() - stabilization_started, 3),
         }
+        if on_step:
+            on_step("stabilization_wait", "ok")
         results["steps"].append({"name": "stabilization_wait", "success": True})
 
+    if on_step:
+        on_step("health_verification", "running")
     health = verify_post_reset_health(
         west_api_base_url=west_api_base_url,
         east_api_base_url=east_api_base_url,
@@ -1200,6 +1230,8 @@ def reset_for_suite_sequence(
         health_timeout_seconds=health_timeout_seconds,
         health_poll_interval_seconds=health_poll_interval_seconds,
     )
+    if on_step:
+        on_step("health_verification", "ok" if health.get("success", False) else "failed")
     results["health"] = health
     results["steps"].append({"name": "health_verification", "success": health.get("success", False)})
 

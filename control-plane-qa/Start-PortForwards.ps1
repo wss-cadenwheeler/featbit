@@ -139,8 +139,11 @@ $jobs = @(
     @{Name="kafka"; Context="west"; Namespace="featbit"; Service="kafka"; LocalPort="29092"; RemotePort="29092"}
     @{Name="west-kafka-ui"; Context="west"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18080"; RemotePort="8080"}
     @{Name="east-kafka-ui"; Context="east"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18081"; RemotePort="8080"}
-    @{Name="west-redis"; Context="west"; Namespace="featbit"; Service="redis"; LocalPort="6379"; RemotePort="6379"}
-    @{Name="east-redis"; Context="east"; Namespace="featbit"; Service="redis"; LocalPort="6380"; RemotePort="6379"}
+    # Redis port-forwards bind to 0.0.0.0 so that control-plane pods can reach them via
+    # host.minikube.internal (resolves to 192.168.127.254 on Hyper-V), which is not the
+    # loopback address. All other port-forwards remain loopback-only.
+    @{Name="west-redis"; Context="west"; Namespace="featbit"; Service="redis"; LocalPort="6379"; RemotePort="6379"; Address="0.0.0.0"}
+    @{Name="east-redis"; Context="east"; Namespace="featbit"; Service="redis"; LocalPort="6380"; RemotePort="6379"; Address="0.0.0.0"}
 )
 
 # Advanced mode: MongoDB runs as a StatefulSet — pods are mongodb-west-0/1 and mongodb-east-0.
@@ -172,7 +175,7 @@ else {
 $runspaceJobs = @()
 foreach ($job in $jobs) {
     $scriptBlock = {
-        param($Name, $Context, $Namespace, $Service, $Pod, $LocalPort, $RemotePort, $LogFile, $ScriptRoot)
+        param($Name, $Context, $Namespace, $Service, $Pod, $LocalPort, $RemotePort, $LogFile, $ScriptRoot, $Address)
         
         function Write-Log {
             param([string]$Message, [string]$Level = "INFO")
@@ -185,10 +188,11 @@ foreach ($job in $jobs) {
             Write-Log "Starting port forward ${LocalPort}:${RemotePort}"
             
             try {
+                $addressArgs = if ($Address) { @("--address", $Address) } else { @() }
                 if ($Pod) {
-                    kubectl --context $Context port-forward -n $Namespace "pod/$Pod" "${LocalPort}:${RemotePort}" 2>&1 | Out-Null
+                    kubectl --context $Context port-forward @addressArgs -n $Namespace "pod/$Pod" "${LocalPort}:${RemotePort}" 2>&1 | Out-Null
                 } else {
-                    kubectl --context $Context port-forward -n $Namespace "svc/$Service" "${LocalPort}:${RemotePort}" 2>&1 | Out-Null
+                    kubectl --context $Context port-forward @addressArgs -n $Namespace "svc/$Service" "${LocalPort}:${RemotePort}" 2>&1 | Out-Null
                 }
                 Write-Log "Port forward exited" -Level "WARN"
             } catch {
@@ -209,7 +213,8 @@ foreach ($job in $jobs) {
         AddArgument($job.LocalPort).
         AddArgument($job.RemotePort).
         AddArgument($logFile).
-        AddArgument($PSScriptRoot) | Out-Null
+        AddArgument($PSScriptRoot).
+        AddArgument($job.Address) | Out-Null
     
     $handle = $powerShell.BeginInvoke()
     

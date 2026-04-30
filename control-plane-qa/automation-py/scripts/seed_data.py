@@ -41,6 +41,7 @@ def seed(
     force_flags_off: bool = True,
     api_version: str = "1",
     verbose: bool = False,
+    on_flag=None,
 ) -> Dict[str, Any]:
     """Seed control-plane QA data.
 
@@ -62,6 +63,8 @@ def seed(
     """
     logger.info("seed.started", api_base_url=west_api_base_url, organization_key=organization_key, verbose=verbose)
     
+    if on_flag:
+        on_flag("auth", "running")
     client = ApiClient(west_api_base_url, skip_certificate_check, api_version)
 
     # Resolve auth
@@ -95,12 +98,18 @@ def seed(
         workspace_id = profile_data.get("workspaceId") or profile_data.get("WorkspaceId")
         headers["Workspace"] = workspace_id
         logger.info("seed.profile.resolved", workspace_id=workspace_id)
+        if on_flag:
+            on_flag("auth", "ok")
     except Exception as e:
+        if on_flag:
+            on_flag("auth", "failed")
         logger.error("seed.profile.failed", error=str(e), endpoint=profile_endpoint)
         raise
 
     # Get or create organization (idempotent)
     org_list_endpoint = f"/api/v{api_version}/organizations"
+    if on_flag:
+        on_flag("org / project / env", "running")
     if verbose:
         logger.info("seed.organization.querying", endpoint=org_list_endpoint)
     
@@ -272,6 +281,8 @@ def seed(
     flag_ids_by_key: Dict[str, str] = {}
     flags_endpoint = f"/api/v{api_version}/envs/{environment_id}/feature-flags"
     logger.info("seed.flags.seeding", flag_count=len(flag_keys), endpoint=flags_endpoint)
+    if on_flag:
+        on_flag("org / project / env", "ok")
 
     for flag_key in flag_keys:
         existing_flag = None
@@ -280,6 +291,8 @@ def seed(
         if verbose:
             logger.info("seed.flag.processing", flag_key=flag_key)
         
+        if on_flag:
+            on_flag(flag_key, "running")
         try:
             # Try to get existing flag
             if verbose:
@@ -313,10 +326,14 @@ def seed(
                 logger.info("seed.flag.created", flag_key=flag_key, flag_id=existing_flag.get("id"))
             except ApiClientError as create_error:
                 logger.error("seed.flag.create_failed", flag_key=flag_key, error=str(create_error), endpoint=flags_endpoint, payload=flag_payload)
+                if on_flag:
+                    on_flag(flag_key, "failed")
                 raise RuntimeError(f"Failed to create flag {flag_key}: {create_error}")
 
         if existing_flag and existing_flag.get("id"):
             flag_ids_by_key[flag_key] = str(existing_flag.get("id"))
+            if on_flag:
+                on_flag(flag_key, "ok")
 
         # Toggle to false to normalize state
         if force_flags_off and existing_flag:

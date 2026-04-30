@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from core.logging_config import configure_logging, get_logger
 from core.models import ScenarioConfig
 from core import reset as reset_module
+from core.dashboard import SuiteDashboard, is_interactive
 from scenarios import CP02Scenario, CP03Scenario
 from scripts import seed_data as seed_module
 
@@ -528,6 +529,16 @@ def reset_command(
         raise SystemExit(1)
 
 
+class _null_context:
+    """No-op context manager used when the dashboard is disabled."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
 @cli.command()
 @click.argument("suite", type=click.Choice(["cp02", "cp03"]))
 @click.option(
@@ -595,6 +606,12 @@ def reset_command(
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
+@click.option(
+    "--no-dashboard",
+    is_flag=True,
+    default=False,
+    help="Disable the animated dashboard (always off when stdout is not a TTY)",
+)
 def suite(
     suite: str,
     seed_data: bool,
@@ -616,66 +633,114 @@ def suite(
     redis_west_check: str,
     redis_east_check: str,
     artifacts_root: str,
+    no_dashboard: bool,
 ) -> None:
     """Run a test suite (CP-02 or CP-03)."""
-    if reset_env:
-        logger.info(
-            "suite.reset.started",
-            suite=suite,
-            stabilization_seconds=stabilization_seconds,
-            health_timeout_seconds=health_timeout_seconds,
-            health_poll_interval_seconds=health_poll_interval_seconds,
-            log_detail=log_detail,
-        )
-        reset_results = reset_module.reset_for_suite_sequence(
-            suite_name=suite,
-            stabilization_seconds=stabilization_seconds,
-            west_api_base_url=west_api_base_url,
-            east_api_base_url=east_api_base_url,
-            skip_certificate_check=skip_cert_check,
-            health_timeout_seconds=health_timeout_seconds,
-            health_poll_interval_seconds=health_poll_interval_seconds,
-        )
-        if reset_results["success"]:
+    use_dashboard = not no_dashboard and is_interactive()
+
+    seed_flag_keys = ["ff-cp02-west", "ff-cp02-east", "ff-cp03-resilience"]
+    if suite == "cp02":
+        scenario_names = ["cp02-west-to-east", "cp02-east-to-west"]
+    else:
+        scenario_names = ["cp03-west-with-east-redis-outage", "cp03-east-with-west-redis-outage"]
+
+    dashboard = SuiteDashboard(
+        suite=suite,
+        with_reset=reset_env,
+        with_seed=seed_data,
+        seed_flag_keys=seed_flag_keys if seed_data else None,
+        scenario_names=scenario_names,
+    )
+
+    with (dashboard if use_dashboard else _null_context()):
+        if reset_env:
             logger.info(
-                "suite.reset.completed",
+                "suite.reset.started",
                 suite=suite,
-                duration_seconds=reset_results.get("duration_seconds"),
+                stabilization_seconds=stabilization_seconds,
+                health_timeout_seconds=health_timeout_seconds,
+                health_poll_interval_seconds=health_poll_interval_seconds,
+                log_detail=log_detail,
             )
-            _log_reset_details(reset_results, log_detail=log_detail)
-            _log_sequence_details(reset_results, log_detail=log_detail)
-            logger.info("suite.reset.ready", suite=suite)
-        else:
-            logger.error(
-                "suite.reset.failed",
-                suite=suite,
-                duration_seconds=reset_results.get("duration_seconds"),
-            )
-            _log_reset_details(reset_results, log_detail=log_detail)
-            _log_sequence_details(reset_results, log_detail=log_detail)
-            raise SystemExit(1)
-
-        if not seed_data:
-            logger.error(
-                "suite.seed.required_after_reset",
-                suite=suite,
-                reason="Reset deletes flags; pass --seed-data so flags are recreated before scenarios",
-            )
-            raise SystemExit(1)
-
-    effective_env_id = env_id
-    seeded_flag_ids_by_key: Optional[dict[str, str]] = None
-
-    if seed_data:
-        # Give API additional grace period after health check to fully initialize (readiness)
-        # beyond the liveness check
-        logger.info("suite.seed.grace_period", wait_seconds=15)
-        time.sleep(15)
-        
-        logger.info("suite.seed.started", suite=suite)
-        try:
-            result = seed_module.seed(
+            reset_results = reset_module.reset_for_suite_sequence(
+                suite_name=suite,
+                stabilization_seconds=stabilization_seconds,
                 west_api_base_url=west_api_base_url,
+                east_api_base_url=east_api_base_url,
+                skip_certificate_check=skip_cert_check,
+                health_timeout_seconds=health_timeout_seconds,
+                health_poll_interval_seconds=health_poll_interval_seconds,
+                on_step=dashboard.update_reset_step if use_dashboard else None,
+            )
+            if reset_results["success"]:
+                logger.info(
+                    "suite.reset.completed",
+                    suite=suite,
+                    duration_seconds=reset_results.get("duration_seconds"),
+                )
+                _log_reset_details(reset_results, log_detail=log_detail)
+                _log_sequence_details(reset_results, log_detail=log_detail)
+                logger.info("suite.reset.ready", suite=suite)
+            else:
+                logger.error(
+                    "suite.reset.failed",
+                    suite=suite,
+                    duration_seconds=reset_results.get("duration_seconds"),
+                )
+                _log_reset_details(reset_results, log_detail=log_detail)
+                _log_sequence_details(reset_results, log_detail=log_detail)
+                raise SystemExit(1)
+
+            if not seed_data:
+                logger.error(
+                    "suite.seed.required_after_reset",
+                    suite=suite,
+                    reason="Reset deletes flags; pass --seed-data so flags are recreated before scenarios",
+                )
+                raise SystemExit(1)
+
+        effective_env_id = env_id
+        seeded_flag_ids_by_key: Optional[dict[str, str]] = None
+
+        if seed_data:
+            # Give API additional grace period after health check to fully initialize (readiness)
+            # beyond the liveness check
+            logger.info("suite.seed.grace_period", wait_seconds=15)
+            time.sleep(15)
+
+            logger.info("suite.seed.started", suite=suite)
+            try:
+                result = seed_module.seed(
+                    west_api_base_url=west_api_base_url,
+                    login_api_base_url=login_api_base_url or west_api_base_url,
+                    api_authorization_header=api_authorization_header or None,
+                    login_email=login_email,
+                    login_password=login_password,
+                    workspace_key=workspace_key,
+                    organization_key=organization_key,
+                    skip_certificate_check=skip_cert_check,
+                    force_flags_off=True,
+                    verbose=log_detail == "verbose",
+                    on_flag=dashboard.update_seed_item if use_dashboard else None,
+                )
+                effective_env_id = result["env_id_guid"]
+                seeded_flag_ids_by_key = result.get("flag_ids_by_key")
+                logger.info("suite.seed.completed", suite=suite, env_id=effective_env_id)
+            except Exception as e:
+                logger.error("suite.seed.failed", suite=suite, error=str(e))
+                raise SystemExit(1)
+
+        if not effective_env_id:
+            click.echo("Error: --env-id required unless --seed-data is used", err=True)
+            raise SystemExit(1)
+
+        all_passed = True
+        for scenario_name in scenario_names:
+            config = ScenarioConfig(
+                scenario_name=scenario_name,
+                env_id=effective_env_id,
+                west_api_base_url=west_api_base_url,
+                east_api_base_url=east_api_base_url,
                 login_api_base_url=login_api_base_url or west_api_base_url,
                 api_authorization_header=api_authorization_header or None,
                 login_email=login_email,
@@ -683,81 +748,64 @@ def suite(
                 workspace_key=workspace_key,
                 organization_key=organization_key,
                 skip_certificate_check=skip_cert_check,
-                force_flags_off=True,
-                verbose=log_detail == "verbose",
+                flag_key=None,
+                target_status=True,
+                timeout_seconds=60,
+                poll_interval_ms=1000,
+                disruption_hold_seconds=15,
+                start_disruption_command=None,
+                stop_disruption_command=None,
+                source_topic_check_command=None,
+                downstream_topic_check_command=None,
+                retry_log_check_command=None,
+                redis_west_check_command=redis_west_check or None,
+                redis_east_check_command=redis_east_check or None,
+                artifacts_root=artifacts_root,
+                flag_ids_by_key=seeded_flag_ids_by_key,
             )
-            effective_env_id = result["env_id_guid"]
-            seeded_flag_ids_by_key = result.get("flag_ids_by_key")
-            logger.info("suite.seed.completed", suite=suite, env_id=effective_env_id)
-        except Exception as e:
-            logger.error("suite.seed.failed", suite=suite, error=str(e))
+
+            if scenario_name.startswith("cp02"):
+                scenario_obj = CP02Scenario(config)
+            else:
+                scenario_obj = CP03Scenario(config)
+
+            if use_dashboard:
+                _sname = scenario_name
+
+                def _on_step(step: str, status: str, detail: str = "", _sn: str = _sname) -> None:
+                    dashboard.update_scenario_step(_sn, step, status, detail)
+
+                scenario_obj._on_step = _on_step
+
+            logger.info("suite.scenario.started", scenario=scenario_name)
+            if use_dashboard:
+                dashboard.update_scenario(scenario_name, "running")
+            passed = scenario_obj.run()
+
+            if passed:
+                logger.info(
+                    "suite.scenario.completed",
+                    scenario=scenario_name,
+                    passed=True,
+                    artifacts_directory=str(scenario_obj.artifact_dir),
+                )
+                if use_dashboard:
+                    dashboard.update_scenario(scenario_name, "ok")
+            else:
+                _log_scenario_failure_details(scenario_name, scenario_obj)
+                if use_dashboard:
+                    failed_names = ", ".join(
+                        a.name for a in scenario_obj.assertions.get_failed()
+                    )
+                    dashboard.update_scenario(scenario_name, "failed", detail=failed_names)
+                all_passed = False
+
+        if all_passed:
+            logger.info("suite.completed", suite=suite, passed=True)
+            raise SystemExit(0)
+        else:
+            logger.error("suite.completed", suite=suite, passed=False)
             raise SystemExit(1)
-
-    if not effective_env_id:
-        click.echo("Error: --env-id required unless --seed-data is used", err=True)
-        raise SystemExit(1)
-
-    scenarios_to_run = []
-    if suite == "cp02":
-        scenarios_to_run = ["cp02-west-to-east", "cp02-east-to-west"]
-    else:
-        scenarios_to_run = ["cp03-west-with-east-redis-outage", "cp03-east-with-west-redis-outage"]
-
-    all_passed = True
-    for scenario_name in scenarios_to_run:
-        config = ScenarioConfig(
-            scenario_name=scenario_name,
-            env_id=effective_env_id,
-            west_api_base_url=west_api_base_url,
-            east_api_base_url=east_api_base_url,
-            login_api_base_url=login_api_base_url or west_api_base_url,
-            api_authorization_header=api_authorization_header or None,
-            login_email=login_email,
-            login_password=login_password,
-            workspace_key=workspace_key,
-            organization_key=organization_key,
-            skip_certificate_check=skip_cert_check,
-            flag_key=None,
-            target_status=True,
-            timeout_seconds=60,
-            poll_interval_ms=1000,
-            disruption_hold_seconds=15,
-            start_disruption_command=None,
-            stop_disruption_command=None,
-            source_topic_check_command=None,
-            downstream_topic_check_command=None,
-            retry_log_check_command=None,
-            redis_west_check_command=redis_west_check or None,
-            redis_east_check_command=redis_east_check or None,
-            artifacts_root=artifacts_root,
-            flag_ids_by_key=seeded_flag_ids_by_key,
-        )
-
-        if scenario_name.startswith("cp02"):
-            scenario_obj = CP02Scenario(config)
-        else:
-            scenario_obj = CP03Scenario(config)
-
-        logger.info("suite.scenario.started", scenario=scenario_name)
-        passed = scenario_obj.run()
-
-        if passed:
-            logger.info(
-                "suite.scenario.completed",
-                scenario=scenario_name,
-                passed=True,
-                artifacts_directory=str(scenario_obj.artifact_dir),
-            )
-        else:
-            _log_scenario_failure_details(scenario_name, scenario_obj)
-            all_passed = False
-
-    if all_passed:
-        logger.info("suite.completed", suite=suite, passed=True)
-        raise SystemExit(0)
-    else:
-        logger.error("suite.completed", suite=suite, passed=False)
-        raise SystemExit(1)
 
 
 if __name__ == "__main__":

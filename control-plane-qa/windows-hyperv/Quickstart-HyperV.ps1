@@ -457,8 +457,16 @@ function Invoke-DeployClusters([PSCustomObject]$State) {
     $deployScript = Join-Path $script:SiblingDir "Deploy-FeatBitClusters.ps1"
     if (-not (Test-Path $deployScript)) { throw "Deploy-FeatBitClusters.ps1 not found at $deployScript" }
 
+    $wslAdapterIp = (Get-NetIPAddress -InterfaceAlias "vEthernet (WSL (Hyper-V firewall))" -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+    if (-not $wslAdapterIp) {
+        Write-Warn "Could not detect vEthernet (WSL (Hyper-V firewall)) IP — falling back to host.minikube.internal for cross-cluster Redis."
+        $wslAdapterIp = "host.minikube.internal"
+    } else {
+        Write-Info "Detected WSL Hyper-V firewall adapter IP: $wslAdapterIp (will be used for cross-cluster Redis)"
+    }
+
     if ($PSCmdlet.ShouldProcess("west + east clusters", "Deploy FeatBit Advanced + MongoDB")) {
-        & $deployScript -RecreateClusters -DeploymentMode Advanced -DatabaseProvider MongoDb
+        & $deployScript -RecreateClusters -DeploymentMode Advanced -DatabaseProvider MongoDb -CrossClusterRedisHost $wslAdapterIp
         if ($LASTEXITCODE -ne 0) { throw "Deploy-FeatBitClusters.ps1 failed with exit code $LASTEXITCODE" }
     }
 

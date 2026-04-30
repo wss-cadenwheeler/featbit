@@ -105,7 +105,13 @@ param(
     [int]$WestCpus = 4,
     [int]$WestMemory = 8192,
     [int]$EastCpus = 4,
-    [int]$EastMemory = 8192
+    [int]$EastMemory = 8192,
+    # The host IP that control-plane pods use to reach Redis port-forwards.
+    # Defaults to host.minikube.internal (works on Linux/macOS minikube).
+    # On Windows with Hyper-V, pass the vEthernet (WSL (Hyper-V firewall)) adapter IP
+    # (e.g. 172.31.128.1) because host.minikube.internal resolves to the Hyper-V virtual
+    # switch address (192.168.127.254) which is not reachable from within pods.
+    [string]$CrossClusterRedisHost = "host.minikube.internal"
 )
 
 $ErrorActionPreference = "Stop"
@@ -1314,9 +1320,9 @@ Write-Step "Configuring App MQ Provider"
 #   - Apps CONSUME from kafka:9092  (same broker — no aggregate exists)
 if ($clusterInfraComponentSet.Contains("kafka")) {
     # Kafka is deployed inside the cluster (Advanced mode or Basic mode with in-cluster kafka).
-    # kafka-aggregate exists, so consumers point there.
+    # kafka-aggregate exists, so eval-server and api-server consumers point there.
     $kafkaConsumerServers = "kafka-aggregate:9092"
-    Write-Info "In-cluster Kafka detected — consumers will use kafka-aggregate:9092"
+    Write-Info "In-cluster Kafka detected — eval-server/api-server consumers will use kafka-aggregate:9092"
 }
 else {
     # Kafka is a host Docker service (Basic mode default).
@@ -1325,10 +1331,16 @@ else {
     Write-Info "Host Kafka detected — consumers will use kafka:9092"
 }
 $kafkaProducerServers = "kafka:9092"
+# The control-plane always consumes from the main broker directly. Its trigger topic
+# (featbit-control-plane-feature-flag-change) is intra-cluster only and must not go
+# through the aggregate — consuming from the aggregate would cause each region's
+# control-plane to process the same message, double-writing Redis and re-publishing
+# downstream events.
+$controlPlaneKafkaConsumerServers = "kafka:9092"
 
 Write-Info "Setting Kafka producer/consumer broker endpoints and enabling Kafka MQ provider on all app deployments..."
 foreach ($clusterContext in @("west", "east")) {
-    foreach ($dep in @("api-server", "control-plane")) {
+    foreach ($dep in @("api-server")) {
         kubectl --context $clusterContext -n featbit set env "deployment/$dep" `
             "MqProvider=Kafka" `
             "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
@@ -1336,6 +1348,14 @@ foreach ($clusterContext in @("west", "east")) {
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to set Kafka config on $dep in $clusterContext"
         }
+    }
+
+    kubectl --context $clusterContext -n featbit set env deployment/control-plane `
+        "MqProvider=Kafka" `
+        "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
+        "Kafka__Consumer__bootstrap.servers=$controlPlaneKafkaConsumerServers" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set Kafka config on control-plane in $clusterContext"
     }
 
     # api-server uses the control-plane for publishing flag/segment change events.
@@ -1358,7 +1378,7 @@ foreach ($clusterContext in @("west", "east")) {
         Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
     }
 }
-Write-Success "Kafka MQ provider configured for all app deployments (producer=$kafkaProducerServers, consumer=$kafkaConsumerServers)"
+Write-Success "Kafka MQ provider configured for all app deployments (producer=$kafkaProducerServers, api-server/eval-server consumer=$kafkaConsumerServers, control-plane consumer=$controlPlaneKafkaConsumerServers)"
 
 Write-Info "Configuring cross-cluster Redis instances on control-plane deployments..."
 # Each control-plane must update the Redis cache of BOTH clusters when it processes a
@@ -1368,17 +1388,17 @@ Write-Info "Configuring cross-cluster Redis instances on control-plane deploymen
 #   East control-plane → west Redis on host port 6379
 kubectl --context west -n featbit set env deployment/control-plane `
     "Redis__Instances__0=redis:6379" `
-    "Redis__Instances__1=host.minikube.internal:6380" | Out-Null
+    "Redis__Instances__1=${CrossClusterRedisHost}:6380" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Failed to set Redis cross-cluster instance on control-plane in west"
 }
 kubectl --context east -n featbit set env deployment/control-plane `
     "Redis__Instances__0=redis:6379" `
-    "Redis__Instances__1=host.minikube.internal:6379" | Out-Null
+    "Redis__Instances__1=${CrossClusterRedisHost}:6379" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
 }
-Write-Success "Cross-cluster Redis configured (west→east: host.minikube.internal:6380, east→west: host.minikube.internal:6379)"
+Write-Success "Cross-cluster Redis configured (west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
 Start-Sleep -Seconds 45

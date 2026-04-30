@@ -33,6 +33,7 @@ class CP02Scenario(BaseScenario):
             definition = self.definition()
 
             # Resolve auth
+            self._notify_step("auth", "running")
             auth_header = resolve_authorization_header(
                 self.get_api_base_url(definition.source_region),
                 self.config.api_authorization_header,
@@ -51,6 +52,7 @@ class CP02Scenario(BaseScenario):
                 self.config.skip_certificate_check,
                 self.config.api_version,
             )
+            self._notify_step("auth", "ok")
 
             # Build headers
             headers = {
@@ -82,6 +84,7 @@ class CP02Scenario(BaseScenario):
             source_url = self.get_api_base_url(definition.source_region)
             target_url = self.get_api_base_url(definition.target_region)
 
+            self._notify_step("toggle", "running")
             toggle_result = self.toggle_flag(
                 source_url,
                 definition.default_flag_key,
@@ -94,8 +97,10 @@ class CP02Scenario(BaseScenario):
                 result=toggle_result,
             )
             self.assertions.add_pass("api-toggle-succeeded", "Toggle endpoint responded successfully.")
+            self._notify_step("toggle", "ok")
 
             # Poll for convergence
+            self._notify_step("convergence", "running")
             converged, source_state, target_state = self.poll_convergence(
                 source_url,
                 target_url,
@@ -110,23 +115,39 @@ class CP02Scenario(BaseScenario):
                 f"Both regions reported expected isEnabled={definition.target_status}.",
                 "evaluated",
             )
+            self._notify_step("convergence", "ok" if converged else "failed")
 
-            # Run optional checks
-            self.run_optional_check(
+            # Resolve flag_id for topic and Redis checks.
+            flag_id = (self.config.flag_ids_by_key or {}).get(definition.default_flag_key)
+
+            # Kafka topic checks: message arrived on CP topic, forwarded to eval topic,
+            # and MirrorMaker2 replicated to the target cluster's aggregate broker.
+            self.run_kafka_topic_check(
                 "source-topic-check",
                 self.config.source_topic_check_command,
+                context=definition.source_region,
+                bootstrap=self._KAFKA_BOOTSTRAP,
+                topic="featbit-control-plane-feature-flag-change",
+                flag_id=flag_id,
             )
-            self.run_optional_check(
+            self.run_kafka_topic_check(
                 "downstream-topic-check",
                 self.config.downstream_topic_check_command,
+                context=definition.source_region,
+                bootstrap=self._KAFKA_BOOTSTRAP,
+                topic="featbit-feature-flag-change",
+                flag_id=flag_id,
             )
-            self.run_optional_check(
+            self.run_kafka_topic_check(
                 "retry-log-check",
                 self.config.retry_log_check_command,
+                context=definition.target_region,
+                bootstrap=self._KAFKA_AGGREGATE_BOOTSTRAP,
+                topic="featbit-feature-flag-change",
+                flag_id=flag_id,
             )
 
-            # Run Redis checks. If command is not supplied, auto-discover from local clusters.
-            flag_id = (self.config.flag_ids_by_key or {}).get(definition.default_flag_key)
+            # Run Redis checks.
             self.run_redis_check(
                 "west",
                 self.config.redis_west_check_command,
