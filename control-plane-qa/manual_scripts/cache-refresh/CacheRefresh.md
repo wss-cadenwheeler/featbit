@@ -17,7 +17,7 @@ Validates that the Control-Plane API can push a full sync to the Evaluation Serv
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
-2. **Action:** Send a POST request to the `api/admin/push-eval-full-sync` endpoint.
+2. **Action:** Send a POST request to the `api/admin/push-eval-full-sync` endpoint on the control plane.
 3. **Action:** Navigate to featbit-main in kafka-ui
 4. **Action:** Navigate to topics in kafka-ui under featbit-main
 5. **Action:** Click `featbit-control-plane-command`

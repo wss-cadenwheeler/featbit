@@ -15,17 +15,16 @@ Validates that a secret change message is sent through the control plane to upda
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
-2. **Action:** Navigate to featbit-kafka.west.local and featbit-kafka.east.local in two seperate browsers and a standard and incognito instance.
-3. **Action:** Navigate to the featbit.west.local
-4. **Action:** Login
-5. **Action:** In the featbit ui, add a secret under an environment in the `control-plane-test` project.
-6. **Action:** Navigate to featbit-main in kafka-ui
-7. **Action:** Navigate to topics in kafka-ui under featbit-main
-8. **Action:** Click `featbit-control-plane-secret-change`
-9. **Action:** Click Messages
-10. **Action:** Observe a secret change message with an operation of `add`
-11. **Action:** Observe that the secret exists in redis.west.local
-12. **Action:** Observe that the secret exists in redis.east.local
+2. **Action:** Navigate to the featbit.west.local
+3. **Action:** Login
+4. **Action:** In the featbit ui, add a secret under an environment in the `control-plane-test` project.
+5. **Action:** Navigate to featbit-main in kafka-ui
+6. **Action:** Navigate to topics in kafka-ui under featbit-main
+7. **Action:** Click `featbit-control-plane-secret-change`
+8. **Action:** Click Messages
+9. **Action:** Observe a secret change message with an operation of `add`
+10. **Action:** Observe that the secret exists in redis.west.local
+11. **Action:** Observe that the secret exists in redis.east.local
 
 ## Expected Results
 - Redis in both east and west are updated.
