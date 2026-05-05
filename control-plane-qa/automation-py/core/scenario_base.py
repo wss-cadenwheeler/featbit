@@ -384,6 +384,7 @@ class BaseScenario(ABC):
         flag_id: Optional[str] = None,
         flag_key: Optional[str] = None,
         expected_status: Optional[bool] = None,
+        context: Optional[str] = None,
     ) -> None:
         """Run Redis check via provided command or automatic Kubernetes discovery.
 
@@ -396,7 +397,8 @@ class BaseScenario(ABC):
             return
 
         self._notify_step(assertion_name, "running")
-        context = region
+        effective_context = context or region
+        context = effective_context
         namespace = "featbit"
         service_name = "redis"
 

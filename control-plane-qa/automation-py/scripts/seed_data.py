@@ -277,7 +277,7 @@ def seed(
         raise RuntimeError("Environment resolved without an id.")
 
     # Seed feature flags
-    flag_keys = ["ff-cp02-west", "ff-cp02-east", "ff-cp03-resilience"]
+    flag_keys = ["ff-cp01-basic", "ff-cp02-west", "ff-cp02-east", "ff-cp03-resilience"]
     flag_ids_by_key: Dict[str, str] = {}
     flags_endpoint = f"/api/v{api_version}/envs/{environment_id}/feature-flags"
     logger.info("seed.flags.seeding", flag_count=len(flag_keys), endpoint=flags_endpoint)

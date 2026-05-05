@@ -13,7 +13,7 @@ from core.logging_config import configure_logging, get_logger
 from core.models import ScenarioConfig
 from core import reset as reset_module
 from core.dashboard import SuiteDashboard, is_interactive
-from scenarios import CP02Scenario, CP03Scenario
+from scenarios import CP01Scenario, CP02Scenario, CP03Scenario
 from scripts import seed_data as seed_module
 
 
@@ -340,6 +340,8 @@ def seed(
 
 @cli.command()
 @click.argument("scenario", type=click.Choice([
+    "cp01-west-to-east",
+    "cp01-east-to-west",
     "cp02-west-to-east",
     "cp02-east-to-west",
     "cp03-west-with-east-redis-outage",
@@ -444,7 +446,9 @@ def scenario(
         artifacts_root=artifacts_root,
     )
 
-    if scenario.startswith("cp02"):
+    if scenario.startswith("cp01"):
+        scenario_obj = CP01Scenario(config)
+    elif scenario.startswith("cp02"):
         scenario_obj = CP02Scenario(config)
     else:
         scenario_obj = CP03Scenario(config)
@@ -540,7 +544,7 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp02", "cp03"]))
+@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03"]))
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -607,6 +611,11 @@ class _null_context:
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 @click.option(
+    "--chaos-mesh-manifest",
+    default=lambda: get_env("CHAOS_MESH_MANIFEST", "k8s/chaos-mesh/redis-network-loss.yaml"),
+    help="Path to the Chaos Mesh NetworkChaos manifest for Redis disruption (CP-03). Relative paths resolve from control-plane-qa/.",
+)
+@click.option(
     "--no-dashboard",
     is_flag=True,
     default=False,
@@ -633,16 +642,27 @@ def suite(
     redis_west_check: str,
     redis_east_check: str,
     artifacts_root: str,
+    chaos_mesh_manifest: str,
     no_dashboard: bool,
 ) -> None:
-    """Run a test suite (CP-02 or CP-03)."""
+    """Run a test suite (CP-01, CP-02, or CP-03)."""
     use_dashboard = not no_dashboard and is_interactive()
 
-    seed_flag_keys = ["ff-cp02-west", "ff-cp02-east", "ff-cp03-resilience"]
-    if suite == "cp02":
+    seed_flag_keys = [
+        "ff-cp01-basic",
+        "ff-cp02-west",
+        "ff-cp02-east",
+        "ff-cp03-resilience",
+    ]
+    if suite == "cp01":
+        scenario_names = ["cp01-west-to-east", "cp01-east-to-west"]
+    elif suite == "cp02":
         scenario_names = ["cp02-west-to-east", "cp02-east-to-west"]
     else:
-        scenario_names = ["cp03-west-with-east-redis-outage", "cp03-east-with-west-redis-outage"]
+        scenario_names = [
+            "cp03-west-with-east-redis-outage",
+            "cp03-east-with-west-redis-outage",
+        ]
 
     dashboard = SuiteDashboard(
         suite=suite,
@@ -736,6 +756,22 @@ def suite(
 
         all_passed = True
         for scenario_name in scenario_names:
+            # Build per-scenario disruption commands for CP-03.
+            start_cmd = None
+            stop_cmd = None
+            if scenario_name.startswith("cp03"):
+                _manifest = Path(chaos_mesh_manifest)
+                if not _manifest.is_absolute():
+                    # Resolve relative to control-plane-qa/ (two levels up from cli/main.py).
+                    _manifest = Path(__file__).resolve().parents[2] / _manifest
+                manifest_path = str(_manifest.resolve())
+                if scenario_name == "cp03-west-with-east-redis-outage":
+                    target_context = "east"
+                else:
+                    target_context = "west"
+                start_cmd = f"kubectl apply -f {manifest_path} --context {target_context}"
+                stop_cmd = f"kubectl delete -f {manifest_path} --context {target_context} --ignore-not-found"
+
             config = ScenarioConfig(
                 scenario_name=scenario_name,
                 env_id=effective_env_id,
@@ -753,8 +789,8 @@ def suite(
                 timeout_seconds=60,
                 poll_interval_ms=1000,
                 disruption_hold_seconds=15,
-                start_disruption_command=None,
-                stop_disruption_command=None,
+                start_disruption_command=start_cmd,
+                stop_disruption_command=stop_cmd,
                 source_topic_check_command=None,
                 downstream_topic_check_command=None,
                 retry_log_check_command=None,
@@ -764,7 +800,9 @@ def suite(
                 flag_ids_by_key=seeded_flag_ids_by_key,
             )
 
-            if scenario_name.startswith("cp02"):
+            if scenario_name.startswith("cp01"):
+                scenario_obj = CP01Scenario(config)
+            elif scenario_name.startswith("cp02"):
                 scenario_obj = CP02Scenario(config)
             else:
                 scenario_obj = CP03Scenario(config)

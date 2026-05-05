@@ -86,119 +86,53 @@ class CP03Scenario(BaseScenario):
             source_url = self.get_api_base_url(definition.source_region)
             target_url = self.get_api_base_url(definition.target_region)
 
-            # Start disruption
-            self._notify_step("start-disruption", "running")
-            try:
-                self.run_disruption_command("start", self.config.start_disruption_command)
-                self._notify_step("start-disruption", "ok")
-            except RuntimeError as exc:
-                self._notify_step("start-disruption", "failed", str(exc)[:60])
-                raise
-
-            # Hold with outage polls
-            self._notify_step("outage-hold", "running")
-            deadline = time.time() + self.config.disruption_hold_seconds
-            while time.time() < deadline:
-                target_state = self.get_flag_state(
-                    target_url,
-                    definition.default_flag_key,
-                    "target",
-                    headers,
-                )
-                self.add_timeline_event(
-                    "outage-poll",
-                    target=json.loads(target_state.json()),
-                )
-                time.sleep(self.config.poll_interval_ms / 1000.0)
-            self._notify_step("outage-hold", "ok")
-
-            # Toggle flag
-            self._notify_step("toggle", "running")
-            toggle_result = self.toggle_flag(
-                source_url,
-                definition.default_flag_key,
-                definition.target_status,
-                headers,
-            )
-
-            self.add_timeline_event(
-                "api-toggle",
-                result=toggle_result,
-            )
-            self.assertions.add_pass("api-toggle-succeeded", "Toggle endpoint responded successfully.")
-            self._notify_step("toggle", "ok")
-
-            # Stop disruption
-            self._notify_step("stop-disruption", "running")
-            try:
-                self.run_disruption_command("stop", self.config.stop_disruption_command)
-                self._notify_step("stop-disruption", "ok")
-            except RuntimeError as exc:
-                self._notify_step("stop-disruption", "failed", str(exc)[:60])
-                raise
-
-            # Poll for convergence after recovery
-            self._notify_step("convergence", "running")
-            converged, source_state, target_state = self.poll_convergence(
-                source_url,
+            # Capture baseline state before disruption.
+            baseline_target = self.get_flag_state(
                 target_url,
                 definition.default_flag_key,
-                definition.target_status,
+                "target",
                 headers,
             )
+            baseline_target_enabled = baseline_target.is_enabled
 
-            self.assertions.add(
-                "source-target-convergence",
-                converged,
-                f"Both regions reported expected isEnabled={definition.target_status} after recovery.",
-                "evaluated",
-            )
-            self._notify_step("convergence", "ok" if converged else "failed")
+            # --- Phase 2: Simulate target Redis unavailable ---
 
-            # Resolve flag_id for topic and Redis checks.
-            flag_id = (self.config.flag_ids_by_key or {}).get(definition.default_flag_key)
-
-            # Kafka topic checks.
-            self.run_kafka_topic_check(
-                "source-topic-check",
-                self.config.source_topic_check_command,
-                context=definition.source_region,
-                bootstrap=self._KAFKA_BOOTSTRAP,
-                topic="featbit-control-plane-feature-flag-change",
-                flag_id=flag_id,
-            )
-            self.run_kafka_topic_check(
-                "downstream-topic-check",
-                self.config.downstream_topic_check_command,
-                context=definition.source_region,
-                bootstrap=self._KAFKA_BOOTSTRAP,
-                topic="featbit-feature-flag-change",
-                flag_id=flag_id,
-            )
-            self.run_kafka_topic_check(
-                "retry-log-check",
-                self.config.retry_log_check_command,
-                context=definition.target_region,
-                bootstrap=self._KAFKA_AGGREGATE_BOOTSTRAP,
-                topic="featbit-feature-flag-change",
-                flag_id=flag_id,
-            )
-
-            # Run Redis checks.
-            self.run_redis_check(
-                "west",
-                self.config.redis_west_check_command,
-                flag_id=flag_id,
+            self._run_disruption_cycle(
+                phase_label="phase-2",
+                source_url=source_url,
+                target_url=target_url,
                 flag_key=definition.default_flag_key,
-                expected_status=definition.target_status,
+                toggle_to=definition.target_status,
+                baseline_target_enabled=baseline_target_enabled,
+                headers=headers,
+                definition=definition,
             )
-            self.run_redis_check(
-                "east",
-                self.config.redis_east_check_command,
-                flag_id=flag_id,
+
+            # --- Phase 4: Reverse recovery (opposite toggle direction) ---
+
+            reverse_status = not definition.target_status
+            self._run_disruption_cycle(
+                phase_label="phase-4",
+                source_url=source_url,
+                target_url=target_url,
                 flag_key=definition.default_flag_key,
-                expected_status=definition.target_status,
+                toggle_to=reverse_status,
+                baseline_target_enabled=definition.target_status,
+                headers=headers,
+                definition=definition,
             )
+
+            # --- Post-condition: Reset flag and restore connectivity ---
+
+            self._notify_step("cleanup", "running")
+            self.toggle_flag(
+                source_url,
+                definition.default_flag_key,
+                False,
+                headers,
+            )
+            self.add_timeline_event("cleanup", phase="reset-flag-to-false")
+            self._notify_step("cleanup", "ok")
 
             return self.assertions.all_passed()
 
@@ -208,3 +142,202 @@ class CP03Scenario(BaseScenario):
 
         finally:
             self.write_artifacts()
+
+    def _run_disruption_cycle(
+        self,
+        phase_label: str,
+        source_url: str,
+        target_url: str,
+        flag_key: str,
+        toggle_to: bool,
+        baseline_target_enabled: bool,
+        headers: dict,
+        definition: ScenarioDefinition,
+    ) -> None:
+        """Execute one disruption-toggle-recover-verify cycle.
+
+        Extracted so Phase 2 and Phase 4 share identical logic with
+        different toggle directions.
+
+        Args:
+            phase_label: Label for timeline events and assertions.
+            source_url: Source region API URL.
+            target_url: Target region API URL.
+            flag_key: Feature flag key.
+            toggle_to: Target boolean state for the toggle.
+            baseline_target_enabled: Expected target state before toggle.
+            headers: Request headers with auth.
+            definition: Scenario definition for region names.
+        """
+        self.add_timeline_event("phase-start", phase=phase_label)
+
+        # Step 1: Start disruption.
+        step_prefix = f"{phase_label}-"
+        self._notify_step(f"{step_prefix}start-disruption", "running")
+        try:
+            self.run_disruption_command(
+                "start", self.config.start_disruption_command
+            )
+            self._notify_step(f"{step_prefix}start-disruption", "ok")
+        except RuntimeError as exc:
+            self._notify_step(
+                f"{step_prefix}start-disruption",
+                "failed",
+                str(exc)[:60],
+            )
+            raise
+
+        # Step 2: Toggle flag while target Redis is disrupted.
+        self._notify_step(f"{step_prefix}toggle", "running")
+        toggle_result = self.toggle_flag(
+            source_url, flag_key, toggle_to, headers
+        )
+        self.add_timeline_event(
+            "api-toggle",
+            phase=phase_label,
+            result=toggle_result,
+        )
+        self.assertions.add_pass(
+            f"{step_prefix}api-toggle-succeeded",
+            f"Toggle to {toggle_to} succeeded during {phase_label}.",
+        )
+        self._notify_step(f"{step_prefix}toggle", "ok")
+
+        # Step 3: Verify source updated, target unchanged during outage.
+        self._notify_step(f"{step_prefix}outage-hold", "running")
+        deadline = time.time() + self.config.disruption_hold_seconds
+        target_changed_during_outage = False
+
+        while time.time() < deadline:
+            source_state = self.get_flag_state(
+                source_url, flag_key, "source", headers
+            )
+            target_state = self.get_flag_state(
+                target_url, flag_key, "target", headers
+            )
+            self.add_timeline_event(
+                "outage-poll",
+                phase=phase_label,
+                source=json.loads(source_state.json()),
+                target=json.loads(target_state.json()),
+            )
+
+            # Detect if target has changed to the toggled state.
+            if (
+                target_state.error is None
+                and target_state.is_enabled == toggle_to
+            ):
+                target_changed_during_outage = True
+
+            time.sleep(self.config.poll_interval_ms / 1000.0)
+
+        # Assert source region accepted the toggle.
+        source_check = self.get_flag_state(
+            source_url, flag_key, "source", headers
+        )
+        self.assertions.add(
+            f"{step_prefix}source-updated-during-outage",
+            source_check.error is None
+            and source_check.is_enabled == toggle_to,
+            (
+                f"Source region shows isEnabled={toggle_to} "
+                "while target is disrupted."
+            ),
+            "evaluated",
+        )
+
+        # Assert target region remained unchanged during disruption.
+        self.assertions.add(
+            f"{step_prefix}target-unchanged-during-outage",
+            not target_changed_during_outage,
+            (
+                f"Target region remained at "
+                f"isEnabled={baseline_target_enabled} during disruption."
+            ),
+            "evaluated",
+        )
+        self._notify_step(f"{step_prefix}outage-hold", "ok")
+
+        # Step 4: Stop disruption and verify recovery.
+        self._notify_step(f"{step_prefix}stop-disruption", "running")
+        try:
+            self.run_disruption_command(
+                "stop", self.config.stop_disruption_command
+            )
+            self._notify_step(f"{step_prefix}stop-disruption", "ok")
+        except RuntimeError as exc:
+            self._notify_step(
+                f"{step_prefix}stop-disruption",
+                "failed",
+                str(exc)[:60],
+            )
+            raise
+
+        # Step 5: Poll for convergence after recovery.
+        self._notify_step(f"{step_prefix}convergence", "running")
+        converged, conv_src, conv_tgt = self.poll_convergence(
+            source_url,
+            target_url,
+            flag_key,
+            toggle_to,
+            headers,
+        )
+
+        self.assertions.add(
+            f"{step_prefix}source-target-convergence",
+            converged,
+            (
+                f"Both regions converged to isEnabled={toggle_to} "
+                f"after recovery in {phase_label}."
+            ),
+            "evaluated",
+        )
+        self._notify_step(
+            f"{step_prefix}convergence",
+            "ok" if converged else "failed",
+        )
+
+        # Step 6: Kafka and Redis verification after recovery.
+        flag_id = (self.config.flag_ids_by_key or {}).get(flag_key)
+
+        self.run_kafka_topic_check(
+            f"{step_prefix}source-topic-check",
+            self.config.source_topic_check_command,
+            context=definition.source_region,
+            bootstrap=self._KAFKA_BOOTSTRAP,
+            topic="featbit-control-plane-feature-flag-change",
+            flag_id=flag_id,
+        )
+        self.run_kafka_topic_check(
+            f"{step_prefix}downstream-topic-check",
+            self.config.downstream_topic_check_command,
+            context=definition.source_region,
+            bootstrap=self._KAFKA_BOOTSTRAP,
+            topic="featbit-feature-flag-change",
+            flag_id=flag_id,
+        )
+        self.run_kafka_topic_check(
+            f"{step_prefix}retry-log-check",
+            self.config.retry_log_check_command,
+            context=definition.target_region,
+            bootstrap=self._KAFKA_AGGREGATE_BOOTSTRAP,
+            topic="featbit-feature-flag-change",
+            flag_id=flag_id,
+        )
+
+        self.run_redis_check(
+            f"{phase_label}-west",
+            self.config.redis_west_check_command,
+            flag_id=flag_id,
+            flag_key=flag_key,
+            expected_status=toggle_to,
+            context="west",
+        )
+        self.run_redis_check(
+            f"{phase_label}-east",
+            self.config.redis_east_check_command,
+            flag_id=flag_id,
+            flag_key=flag_key,
+            expected_status=toggle_to,
+            context="east",
+        )

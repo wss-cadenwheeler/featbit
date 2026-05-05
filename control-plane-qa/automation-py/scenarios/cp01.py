@@ -1,41 +1,46 @@
-"""CP-02: Cross-DC Flag Propagation Correctness Scenarios."""
+"""CP-01: Basic Feature Flag Change Propagation Scenario."""
 
 import json
-import time
 
 from core.auth import resolve_authorization_header, resolve_request_context
 from core.scenario_base import BaseScenario, ScenarioDefinition
 
 
-class CP02Scenario(BaseScenario):
-    """CP-02 correctness scenario base class."""
+class CP01Scenario(BaseScenario):
+    """CP-01 basic flag propagation scenario.
+
+    Validates that a single feature flag toggle propagates from the source
+    region through Kafka topics and Redis caches in both west and east
+    datacenters.
+    """
 
     def definition(self) -> ScenarioDefinition:
         """Return scenario definition."""
-        if self.config.scenario_name == "cp02-west-to-east":
+        if self.config.scenario_name == "cp01-west-to-east":
             return ScenarioDefinition(
-                scenario_type="cp02",
+                scenario_type="cp01",
                 source_region="west",
                 target_region="east",
-                default_flag_key="ff-cp02-west",
+                default_flag_key="ff-cp01-basic",
                 target_status=self.config.target_status,
             )
-        else:  # cp02-east-to-west
+        else:  # cp01-east-to-west
             return ScenarioDefinition(
-                scenario_type="cp02",
+                scenario_type="cp01",
                 source_region="east",
                 target_region="west",
-                default_flag_key="ff-cp02-east",
+                default_flag_key="ff-cp01-basic",
                 target_status=self.config.target_status,
             )
 
     def run(self) -> bool:
-        """Execute CP-02 scenario."""
+        """Execute CP-01 scenario."""
         try:
             self.setup_artifacts()
             definition = self.definition()
 
-            # Resolve auth
+            # --- Phase 1: Baseline and Authentication ---
+
             self._notify_step("auth", "running")
             auth_header = resolve_authorization_header(
                 self.get_api_base_url(definition.source_region),
@@ -47,7 +52,6 @@ class CP02Scenario(BaseScenario):
                 self.config.api_version,
             )
 
-            # Resolve request context
             ctx = resolve_request_context(
                 self.get_api_base_url(definition.source_region),
                 auth_header,
@@ -57,7 +61,6 @@ class CP02Scenario(BaseScenario):
             )
             self._notify_step("auth", "ok")
 
-            # Build headers
             headers = {
                 "Authorization": auth_header,
                 "Content-Type": "application/json",
@@ -67,7 +70,6 @@ class CP02Scenario(BaseScenario):
             if ctx.organization_id:
                 headers["Organization"] = ctx.organization_id
 
-            # Log run start
             self.add_timeline_event(
                 "run-start",
                 scenario=self.config.scenario_name,
@@ -83,9 +85,31 @@ class CP02Scenario(BaseScenario):
                 organization_id=ctx.organization_id,
             )
 
-            # Toggle flag
             source_url = self.get_api_base_url(definition.source_region)
             target_url = self.get_api_base_url(definition.target_region)
+
+            # Manual step 6-7: Confirm flag is false in both Redis instances.
+            self._notify_step("baseline-check", "running")
+            source_baseline = self.get_flag_state(
+                source_url,
+                definition.default_flag_key,
+                definition.source_region,
+                headers,
+            )
+            target_baseline = self.get_flag_state(
+                target_url,
+                definition.default_flag_key,
+                definition.target_region,
+                headers,
+            )
+            self.add_timeline_event(
+                "baseline-check",
+                source=json.loads(source_baseline.json()),
+                target=json.loads(target_baseline.json()),
+            )
+            self._notify_step("baseline-check", "ok")
+
+            # --- Phase 2: Toggle flag (manual step 8) ---
 
             self._notify_step("toggle", "running")
             toggle_result = self.toggle_flag(
@@ -105,7 +129,8 @@ class CP02Scenario(BaseScenario):
             )
             self._notify_step("toggle", "ok")
 
-            # Poll for convergence
+            # --- Phase 3: Poll for convergence (manual steps 15-16) ---
+
             self._notify_step("convergence", "running")
             converged, source_state, target_state = self.poll_convergence(
                 source_url,
@@ -118,24 +143,18 @@ class CP02Scenario(BaseScenario):
             self.assertions.add(
                 "source-target-convergence",
                 converged,
-                (
-                    "Both regions reported expected "
-                    f"isEnabled={definition.target_status}."
-                ),
+                f"Both regions reported expected isEnabled={definition.target_status}.",
                 "evaluated",
             )
-            self._notify_step(
-                "convergence", "ok" if converged else "failed"
-            )
+            self._notify_step("convergence", "ok" if converged else "failed")
 
-            # Resolve flag_id for topic and Redis checks.
+            # --- Phase 4: Kafka and Redis verification (manual steps 9-33) ---
+
             flag_id = (self.config.flag_ids_by_key or {}).get(
                 definition.default_flag_key
             )
 
-            # Kafka topic checks: message arrived on CP topic, forwarded
-            # to eval topic, and MirrorMaker2 replicated to the target
-            # cluster's aggregate broker.
+            # Manual steps 9-14: CP topic in source cluster.
             self.run_kafka_topic_check(
                 "source-topic-check",
                 self.config.source_topic_check_command,
@@ -144,6 +163,8 @@ class CP02Scenario(BaseScenario):
                 topic="featbit-control-plane-feature-flag-change",
                 flag_id=flag_id,
             )
+
+            # Manual steps 17-21: Eval topic in source cluster.
             self.run_kafka_topic_check(
                 "downstream-topic-check",
                 self.config.downstream_topic_check_command,
@@ -152,8 +173,20 @@ class CP02Scenario(BaseScenario):
                 topic="featbit-feature-flag-change",
                 flag_id=flag_id,
             )
+
+            # Manual steps 22-27: Aggregate topic in source cluster.
             self.run_kafka_topic_check(
-                "retry-log-check",
+                "source-aggregate-topic-check",
+                None,
+                context=definition.source_region,
+                bootstrap=self._KAFKA_AGGREGATE_BOOTSTRAP,
+                topic="featbit-feature-flag-change",
+                flag_id=flag_id,
+            )
+
+            # Manual steps 28-33: Aggregate topic in target cluster.
+            self.run_kafka_topic_check(
+                "target-aggregate-topic-check",
                 self.config.retry_log_check_command,
                 context=definition.target_region,
                 bootstrap=self._KAFKA_AGGREGATE_BOOTSTRAP,
@@ -161,7 +194,7 @@ class CP02Scenario(BaseScenario):
                 flag_id=flag_id,
             )
 
-            # Run Redis checks.
+            # Manual steps 15-16: Redis in both regions.
             self.run_redis_check(
                 "west",
                 self.config.redis_west_check_command,
@@ -177,107 +210,18 @@ class CP02Scenario(BaseScenario):
                 expected_status=definition.target_status,
             )
 
-            # --- Phase 4: Rapid Sequential Consistency ---
-            # Manual: toggle true→false, then false→true in quick
-            # succession; verify both DCs converge to the final state
-            # and version/timestamp progression is monotonic.
+            # --- Post-condition: Reset flag to false ---
 
-            self._notify_step("rapid-sequential", "running")
-            self.add_timeline_event(
-                "phase-start",
-                phase="rapid-sequential-consistency",
-            )
-
-            # Capture version before rapid toggles.
-            pre_rapid_state = self.get_flag_state(
-                source_url,
-                definition.default_flag_key,
-                "source",
-                headers,
-            )
-            pre_rapid_version = pre_rapid_state.version
-
-            # First rapid toggle: invert the current state.
-            intermediate_status = not definition.target_status
-            self.toggle_flag(
-                source_url,
-                definition.default_flag_key,
-                intermediate_status,
-                headers,
-            )
-
-            # Second rapid toggle: return to the target state.
-            self.toggle_flag(
-                source_url,
-                definition.default_flag_key,
-                definition.target_status,
-                headers,
-            )
-
-            self.add_timeline_event(
-                "rapid-toggle",
-                phase="rapid-sequential-consistency",
-                result={
-                    "first_toggle_to": intermediate_status,
-                    "second_toggle_to": definition.target_status,
-                },
-            )
-
-            # Poll until both regions converge to the final state.
-            rapid_converged, rapid_src, rapid_tgt = self.poll_convergence(
-                source_url,
-                target_url,
-                definition.default_flag_key,
-                definition.target_status,
-                headers,
-            )
-
-            self.assertions.add(
-                "rapid-sequential-convergence",
-                rapid_converged,
-                (
-                    "Both regions converged to final state "
-                    f"isEnabled={definition.target_status} after rapid toggles."
-                ),
-                "evaluated",
-            )
-
-            # Verify version progression is monotonic.
-            if rapid_src and pre_rapid_version is not None:
-                post_version = rapid_src.version
-                version_monotonic = (
-                    post_version is not None
-                    and int(post_version) > int(pre_rapid_version)
+            if definition.target_status:
+                self._notify_step("cleanup", "running")
+                self.toggle_flag(
+                    source_url,
+                    definition.default_flag_key,
+                    False,
+                    headers,
                 )
-                self.assertions.add(
-                    "rapid-sequential-version-monotonic",
-                    version_monotonic,
-                    (
-                        f"Version progressed from {pre_rapid_version} "
-                        f"to {post_version}."
-                    ),
-                    "evaluated",
-                )
-            else:
-                self.assertions.add_skip(
-                    "rapid-sequential-version-monotonic",
-                    "Version not available for comparison.",
-                )
-
-            self._notify_step(
-                "rapid-sequential", "ok" if rapid_converged else "failed"
-            )
-
-            # --- Post-condition: Reset flags to false ---
-            self._notify_step("cleanup", "running")
-            self.toggle_flag(
-                source_url,
-                definition.default_flag_key,
-                False,
-                headers,
-            )
-            self.add_timeline_event("cleanup", phase="reset-flag-to-false")
-            self._notify_step("cleanup", "ok")
+                self.add_timeline_event("cleanup", phase="reset-flag-to-false")
+                self._notify_step("cleanup", "ok")
 
             return self.assertions.all_passed()
 
