@@ -13,7 +13,7 @@ Validates that the Control-Plane API can push a full sync to the Evaluation Serv
 - [ ] `playground` Organization Exists
 - [ ] `control-plane-test` Project Exists
 - [ ] `test-flag` Feature Flag Exists and is toggled on
-- [ ] A test application is connected to the evaluation server using the `control-plane-test` project with the default logging lvel set to `Debug`.
+- [ ] A test application is connected to the evaluation server using the `control-plane-test` project with the default logging level set to `Debug`.
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
