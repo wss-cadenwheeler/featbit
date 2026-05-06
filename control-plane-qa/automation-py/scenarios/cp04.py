@@ -210,18 +210,18 @@ class CP04Scenario(BaseScenario):
 
             # --- Phase 5: Redis Verification ---
 
-            self._run_segment_redis_check(
+            self.run_segment_redis_check(
                 "west",
                 self.config.redis_west_check_command,
-                segment_id,
-                segment_key,
+                segment_id=segment_id,
+                segment_key=segment_key,
             )
 
-            self._run_segment_redis_check(
+            self.run_segment_redis_check(
                 "east",
                 self.config.redis_east_check_command,
-                segment_id,
-                segment_key,
+                segment_id=segment_id,
+                segment_key=segment_key,
             )
 
             # --- Post-condition: Cleanup ---
@@ -446,60 +446,6 @@ class CP04Scenario(BaseScenario):
             self.assertions.add_fail(
                 check_name,
                 f"Segment Kafka check error: {str(e)[:100]}",
-            )
-
-    def _run_segment_redis_check(
-        self,
-        region: str,
-        command: str,
-        segment_id: str,
-        segment_key: str,
-    ) -> None:
-        """Run a custom Redis check for segment presence."""
-        if not command:
-            self.assertions.add_skip(
-                f"{region}-redis-segment-check",
-                f"No Redis check command configured for {region}.",
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            self.add_timeline_event(
-                "redis-check",
-                check=f"{region}-redis-segment-check",
-                region=region,
-                segment_id=segment_id,
-                exit_code=result.returncode,
-                output=result.stdout[:500] if result.stdout else None,
-            )
-
-            if result.returncode == 0:
-                self.assertions.add_pass(
-                    f"{region}-redis-segment-check",
-                    f"Segment {segment_key} found in {region} Redis.",
-                )
-            else:
-                self.assertions.add_fail(
-                    f"{region}-redis-segment-check",
-                    f"Segment check failed: {result.stderr[:200]}",
-                )
-        except subprocess.TimeoutExpired:
-            self.assertions.add_fail(
-                f"{region}-redis-segment-check",
-                "Segment Redis check timed out.",
-            )
-        except Exception as e:
-            self.assertions.add_fail(
-                f"{region}-redis-segment-check",
-                f"Segment Redis check error: {str(e)[:100]}",
             )
 
     @staticmethod

@@ -120,12 +120,18 @@ class CP06Scenario(BaseScenario):
                 return False
 
             env_id = env_create_result["id"]
+            # Extract the auto-generated secret value for Redis key lookup.
+            # EnvironmentVm includes a Secrets collection; each secret has a
+            # server-generated 'value' used as the Redis key suffix.
+            env_secrets = env_create_result.get("secrets", [])
+            env_secret_value = env_secrets[0]["value"] if env_secrets else ""
 
             self.add_timeline_event(
                 "environment-created",
                 environment_id=env_id,
                 environment_key=env_key,
                 environment_name=env_name,
+                secret_value=env_secret_value,
             )
 
             self.assertions.add_pass(
@@ -147,18 +153,16 @@ class CP06Scenario(BaseScenario):
 
             # --- Phase 5: Redis Verification ---
 
-            self._run_environment_redis_check(
+            self.run_secret_redis_check(
                 "west",
                 self.config.redis_west_check_command,
-                env_id,
-                env_key,
+                secret_string=env_secret_value,
             )
 
-            self._run_environment_redis_check(
+            self.run_secret_redis_check(
                 "east",
                 self.config.redis_east_check_command,
-                env_id,
-                env_key,
+                secret_string=env_secret_value,
             )
 
             # --- Post-condition: Cleanup ---
@@ -486,60 +490,6 @@ class CP06Scenario(BaseScenario):
             self.assertions.add_fail(
                 check_name,
                 f"Environment Kafka check error: {str(e)[:100]}",
-            )
-
-    def _run_environment_redis_check(
-        self,
-        region: str,
-        command: str,
-        env_id: str,
-        env_key: str,
-    ) -> None:
-        """Run a custom Redis check for environment secret."""
-        if not command:
-            self.assertions.add_skip(
-                f"{region}-redis-environment-check",
-                f"No Redis check command configured for {region}.",
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            self.add_timeline_event(
-                "redis-check",
-                check=f"{region}-redis-environment-check",
-                region=region,
-                environment_id=env_id,
-                exit_code=result.returncode,
-                output=result.stdout[:500] if result.stdout else None,
-            )
-
-            if result.returncode == 0:
-                self.assertions.add_pass(
-                    f"{region}-redis-environment-check",
-                    f"Environment {env_key} secret found in {region} Redis.",
-                )
-            else:
-                self.assertions.add_fail(
-                    f"{region}-redis-environment-check",
-                    f"Environment check failed: {result.stderr[:200]}",
-                )
-        except subprocess.TimeoutExpired:
-            self.assertions.add_fail(
-                f"{region}-redis-environment-check",
-                "Environment Redis check timed out.",
-            )
-        except Exception as e:
-            self.assertions.add_fail(
-                f"{region}-redis-environment-check",
-                f"Environment Redis check error: {str(e)[:100]}",
             )
 
     @staticmethod

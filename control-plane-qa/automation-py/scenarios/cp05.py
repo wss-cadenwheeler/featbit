@@ -121,11 +121,13 @@ class CP05Scenario(BaseScenario):
                 return False
 
             secret_id = secret_create_result["id"]
+            secret_value_string = secret_create_result.get("value", "")
 
             self.add_timeline_event(
                 "secret-created",
                 secret_id=secret_id,
                 secret_key=secret_key,
+                secret_value=secret_value_string,
             )
 
             self.assertions.add_pass(
@@ -168,18 +170,16 @@ class CP05Scenario(BaseScenario):
 
             # --- Phase 5: Redis Verification ---
 
-            self._run_secret_redis_check(
+            self.run_secret_redis_check(
                 "west",
                 self.config.redis_west_check_command,
-                secret_id,
-                secret_key,
+                secret_string=secret_value_string,
             )
 
-            self._run_secret_redis_check(
+            self.run_secret_redis_check(
                 "east",
                 self.config.redis_east_check_command,
-                secret_id,
-                secret_key,
+                secret_string=secret_value_string,
             )
 
             # --- Post-condition: Cleanup ---
@@ -396,60 +396,6 @@ class CP05Scenario(BaseScenario):
             self.assertions.add_fail(
                 check_name,
                 f"Secret Kafka check error: {str(e)[:100]}",
-            )
-
-    def _run_secret_redis_check(
-        self,
-        region: str,
-        command: str,
-        secret_id: str,
-        secret_key: str,
-    ) -> None:
-        """Run a custom Redis check for secret presence."""
-        if not command:
-            self.assertions.add_skip(
-                f"{region}-redis-secret-check",
-                f"No Redis check command configured for {region}.",
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            self.add_timeline_event(
-                "redis-check",
-                check=f"{region}-redis-secret-check",
-                region=region,
-                secret_id=secret_id,
-                exit_code=result.returncode,
-                output=result.stdout[:500] if result.stdout else None,
-            )
-
-            if result.returncode == 0:
-                self.assertions.add_pass(
-                    f"{region}-redis-secret-check",
-                    f"Secret {secret_key} found in {region} Redis.",
-                )
-            else:
-                self.assertions.add_fail(
-                    f"{region}-redis-secret-check",
-                    f"Secret check failed: {result.stderr[:200]}",
-                )
-        except subprocess.TimeoutExpired:
-            self.assertions.add_fail(
-                f"{region}-redis-secret-check",
-                "Secret Redis check timed out.",
-            )
-        except Exception as e:
-            self.assertions.add_fail(
-                f"{region}-redis-secret-check",
-                f"Secret Redis check error: {str(e)[:100]}",
             )
 
     @staticmethod
