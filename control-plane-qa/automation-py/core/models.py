@@ -144,6 +144,7 @@ class ScenarioConfig:
     east_api_base_url: str
     control_plane_base_url: Optional[str] = None
     control_plane_api_key: Optional[str] = None
+    license_key: Optional[str] = None
     login_api_base_url: str
     api_authorization_header: Optional[str]
     login_email: str

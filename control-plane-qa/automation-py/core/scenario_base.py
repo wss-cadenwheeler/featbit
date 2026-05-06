@@ -675,6 +675,36 @@ class BaseScenario(ABC):
         )
         self._notify_step(assertion_name, "ok")
 
+    def run_license_redis_check(
+        self,
+        region: str,
+        command: Optional[str],
+        workspace_id: Optional[str] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        """Run Redis check for license via provided command or automatic Kubernetes discovery."""
+        assertion_name = f"redis-{region}-license-check"
+
+        found, keys, _ = self._run_redis_key_lookup(
+            assertion_name=assertion_name,
+            command=command,
+            redis_key=f"featbit:license:{workspace_id}" if workspace_id else "",
+            identifier=workspace_id or "",
+            identifier_label="workspace_id",
+            region=region,
+            context=context,
+            diagnostics=False,
+            timeline_event="redis-license-check",
+        )
+
+        if not found or command:
+            return
+
+        self.assertions.add_pass(
+            assertion_name,
+            f"Redis contains license key for workspace in context={context or region}.",
+        )
+        self._notify_step(assertion_name, "ok")
 
     _KAFKA_BIN = "/opt/bitnami/kafka/bin"
     _KAFKA_BOOTSTRAP = "kafka:9092"

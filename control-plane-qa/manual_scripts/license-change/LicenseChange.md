@@ -34,5 +34,3 @@ Validates that a license change message is sent through the control plane to upd
 
 ---
 **Notes/Comments:**
-
-This test cannot be automated due to the license check.
