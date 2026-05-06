@@ -13,7 +13,15 @@ from core.logging_config import configure_logging, get_logger
 from core.models import ScenarioConfig
 from core import reset as reset_module
 from core.dashboard import SuiteDashboard, is_interactive
-from scenarios import CP01Scenario, CP02Scenario, CP03Scenario
+from scenarios import (
+    CP01Scenario,
+    CP02Scenario,
+    CP03Scenario,
+    CP04Scenario,
+    CP05Scenario,
+    CP06Scenario,
+    CP07Scenario,
+)
 from scripts import seed_data as seed_module
 
 
@@ -346,6 +354,14 @@ def seed(
     "cp02-east-to-west",
     "cp03-west-with-east-redis-outage",
     "cp03-east-with-west-redis-outage",
+    "cp04-west-to-east",
+    "cp04-east-to-west",
+    "cp05-west-to-east",
+    "cp05-east-to-west",
+    "cp06-west-to-east",
+    "cp06-east-to-west",
+    "cp07-west-to-east",
+    "cp07-east-to-west",
 ]))
 @click.option("--env-id", required=True, help="Environment ID")
 @click.option(
@@ -450,8 +466,16 @@ def scenario(
         scenario_obj = CP01Scenario(config)
     elif scenario.startswith("cp02"):
         scenario_obj = CP02Scenario(config)
-    else:
+    elif scenario.startswith("cp03"):
         scenario_obj = CP03Scenario(config)
+    elif scenario.startswith("cp04"):
+        scenario_obj = CP04Scenario(config)
+    elif scenario.startswith("cp05"):
+        scenario_obj = CP05Scenario(config)
+    elif scenario.startswith("cp06"):
+        scenario_obj = CP06Scenario(config)
+    else:
+        scenario_obj = CP07Scenario(config)
 
     click.echo(f"Running {scenario}...")
     passed = scenario_obj.run()
@@ -544,7 +568,7 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03"]))
+@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07"]))
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -658,11 +682,19 @@ def suite(
         scenario_names = ["cp01-west-to-east", "cp01-east-to-west"]
     elif suite == "cp02":
         scenario_names = ["cp02-west-to-east", "cp02-east-to-west"]
-    else:
+    elif suite == "cp03":
         scenario_names = [
             "cp03-west-with-east-redis-outage",
             "cp03-east-with-west-redis-outage",
         ]
+    elif suite == "cp04":
+        scenario_names = ["cp04-west-to-east", "cp04-east-to-west"]
+    elif suite == "cp05":
+        scenario_names = ["cp05-west-to-east", "cp05-east-to-west"]
+    elif suite == "cp06":
+        scenario_names = ["cp06-west-to-east", "cp06-east-to-west"]
+    else:
+        scenario_names = ["cp07-west-to-east", "cp07-east-to-west"]
 
     dashboard = SuiteDashboard(
         suite=suite,
@@ -804,8 +836,16 @@ def suite(
                 scenario_obj = CP01Scenario(config)
             elif scenario_name.startswith("cp02"):
                 scenario_obj = CP02Scenario(config)
-            else:
+            elif scenario_name.startswith("cp03"):
                 scenario_obj = CP03Scenario(config)
+            elif scenario_name.startswith("cp04"):
+                scenario_obj = CP04Scenario(config)
+            elif scenario_name.startswith("cp05"):
+                scenario_obj = CP05Scenario(config)
+            elif scenario_name.startswith("cp06"):
+                scenario_obj = CP06Scenario(config)
+            else:
+                scenario_obj = CP07Scenario(config)
 
             if use_dashboard:
                 _sname = scenario_name

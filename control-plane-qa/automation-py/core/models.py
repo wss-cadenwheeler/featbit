@@ -22,6 +22,66 @@ class FlagState(BaseModel):
         populate_by_name = True
 
 
+class SegmentState(BaseModel):
+    """State of a segment from API poll."""
+
+    region: str
+    observed_at_utc: str
+    is_present: bool = False
+    id: Optional[str] = None
+    key: Optional[str] = None
+    name: Optional[str] = None
+    version: Optional[Any] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class SecretState(BaseModel):
+    """State of a secret from API poll."""
+
+    region: str
+    observed_at_utc: str
+    is_present: bool = False
+    id: Optional[str] = None
+    name: Optional[str] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class EnvironmentState(BaseModel):
+    """State of an environment from API poll."""
+
+    region: str
+    observed_at_utc: str
+    is_present: bool = False
+    id: Optional[str] = None
+    key: Optional[str] = None
+    name: Optional[str] = None
+    secret_key: Optional[str] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class LicenseState(BaseModel):
+    """State of a license from API poll."""
+
+    region: str
+    observed_at_utc: str
+    is_present: bool = False
+    license_key: Optional[str] = None
+    is_expired: Optional[bool] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
 class AssertionResult(BaseModel):
     """Result of a single assertion."""
 
@@ -46,7 +106,17 @@ class TimelineEvent(BaseModel):
     api_base_url_source: Optional[str] = None
     api_base_url_target: Optional[str] = None
     env_id: Optional[str] = None
+    env_key: Optional[str] = None
     flag_key: Optional[str] = None
+    segment_key: Optional[str] = None
+    segment_id: Optional[str] = None
+    segment_name: Optional[str] = None
+    secret_key: Optional[str] = None
+    secret_id: Optional[str] = None
+    environment_key: Optional[str] = None
+    environment_id: Optional[str] = None
+    environment_name: Optional[str] = None
+    license_key: Optional[str] = None
     expected_status: Optional[bool] = None
     auth_type: Optional[str] = None
     workspace_id: Optional[str] = None
@@ -57,6 +127,8 @@ class TimelineEvent(BaseModel):
     check: Optional[str] = None
     output: Optional[str] = None
     phase: Optional[str] = None
+    elapsed_seconds: Optional[int] = None
+    timeout_seconds: Optional[int] = None
 
     class Config:
         populate_by_name = True
@@ -92,6 +164,9 @@ class ScenarioConfig:
     artifacts_root: str
     api_version: str = "1"
     flag_ids_by_key: Optional[Dict[str, str]] = None
+    segment_ids_by_key: Optional[Dict[str, str]] = None
+    convergence_timeout_seconds: Optional[int] = None
+    convergence_poll_interval_seconds: Optional[int] = None
 
 
 class ScenariosummaryJson(BaseModel):
