@@ -13,7 +13,7 @@ from core.logging_config import configure_logging, get_logger
 from core.models import ScenarioConfig
 from core import reset as reset_module
 from core.dashboard import SuiteDashboard, is_interactive
-from scenarios import CP01Scenario, CP02Scenario, CP03Scenario
+from scenarios import CP01Scenario, CP02Scenario, CP03Scenario, CP04Scenario
 from scripts import seed_data as seed_module
 
 
@@ -346,6 +346,8 @@ def seed(
     "cp02-east-to-west",
     "cp03-west-with-east-redis-outage",
     "cp03-east-with-west-redis-outage",
+    "cp04-west-to-east",
+    "cp04-east-to-west",
 ]))
 @click.option("--env-id", required=True, help="Environment ID")
 @click.option(
@@ -450,6 +452,8 @@ def scenario(
         scenario_obj = CP01Scenario(config)
     elif scenario.startswith("cp02"):
         scenario_obj = CP02Scenario(config)
+    elif scenario.startswith("cp04"):
+        scenario_obj = CP04Scenario(config)
     else:
         scenario_obj = CP03Scenario(config)
 
@@ -544,7 +548,7 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03"]))
+@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04"]))
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -645,7 +649,7 @@ def suite(
     chaos_mesh_manifest: str,
     no_dashboard: bool,
 ) -> None:
-    """Run a test suite (CP-01, CP-02, or CP-03)."""
+    """Run a test suite (CP-01, CP-02, CP-03, or CP-04)."""
     use_dashboard = not no_dashboard and is_interactive()
 
     seed_flag_keys = [
@@ -658,6 +662,8 @@ def suite(
         scenario_names = ["cp01-west-to-east", "cp01-east-to-west"]
     elif suite == "cp02":
         scenario_names = ["cp02-west-to-east", "cp02-east-to-west"]
+    elif suite == "cp04":
+        scenario_names = ["cp04-west-to-east", "cp04-east-to-west"]
     else:
         scenario_names = [
             "cp03-west-with-east-redis-outage",
@@ -804,6 +810,8 @@ def suite(
                 scenario_obj = CP01Scenario(config)
             elif scenario_name.startswith("cp02"):
                 scenario_obj = CP02Scenario(config)
+            elif scenario_name.startswith("cp04"):
+                scenario_obj = CP04Scenario(config)
             else:
                 scenario_obj = CP03Scenario(config)
 

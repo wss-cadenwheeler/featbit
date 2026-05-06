@@ -22,6 +22,21 @@ class FlagState(BaseModel):
         populate_by_name = True
 
 
+class SegmentState(BaseModel):
+    """State of a segment from API poll."""
+
+    region: str
+    observed_at_utc: str
+    id: Optional[str] = None
+    name: Optional[str] = None
+    key: Optional[str] = None
+    is_archived: Optional[bool] = None
+    error: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
 class AssertionResult(BaseModel):
     """Result of a single assertion."""
 
@@ -92,6 +107,7 @@ class ScenarioConfig:
     artifacts_root: str
     api_version: str = "1"
     flag_ids_by_key: Optional[Dict[str, str]] = None
+    segment_ids_by_key: Optional[Dict[str, str]] = None
 
 
 class ScenariosummaryJson(BaseModel):

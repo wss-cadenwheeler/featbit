@@ -14,7 +14,7 @@ import uuid
 from .api_client import ApiClient, extract_data
 from .assertions import AssertionRegistry
 from .auth import resolve_authorization_header, resolve_request_context
-from .models import FlagState, ScenarioConfig, TimelineEvent
+from .models import FlagState, SegmentState, ScenarioConfig, TimelineEvent
 
 
 @dataclass
@@ -715,6 +715,251 @@ class BaseScenario(ABC):
         except Exception as e:
             self.assertions.add_fail(name, f"Kafka topic check error: {e}")
             self._notify_step(name, "failed", str(e)[:40])
+
+    def create_segment(
+        self,
+        base_url: str,
+        segment_key: str,
+        headers: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Create a segment via the API.
+
+        Args:
+            base_url: API base URL.
+            segment_key: Unique key for the segment.
+            headers: Request headers with auth.
+
+        Returns:
+            API response dict with segment data including 'id'.
+        """
+        client = ApiClient(
+            base_url,
+            self.config.skip_certificate_check,
+            self.config.api_version,
+        )
+        endpoint = (
+            f"/api/v{self.config.api_version}/envs/{self.config.env_id}/segments"
+        )
+        payload = {
+            "name": segment_key,
+            "key": segment_key,
+            "type": "environment-specific",
+            "scopes": [],
+            "description": f"Automated CP-04 test segment ({segment_key})",
+        }
+        response = client.post(endpoint, payload, headers=headers)
+        return extract_data(response)
+
+    def get_segment(
+        self,
+        base_url: str,
+        segment_id: str,
+        headers: Dict[str, str],
+    ) -> SegmentState:
+        """Get segment state from API.
+
+        Args:
+            base_url: API base URL.
+            segment_id: Segment ID (GUID).
+            headers: Request headers with auth.
+
+        Returns:
+            SegmentState with current segment info.
+        """
+        client = ApiClient(
+            base_url,
+            self.config.skip_certificate_check,
+            self.config.api_version,
+        )
+        endpoint = (
+            f"/api/v{self.config.api_version}/envs/{self.config.env_id}/"
+            f"segments/{segment_id}"
+        )
+        try:
+            response = client.get(endpoint, headers=headers)
+            data = extract_data(response)
+            return SegmentState(
+                region="",
+                observed_at_utc=datetime.utcnow().isoformat() + "Z",
+                id=data.get("id") if data else None,
+                name=data.get("name") if data else None,
+                key=data.get("key") if data else None,
+                is_archived=data.get("isArchived") if data else None,
+                error=None,
+            )
+        except Exception as e:
+            return SegmentState(
+                region="",
+                observed_at_utc=datetime.utcnow().isoformat() + "Z",
+                error=str(e),
+            )
+
+    def delete_segment(
+        self,
+        base_url: str,
+        segment_id: str,
+        headers: Dict[str, str],
+    ) -> None:
+        """Archive a segment to clean up after test.
+
+        Args:
+            base_url: API base URL.
+            segment_id: Segment ID (GUID).
+            headers: Request headers with auth.
+        """
+        client = ApiClient(
+            base_url,
+            self.config.skip_certificate_check,
+            self.config.api_version,
+        )
+        endpoint = (
+            f"/api/v{self.config.api_version}/envs/{self.config.env_id}/"
+            f"segments/{segment_id}/archive"
+        )
+        try:
+            client.put(endpoint, body="{}", headers=headers)
+        except Exception:
+            pass
+
+    def poll_segment_exists(
+        self,
+        target_base_url: str,
+        segment_id: str,
+        headers: Dict[str, str],
+    ) -> tuple[bool, Optional[SegmentState]]:
+        """Poll target region until segment is accessible via API.
+
+        Args:
+            target_base_url: Target region API URL.
+            segment_id: Segment ID (GUID).
+            headers: Request headers with auth.
+
+        Returns:
+            (found: bool, segment_state: SegmentState or None)
+        """
+        deadline = time.time() + self.config.timeout_seconds
+
+        while time.time() < deadline:
+            state = self.get_segment(target_base_url, segment_id, headers)
+            self.add_timeline_event(
+                "poll",
+                result={"segment_id": segment_id, "error": state.error, "found": state.error is None},
+            )
+            if state.error is None and state.id:
+                return True, state
+            time.sleep(self.config.poll_interval_ms / 1000.0)
+
+        return False, None
+
+    def run_segment_redis_check(
+        self,
+        region: str,
+        segment_id: str,
+        context: Optional[str] = None,
+    ) -> None:
+        """Check that a segment exists in Redis via kubectl exec.
+
+        Looks up ``featbit:segment:{segment_id}`` in the target cluster Redis.
+        """
+        assertion_name = f"redis-segment-{region}-check"
+        self._notify_step(assertion_name, "running")
+        effective_context = context or region
+        namespace = "featbit"
+        service_name = "redis"
+
+        try:
+            svc_result = self._run_kubectl(
+                [
+                    "--context", effective_context,
+                    "-n", namespace,
+                    "get", "svc", service_name,
+                    "-o", "json",
+                ]
+            )
+            if svc_result.returncode != 0:
+                self.assertions.add_fail(
+                    assertion_name,
+                    f"Auto-discovery failed: could not read service '{service_name}' "
+                    f"in context '{effective_context}'. {svc_result.stderr.strip()}",
+                )
+                self._notify_step(assertion_name, "failed", "service discovery failed")
+                return
+
+            svc = json.loads(svc_result.stdout)
+            ports = svc.get("spec", {}).get("ports", [])
+            redis_port = ports[0].get("port") if ports else 6379
+
+            pod_name = self._discover_redis_pod(context=effective_context, namespace=namespace)
+            if not pod_name:
+                self.assertions.add_fail(
+                    assertion_name,
+                    f"Auto-discovery failed: no running redis pod found in "
+                    f"context '{effective_context}' namespace '{namespace}'.",
+                )
+                self._notify_step(assertion_name, "failed", "no redis pod found")
+                return
+
+            if not segment_id:
+                self.assertions.add_fail(
+                    assertion_name,
+                    f"Segment Redis check requires segment_id in context={effective_context}.",
+                )
+                self._notify_step(assertion_name, "failed", "segment_id not resolved")
+                return
+
+            primary_key = f"featbit:segment:{segment_id}"
+            get_result = self._run_kubectl(
+                [
+                    "--context", effective_context,
+                    "-n", namespace,
+                    "exec", pod_name, "--",
+                    "redis-cli",
+                    "-h", service_name,
+                    "-p", str(redis_port),
+                    "GET", primary_key,
+                ],
+                timeout=30,
+            )
+            value = (get_result.stdout + get_result.stderr).strip()
+
+            self.add_timeline_event(
+                "redis-auto-check",
+                check=assertion_name,
+                output=value,
+                source={
+                    "context": effective_context,
+                    "namespace": namespace,
+                    "service": service_name,
+                    "port": redis_port,
+                    "pod": pod_name,
+                    "segmentId": segment_id,
+                    "key": primary_key,
+                },
+            )
+
+            if get_result.returncode == 0 and value and "(nil)" not in value.lower():
+                self.assertions.add_pass(
+                    assertion_name,
+                    f"Segment key '{primary_key}' found in Redis context={effective_context}.",
+                )
+                self._notify_step(assertion_name, "ok")
+            else:
+                self.assertions.add_fail(
+                    assertion_name,
+                    f"Segment key '{primary_key}' not found in Redis context={effective_context}. "
+                    f"Value: {value}",
+                )
+                self._notify_step(assertion_name, "failed", "key not found")
+
+        except subprocess.TimeoutExpired:
+            self.assertions.add_fail(
+                assertion_name,
+                f"Segment Redis check timed out in context '{effective_context}'.",
+            )
+            self._notify_step(assertion_name, "failed", "timed out")
+        except Exception as e:
+            self.assertions.add_fail(assertion_name, f"Segment Redis check error: {e}")
+            self._notify_step(assertion_name, "failed", str(e)[:40])
 
     def run_disruption_command(
         self,
