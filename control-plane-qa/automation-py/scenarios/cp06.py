@@ -98,6 +98,21 @@ class CP06Scenario(BaseScenario):
             source_url = self.get_api_base_url(definition.source_region)
             target_url = self.get_api_base_url(definition.target_region)
 
+            # --- Phase 1b: Retrieve Project ID ---
+
+            self._notify_step("project-lookup", "running")
+            project_id = self._get_project_id(source_url, headers)
+            if not project_id:
+                self.assertions.add_fail(
+                    "project-lookup-failed",
+                    "Could not find project containing the configured environment.",
+                )
+                return False
+            self.add_timeline_event(
+                "project-resolved", project_id=project_id
+            )
+            self._notify_step("project-lookup", "ok")
+
             # --- Phase 2: Create Environment ---
 
             self._notify_step("environment-create", "running")
@@ -107,6 +122,7 @@ class CP06Scenario(BaseScenario):
 
             env_create_result = self._create_environment(
                 source_url,
+                project_id,
                 env_key,
                 env_name,
                 headers,
@@ -151,6 +167,28 @@ class CP06Scenario(BaseScenario):
                 env_key,
             )
 
+            # --- Phase 4: Convergence Polling ---
+            self._notify_step("convergence", "running")
+            converged, _, _ = self._poll_environment_convergence(
+                source_url,
+                target_url,
+                project_id,
+                env_id,
+                env_key,
+                headers,
+            )
+            if converged:
+                self.assertions.add_pass(
+                    "environment-convergence",
+                    "Environment converged in both regions.",
+                )
+            else:
+                self.assertions.add_fail(
+                    "environment-convergence",
+                    "Environment did not converge within timeout.",
+                )
+            self._notify_step("convergence", "ok")
+
             # --- Phase 5: Redis Verification ---
 
             self.run_secret_redis_check(
@@ -168,7 +206,9 @@ class CP06Scenario(BaseScenario):
             # --- Post-condition: Cleanup ---
 
             self._notify_step("cleanup", "running")
-            self._delete_environment(source_url, env_id, headers)
+            self._delete_environment(
+                source_url, project_id, env_id, headers
+            )
             self.add_timeline_event("cleanup", phase="delete-environment")
             self._notify_step("cleanup", "ok")
 
@@ -181,9 +221,37 @@ class CP06Scenario(BaseScenario):
         finally:
             self.write_artifacts()
 
+    def _get_project_id(
+        self,
+        base_url: str,
+        headers: dict,
+    ) -> str:
+        """Retrieve the project ID that contains the configured environment."""
+        client = ApiClient(
+            base_url,
+            self.config.skip_certificate_check,
+            self.config.api_version,
+        )
+
+        endpoint = f"/api/v{self.config.api_version}/projects"
+        response = client.get(endpoint, headers=headers)
+        projects = extract_data(response)
+
+        if not projects:
+            return ""
+
+        for project in projects:
+            environments = project.get("environments", [])
+            for env in environments:
+                if env.get("id") == self.config.env_id:
+                    return project.get("id", "")
+
+        return ""
+
     def _create_environment(
         self,
         base_url: str,
+        project_id: str,
         env_key: str,
         env_name: str,
         headers: dict,
@@ -195,10 +263,8 @@ class CP06Scenario(BaseScenario):
             self.config.api_version,
         )
 
-        # POST /api/v{version}/projects/{project_id}/environments
         endpoint = (
-            f"/api/v{self.config.api_version}/projects/{self.config.env_id}"
-            f"/environments"
+            f"/api/v{self.config.api_version}/projects/{project_id}/envs"
         )
 
         payload = {
@@ -213,6 +279,7 @@ class CP06Scenario(BaseScenario):
     def _delete_environment(
         self,
         base_url: str,
+        project_id: str,
         env_id: str,
         headers: dict,
     ) -> bool:
@@ -224,7 +291,8 @@ class CP06Scenario(BaseScenario):
         )
 
         endpoint = (
-            f"/api/v{self.config.api_version}/environments/{env_id}"
+            f"/api/v{self.config.api_version}/projects/{project_id}"
+            f"/envs/{env_id}"
         )
 
         try:
@@ -236,6 +304,7 @@ class CP06Scenario(BaseScenario):
     def _get_environment_state(
         self,
         base_url: str,
+        project_id: str,
         env_id: str,
         region: str,
         headers: dict,
@@ -248,7 +317,8 @@ class CP06Scenario(BaseScenario):
         )
 
         endpoint = (
-            f"/api/v{self.config.api_version}/environments/{env_id}"
+            f"/api/v{self.config.api_version}/projects/{project_id}"
+            f"/envs/{env_id}"
         )
 
         try:
@@ -282,6 +352,7 @@ class CP06Scenario(BaseScenario):
         self,
         source_url: str,
         target_url: str,
+        project_id: str,
         env_id: str,
         env_key: str,
         headers: dict,
@@ -295,110 +366,10 @@ class CP06Scenario(BaseScenario):
 
         while elapsed < timeout:
             source_state = self._get_environment_state(
-                source_url, env_id, "source", headers
+                source_url, project_id, env_id, "source", headers
             )
             target_state = self._get_environment_state(
-                target_url, env_id, "target", headers
-            )
-
-            self.add_timeline_event(
-                "convergence-poll",
-                source=json.loads(source_state.json()),
-                target=json.loads(target_state.json()),
-            )
-
-            # Both regions must have environment present with secret
-            if (
-                source_state.is_present
-                and target_state.is_present
-                and source_state.secret_key is not None
-                and target_state.secret_key is not None
-            ):
-                self.add_timeline_event(
-                    "convergence-achieved",
-                    environment_id=env_id,
-                    environment_key=env_key,
-                    elapsed_seconds=elapsed,
-                )
-                return True, source_state, target_state
-
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-
-        self.add_timeline_event(
-            "convergence-timeout",
-            environment_id=env_id,
-            environment_key=env_key,
-            timeout_seconds=timeout,
-        )
-        return False, source_state, target_state
-
-    def _get_environment_state(
-        self,
-        base_url: str,
-        env_id: str,
-        region: str,
-        headers: dict,
-    ) -> EnvironmentState:
-        """Get current environment state from API."""
-        client = ApiClient(
-            base_url,
-            self.config.skip_certificate_check,
-            self.config.api_version,
-        )
-
-        endpoint = (
-            f"/api/v{self.config.api_version}/environments/{env_id}"
-        )
-
-        try:
-            response = client.get(endpoint, headers=headers)
-            data = extract_data(response)
-            return EnvironmentState(
-                region=region,
-                observed_at_utc=self._get_utc_timestamp(),
-                is_present=data is not None,
-                id=data.get("id") if data else None,
-                key=data.get("key") if data else None,
-                name=data.get("name") if data else None,
-                secret_key=data.get("clientSideAvailabilitySecretKey")
-                if data
-                else None,
-                error=None,
-            )
-        except Exception as e:
-            return EnvironmentState(
-                region=region,
-                observed_at_utc=self._get_utc_timestamp(),
-                is_present=False,
-                id=env_id,
-                key=None,
-                name=None,
-                secret_key=None,
-                error=str(e),
-            )
-
-    def _poll_environment_convergence(
-        self,
-        source_url: str,
-        target_url: str,
-        env_id: str,
-        env_key: str,
-        headers: dict,
-    ) -> tuple:
-        """Poll both regions until environment converges or timeout."""
-        timeout = self.config.convergence_timeout_seconds or 120
-        poll_interval = self.config.convergence_poll_interval_seconds or 2
-        elapsed = 0
-        source_state = None
-        target_state = None
-
-        while elapsed < timeout:
-            source_state = self._get_environment_state(
-                source_url, env_id, "source", headers
-            )
-            target_state = self._get_environment_state(
-                target_url, env_id, "target", headers
+                target_url, project_id, env_id, "target", headers
             )
 
             self.add_timeline_event(
