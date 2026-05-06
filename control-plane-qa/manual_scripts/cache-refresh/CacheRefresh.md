@@ -1,4 +1,4 @@
-# CP-01 Control Plane API Full Sync
+# CP-08 Control Plane API Full Sync
 
 **Component:** Control-Plane, Api, Evaluation Server
 **Status:** [Draft/Ready/Passed/Failed]

@@ -1,4 +1,4 @@
-# CP-01 License Change Test
+# CP-07 License Change Test
 
 **Component:** Control-Plane, Api, Evaluation Server
 **Status:** [Draft/Ready/Passed/Failed]

@@ -1,4 +1,4 @@
-# CP-01 Secret Change Test
+# CP-05 Secret Change Test
 
 **Component:** Control-Plane, Api, Evaluation Server
 **Status:** [Draft/Ready/Passed/Failed]

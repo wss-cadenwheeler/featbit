@@ -1,4 +1,4 @@
-# CP-02 Environment Added with Secret Test
+# CP-06 Environment Added with Secret Test
 
 **Component:** Control-Plane, Api, Evaluation Server
 **Status:** [Draft/Ready/Passed/Failed]
