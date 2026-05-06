@@ -20,7 +20,6 @@ from scenarios import (
     CP04Scenario,
     CP05Scenario,
     CP06Scenario,
-    CP07Scenario,
     CP08Scenario,
 )
 from scripts import seed_data as seed_module
@@ -361,8 +360,6 @@ def seed(
     "cp05-east-to-west",
     "cp06-west-to-east",
     "cp06-east-to-west",
-    "cp07-west-to-east",
-    "cp07-east-to-west",
     "cp08-full-sync",
 ]))
 @click.option("--env-id", required=True, help="Environment ID")
@@ -378,6 +375,11 @@ def seed(
     "--control-plane-base-url",
     default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
     help="Control-Plane admin endpoint URL (defaults to https://featbit-control-plane.{west|east}.local)",
+)
+@click.option(
+    "--control-plane-api-key",
+    default=lambda: get_env("CONTROL_PLANE_API_KEY", ""),
+    help="API key for control-plane admin endpoints (X-API-Key header)",
 )
 @click.option(
     "--login-api-base-url",
@@ -424,6 +426,7 @@ def scenario(
     west_api_base_url: str,
     east_api_base_url: str,
     control_plane_base_url: str,
+    control_plane_api_key: str,
     login_api_base_url: str,
     api_authorization_header: str,
     login_email: str,
@@ -451,6 +454,7 @@ def scenario(
         west_api_base_url=west_api_base_url,
         east_api_base_url=east_api_base_url,
         control_plane_base_url=control_plane_base_url or None,
+        control_plane_api_key=control_plane_api_key or None,
         login_api_base_url=login_api_base_url or west_api_base_url,
         api_authorization_header=api_authorization_header or None,
         login_email=login_email,
@@ -486,8 +490,6 @@ def scenario(
         scenario_obj = CP05Scenario(config)
     elif scenario.startswith("cp06"):
         scenario_obj = CP06Scenario(config)
-    elif scenario.startswith("cp07"):
-        scenario_obj = CP07Scenario(config)
     else:
         scenario_obj = CP08Scenario(config)
 

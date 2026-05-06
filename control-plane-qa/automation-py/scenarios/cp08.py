@@ -96,9 +96,18 @@ class CP08Scenario(BaseScenario):
 
             self._notify_step("full-sync-trigger", "running")
 
+            # The control-plane admin endpoint uses X-API-Key authentication,
+            # not the standard bearer token used by the backend API.
+            # If no key is configured, send empty string (control-plane skips
+            # auth when its own ApiKey config is empty).
+            admin_headers = {
+                "Content-Type": "application/json",
+                "X-API-Key": self.config.control_plane_api_key or "",
+            }
+
             sync_result = self._trigger_full_sync(
                 control_plane_url,
-                headers,
+                admin_headers,
             )
 
             if not sync_result.get("success"):
@@ -165,9 +174,7 @@ class CP08Scenario(BaseScenario):
             self.config.api_version,
         )
 
-        endpoint = (
-            f"/api/v{self.config.api_version}/admin/push-eval-full-sync"
-        )
+        endpoint = "/api/admin/push-eval-full-sync"
 
         try:
             response = client.post(endpoint, body={}, headers=headers)

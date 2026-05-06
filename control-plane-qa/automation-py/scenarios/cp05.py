@@ -4,14 +4,12 @@ Validates that a secret change message is sent through the control plane
 to update Redis in both west and east datacenters.
 """
 
-import json
 import subprocess
 import time
 import uuid
 
 from core.api_client import ApiClient, extract_data
 from core.auth import resolve_authorization_header, resolve_request_context
-from core.models import SecretState
 from core.scenario_base import BaseScenario, ScenarioDefinition
 
 
@@ -104,12 +102,10 @@ class CP05Scenario(BaseScenario):
             self._notify_step("secret-create", "running")
 
             secret_key = f"{definition.default_flag_key}-{str(uuid.uuid4())[:8]}"
-            secret_value = f"secret-value-{str(uuid.uuid4())[:8]}"
 
             secret_create_result = self._create_secret(
                 source_url,
                 secret_key,
-                secret_value,
                 headers,
             )
 
@@ -136,25 +132,13 @@ class CP05Scenario(BaseScenario):
             )
             self._notify_step("secret-create", "ok")
 
-            # --- Phase 3: Poll for Convergence ---
-
-            self._notify_step("convergence", "running")
-
-            converged, _, _ = self._poll_secret_convergence(
-                source_url,
-                target_url,
-                secret_id,
-                secret_key,
-                headers,
-            )
-
-            self.assertions.add(
-                "source-target-convergence",
-                converged,
-                f"Both regions have secret {secret_key} in Redis.",
-                "evaluated",
-            )
-            self._notify_step("convergence", "ok" if converged else "failed")
+            # --- Phase 3: Wait for Propagation ---
+            # No GET-by-ID endpoint exists for secrets, so we wait for
+            # control-plane propagation before checking Kafka/Redis.
+            self._notify_step("propagation-wait", "running")
+            propagation_wait = self.config.convergence_poll_interval_seconds or 5
+            time.sleep(propagation_wait)
+            self._notify_step("propagation-wait", "ok")
 
             # --- Phase 4: Kafka Topic Verification ---
 
@@ -202,7 +186,6 @@ class CP05Scenario(BaseScenario):
         self,
         base_url: str,
         secret_key: str,
-        secret_value: str,
         headers: dict,
     ) -> dict:
         """Create a secret via API."""
@@ -219,7 +202,7 @@ class CP05Scenario(BaseScenario):
 
         payload = {
             "name": secret_key,
-            "value": secret_value,
+            "type": "server",
         }
 
         response = client.post(endpoint, body=payload, headers=headers)
@@ -249,95 +232,6 @@ class CP05Scenario(BaseScenario):
             return True
         except Exception:
             return False
-
-    def _get_secret_state(
-        self,
-        base_url: str,
-        secret_id: str,
-        region: str,
-        headers: dict,
-    ) -> SecretState:
-        """Get current secret state from API."""
-        client = ApiClient(
-            base_url,
-            self.config.skip_certificate_check,
-            self.config.api_version,
-        )
-
-        endpoint = (
-            f"/api/v{self.config.api_version}/envs/{self.config.env_id}"
-            f"/secrets/{secret_id}"
-        )
-
-        try:
-            response = client.get(endpoint, headers=headers)
-            data = extract_data(response)
-            return SecretState(
-                region=region,
-                observed_at_utc=self._get_utc_timestamp(),
-                is_present=data is not None,
-                id=data.get("id") if data else None,
-                name=data.get("name") if data else None,
-                error=None,
-            )
-        except Exception as e:
-            return SecretState(
-                region=region,
-                observed_at_utc=self._get_utc_timestamp(),
-                is_present=False,
-                id=secret_id,
-                name=None,
-                error=str(e),
-            )
-
-    def _poll_secret_convergence(
-        self,
-        source_url: str,
-        target_url: str,
-        secret_id: str,
-        secret_key: str,
-        headers: dict,
-    ) -> tuple:
-        """Poll both regions until secret converges or timeout."""
-        timeout = self.config.convergence_timeout_seconds or 120
-        poll_interval = self.config.convergence_poll_interval_seconds or 2
-        elapsed = 0
-        source_state = None
-        target_state = None
-
-        while elapsed < timeout:
-            source_state = self._get_secret_state(
-                source_url, secret_id, "source", headers
-            )
-            target_state = self._get_secret_state(
-                target_url, secret_id, "target", headers
-            )
-
-            self.add_timeline_event(
-                "convergence-poll",
-                source=json.loads(source_state.json()),
-                target=json.loads(target_state.json()),
-            )
-
-            if source_state.is_present and target_state.is_present:
-                self.add_timeline_event(
-                    "convergence-achieved",
-                    secret_id=secret_id,
-                    secret_key=secret_key,
-                    elapsed_seconds=elapsed,
-                )
-                return True, source_state, target_state
-
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-
-        self.add_timeline_event(
-            "convergence-timeout",
-            secret_id=secret_id,
-            secret_key=secret_key,
-            timeout_seconds=timeout,
-        )
-        return False, source_state, target_state
 
     def _run_secret_kafka_check(
         self,
