@@ -21,6 +21,7 @@ from scenarios import (
     CP05Scenario,
     CP06Scenario,
     CP07Scenario,
+    CP08Scenario,
 )
 from scripts import seed_data as seed_module
 
@@ -362,6 +363,7 @@ def seed(
     "cp06-east-to-west",
     "cp07-west-to-east",
     "cp07-east-to-west",
+    "cp08-full-sync",
 ]))
 @click.option("--env-id", required=True, help="Environment ID")
 @click.option(
@@ -371,6 +373,11 @@ def seed(
 @click.option(
     "--east-api-base-url",
     default=lambda: get_env("EAST_API_BASE_URL", "https://featbit-api.east.local"),
+)
+@click.option(
+    "--control-plane-base-url",
+    default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
+    help="Control-Plane admin endpoint URL (defaults to https://featbit-control-plane.{west|east}.local)",
 )
 @click.option(
     "--login-api-base-url",
@@ -409,12 +416,14 @@ def seed(
 @click.option("--retry-log-check", default=lambda: get_env("RETRY_LOG_CHECK_COMMAND", ""))
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
+@click.option("--app-log-check", default=lambda: get_env("APP_LOG_CHECK_COMMAND", ""))
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 def scenario(
     scenario: str,
     env_id: str,
     west_api_base_url: str,
     east_api_base_url: str,
+    control_plane_base_url: str,
     login_api_base_url: str,
     api_authorization_header: str,
     login_email: str,
@@ -432,6 +441,7 @@ def scenario(
     retry_log_check: str,
     redis_west_check: str,
     redis_east_check: str,
+    app_log_check: str,
     artifacts_root: str,
 ) -> None:
     """Run a single scenario."""
@@ -440,6 +450,7 @@ def scenario(
         env_id=env_id,
         west_api_base_url=west_api_base_url,
         east_api_base_url=east_api_base_url,
+        control_plane_base_url=control_plane_base_url or None,
         login_api_base_url=login_api_base_url or west_api_base_url,
         api_authorization_header=api_authorization_header or None,
         login_email=login_email,
@@ -459,6 +470,7 @@ def scenario(
         retry_log_check_command=retry_log_check or None,
         redis_west_check_command=redis_west_check or None,
         redis_east_check_command=redis_east_check or None,
+        app_log_check_command=app_log_check or None,
         artifacts_root=artifacts_root,
     )
 
@@ -474,8 +486,10 @@ def scenario(
         scenario_obj = CP05Scenario(config)
     elif scenario.startswith("cp06"):
         scenario_obj = CP06Scenario(config)
-    else:
+    elif scenario.startswith("cp07"):
         scenario_obj = CP07Scenario(config)
+    else:
+        scenario_obj = CP08Scenario(config)
 
     click.echo(f"Running {scenario}...")
     passed = scenario_obj.run()
@@ -568,7 +582,7 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07"]))
+@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08"]))
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -693,8 +707,10 @@ def suite(
         scenario_names = ["cp05-west-to-east", "cp05-east-to-west"]
     elif suite == "cp06":
         scenario_names = ["cp06-west-to-east", "cp06-east-to-west"]
-    else:
+    elif suite == "cp07":
         scenario_names = ["cp07-west-to-east", "cp07-east-to-west"]
+    else:
+        scenario_names = ["cp08-full-sync"]
 
     dashboard = SuiteDashboard(
         suite=suite,
@@ -844,8 +860,10 @@ def suite(
                 scenario_obj = CP05Scenario(config)
             elif scenario_name.startswith("cp06"):
                 scenario_obj = CP06Scenario(config)
-            else:
+            elif scenario_name.startswith("cp07"):
                 scenario_obj = CP07Scenario(config)
+            else:
+                scenario_obj = CP08Scenario(config)
 
             if use_dashboard:
                 _sname = scenario_name

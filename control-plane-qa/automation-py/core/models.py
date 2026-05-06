@@ -142,6 +142,7 @@ class ScenarioConfig:
     env_id: str
     west_api_base_url: str
     east_api_base_url: str
+    control_plane_base_url: Optional[str] = None
     login_api_base_url: str
     api_authorization_header: Optional[str]
     login_email: str
@@ -161,6 +162,7 @@ class ScenarioConfig:
     retry_log_check_command: Optional[str]
     redis_west_check_command: Optional[str]
     redis_east_check_command: Optional[str]
+    app_log_check_command: Optional[str]
     artifacts_root: str
     api_version: str = "1"
     flag_ids_by_key: Optional[Dict[str, str]] = None
