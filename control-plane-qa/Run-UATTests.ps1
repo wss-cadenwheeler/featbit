@@ -432,6 +432,26 @@ function Invoke-RunTests {
     # Give port-forwards a moment to establish
     Start-Sleep -Seconds 5
 
+    # Verify control-plane is responding via its port-forward
+    $cpHealthUrl = "http://localhost:${cpLocalPort}/health/liveness"
+    $cpReady = $false
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            $resp = Invoke-WebRequest -Uri $cpHealthUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction SilentlyContinue
+            if ($resp.StatusCode -eq 200) {
+                $cpReady = $true
+                break
+            }
+        } catch { }
+        Write-Info "Waiting for control-plane health (attempt $attempt/10)..."
+        Start-Sleep -Seconds 3
+    }
+    if ($cpReady) {
+        Write-Pass "Control-plane is healthy and accepting requests"
+    } else {
+        Write-Fail "Control-plane did not become healthy within 30s"
+    }
+
     $urlsString = $testAppUrls -join ","
     Write-Info "Test app URLs: $urlsString"
 

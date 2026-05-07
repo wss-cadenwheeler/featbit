@@ -16,4 +16,13 @@ public class AdminController: ApiControllerBase
         var response = await Mediator.Send(request);
         return Ok(response);
     }
+
+    [HttpGet("connections")]
+    public async Task<ApiResponse<IReadOnlyList<ConnectionDto>>> GetConnections()
+    {
+        var request = new GetConnections();
+
+        var response = await Mediator.Send(request);
+        return Ok(response);
+    }
 }

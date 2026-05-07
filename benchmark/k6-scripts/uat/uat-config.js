@@ -18,6 +18,7 @@ const DEFAULT_TEST_CONFIG = {
   preFullSyncSettleMs: 3000,
   fullSyncPropagationMs: 5000,
   disconnectSettleMs: 1000,
+  kafkaPropagationMs: 5000,
 };
 
 function loadFromFile(path) {
@@ -80,6 +81,8 @@ function loadConfig() {
       instanceId: inst.instanceId || inst.instance_id || `test-app-${i + 1}`,
       baseUrl: inst.baseUrl || inst.base_url || '',
       envSecret: inst.envSecret || inst.env_secret || '',
+      projectKey: inst.projectKey || inst.project_key || '',
+      environmentId: inst.environmentId || inst.environment_id || '',
       flagKeys: inst.flagKeys || inst.flag_keys || [],
     }));
 

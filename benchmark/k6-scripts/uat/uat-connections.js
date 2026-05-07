@@ -129,6 +129,72 @@ export default function () {
   });
   record(allConnectedCheck);
 
+  // ── Phase 2b: Verify connections in Redis (via control-plane) ───────────────
+  logPhase('Verify Connections in Redis');
+
+  // Allow time for eval-server → Kafka → control-plane → Redis propagation
+  // Retry with backoff since control-plane consumer may still be initializing
+  let redisConnections = [];
+  let redisQueryOk = false;
+  const maxRetries = 3;
+  const retryDelayMs = testConfig.kafkaPropagationMs / 1000;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    sleep(retryDelayMs);
+    const postConnectRedis = cpClient.getConnections();
+
+    if (postConnectRedis._status === 200 && postConnectRedis.success === true) {
+      redisConnections = postConnectRedis.data || [];
+      if (redisConnections.length > 0 || attempt === maxRetries) {
+        redisQueryOk = true;
+        break;
+      }
+      console.log(`  ⏳ Attempt ${attempt}/${maxRetries}: Redis has 0 connections, retrying...`);
+    } else {
+      console.log(`  ⏳ Attempt ${attempt}/${maxRetries}: Redis query failed (HTTP ${postConnectRedis._status}), retrying...`);
+      if (attempt === maxRetries) {
+        redisQueryOk = false;
+      }
+    }
+  }
+
+  const redisCheckOk = check(null, {
+    'redis connections query succeeded': () => redisQueryOk,
+  });
+  record(redisCheckOk);
+
+  if (redisQueryOk) {
+    console.log(`  ✓ Redis has ${redisConnections.length} active connection(s)`);
+
+    // Verify each instance's environment appears in Redis connections (match by envId or projectKey)
+    for (const { id } of appClients) {
+      const inst = instances.find((i) => i.instanceId === id);
+      const envId = inst ? inst.environmentId : '';
+      const projectKey = inst ? inst.projectKey : '';
+
+      if (envId || projectKey) {
+        const found = redisConnections.some(
+          (c) => (envId && c.envId === envId) || (projectKey && c.secret === projectKey)
+        );
+        const secretOk = check(null, {
+          [`${id}: connection exists in Redis`]: () => found,
+        });
+        record(secretOk);
+
+        if (found) {
+          console.log(`  ✓ ${id} connection found in Redis (envId=${envId.substring(0, 8)}...)`);
+        } else {
+          console.log(`  ✗ ${id} connection NOT found in Redis (envId=${envId.substring(0, 8)}..., projectKey=${projectKey})`);
+          console.log(`    Redis connections: ${JSON.stringify(redisConnections.map(c => ({envId: c.envId, secret: c.secret})))}`);
+        }
+      } else {
+        console.log(`  ⚠ ${id} has no envId/projectKey configured — skipping Redis check`);
+      }
+    }
+  } else {
+    console.log(`  ✗ Failed to query Redis connections after ${maxRetries} attempts`);
+  }
+
   // ── Phase 3: Push Full Sync (TC-03) ─────────────────────────────────────────
   logPhase('Push Full Sync (TC-03)');
 
@@ -225,6 +291,47 @@ export default function () {
     'all instances disconnected': () => allDisconnected,
   });
   record(allDisconnectedCheck);
+
+  // ── Phase 4b: Verify connections removed from Redis ────────────────────────
+  logPhase('Verify Connections Removed from Redis');
+
+  // Allow time for eval-server → Kafka → control-plane → Redis propagation
+  sleep(testConfig.kafkaPropagationMs / 1000);
+
+  const postDisconnectRedis = cpClient.getConnections();
+  const postDisconnectQueryOk = check(postDisconnectRedis, {
+    'redis connections query after disconnect succeeded': (r) => r._status === 200 && r.success === true,
+  });
+  record(postDisconnectQueryOk);
+
+  if (postDisconnectQueryOk) {
+    const remaining = postDisconnectRedis.data || [];
+    console.log(`  Redis has ${remaining.length} connection(s) after disconnect`);
+
+    for (const { id } of appClients) {
+      const inst = instances.find((i) => i.instanceId === id);
+      const envId = inst ? inst.environmentId : '';
+      const projectKey = inst ? inst.projectKey : '';
+
+      if (envId || projectKey) {
+        const stillPresent = remaining.some(
+          (c) => (envId && c.envId === envId) || (projectKey && c.secret === projectKey)
+        );
+        const removedOk = check(null, {
+          [`${id}: connection removed from Redis`]: () => !stillPresent,
+        });
+        record(removedOk);
+
+        if (!stillPresent) {
+          console.log(`  ✓ ${id} connection removed from Redis`);
+        } else {
+          console.log(`  ✗ ${id} connection still in Redis after disconnect`);
+        }
+      }
+    }
+  } else {
+    console.log(`  ✗ Failed to query Redis connections after disconnect (HTTP ${postDisconnectRedis._status})`);
+  }
 
   // ── Phase 5: Summary ───────────────────────────────────────────────────────
   logPhase('Summary');
