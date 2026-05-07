@@ -527,3 +527,24 @@ kubectl logs api-server | grep "publishing to"
 6. **Setup Multi-Cluster** - Either local minikube or Azure AKS
 7. **Run Multi-DC Tests** - Validate Redis synchronization
 8. **Create PR Documentation** - Include all test results and reproduction steps
+
+---
+
+## Scenario Cross-Reference: Manual Procedures ↔ Automated Tests
+
+The table below maps human-readable manual test procedures (in `manual_scripts/`) to their automated counterparts (in `automation-py/scenarios/`).
+
+| Manual Procedure (`manual_scripts/`) | Automated Scenario (`automation-py/scenarios/`) | Description |
+|--------------------------------------|------------------------------------------------|-------------|
+| `flag-change/FeatureFlagChange.md` | `cp01.py` — CP-01 | Basic feature flag toggle propagation (west↔east) |
+| `flag-change/FeatureFlagChangeBroadcastCorrectness.md` | `cp02.py` — CP-02 | Cross-DC flag propagation correctness validation |
+| `flag-change/FeatureFlagChangeResilience.md` | `cp03.py` — CP-03 | Resilience under failure (Redis outage during flag change) |
+| `segment-change/SegmentChange.md` | `cp04.py` — CP-04 | Segment change propagation across datacenters |
+| `secret-change/SecretChange.md` | `cp05.py` — CP-05 | Secret change propagation across datacenters |
+| `secret-change/EnvironmentAdded.md` | `cp06.py` — CP-06 | Environment added triggers secret propagation |
+| `license-change/LicenseChange.md` | `cp07.py` — CP-07 | License change propagation across datacenters |
+| `cache-refresh/CacheRefresh.md` | `cp08.py` — CP-08 | Control Plane API full sync push to Evaluation Server |
+
+**Key differences:**
+- **Manual procedures** include browser-based steps (Kafka UI, Redis GUI) and are designed for human testers verifying system behavior visually.
+- **Automated scenarios** use the `BaseScenario` framework with programmatic API calls, Redis assertions, and Kafka message verification — suitable for CI/CD pipelines.

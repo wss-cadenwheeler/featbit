@@ -1,0 +1,14 @@
+# Test artifacts and runtime output
+artifacts/
+*.log
+
+# Runtime state files
+.quickstart-state-*.json
+
+# Python (supplemental to automation-py/.gitignore)
+__pycache__/
+*.py[cod]
+
+# Generated outputs
+repomix-output.xml
+uat-results.json
