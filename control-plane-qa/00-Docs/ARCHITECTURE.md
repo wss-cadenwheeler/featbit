@@ -338,9 +338,9 @@ For production deployments with real multi-zone clusters:
 
 - `kubernetes/pro/infrastructure/mongodb-west-statefulset.yaml` - West cluster MongoDB StatefulSet
 - `kubernetes/pro/infrastructure/mongodb-east-statefulset.yaml` - East cluster MongoDB StatefulSet
-- `Initialize-MongoDBReplicaSet.ps1` - Replica set initialization script
-- `Start-PortForwards.ps1` - Port forwarding management
-- `Setup-FeatBitProxy.ps1` - nginx proxy and DNS configuration
+- `01-Infrastructure/Initialize-MongoDBReplicaSet.ps1` - Replica set initialization script
+- `01-Infrastructure/Start-PortForwards.ps1` - Port forwarding management
+- `01-Infrastructure/Setup-FeatBitProxy.ps1` - nginx proxy and DNS configuration
 
 ---
 

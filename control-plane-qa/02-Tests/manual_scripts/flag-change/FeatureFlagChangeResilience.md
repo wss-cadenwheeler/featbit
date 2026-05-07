@@ -8,7 +8,7 @@ Validate that Control-Plane safely handles cross-datacenter failure scenarios du
 
 ## Preconditions
 - [ ] Start the Control-Plane QA deployment with one of the Quickstart PowerShell scripts.
-- [ ] If needed, run Start-PortForwards.ps1.
+- [ ] If needed, run Start-PortForwards.ps1 from 01-Infrastructure/.
 - [ ] East and West clusters are running in Advanced mode with required host entries.
 - [ ] playground organization exists.
 - [ ] control-plane-test project exists.

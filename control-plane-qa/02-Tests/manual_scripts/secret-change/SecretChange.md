@@ -8,7 +8,7 @@ Validates that a secret change message is sent through the control plane to upda
 
 ## Preconditions
 - [ ] Start the Control-Plane QA deployment with one of the Quickstart powershell scripts
-- [ ] If needed, run Start-PortForwards.ps1 (this depends on which quickstart script is used)
+- [ ] If needed, run Start-PortForwards.ps1 from 01-Infrastructure/ (this depends on which quickstart script is used)
 - [ ] East and West Clusters Running in Advanced mode with port forwards and host entries
 - [ ] `playground` Organization Exists
 - [ ] `control-plane-test` Project Exists

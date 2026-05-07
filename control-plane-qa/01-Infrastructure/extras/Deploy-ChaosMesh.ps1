@@ -9,7 +9,7 @@
     3. Installs or upgrades Chaos Mesh via Helm using the shared values file
     4. Validates that all Chaos Mesh pods reach Running state
 
-    The values file is located at control-plane-qa/k8s/chaos-mesh/values.yml.
+    The values file is located at control-plane-qa/01-Infrastructure/chaos-mesh/values.yml.
 
     Prerequisites:
     - Minikube clusters (east/west) already running
@@ -26,7 +26,7 @@
     Kubernetes namespace for Chaos Mesh. Default: chaos-mesh.
 
 .PARAMETER ValuesFile
-    Path to the Helm values file. Default: control-plane-qa/k8s/chaos-mesh/values.yml.
+    Path to the Helm values file. Default: control-plane-qa/01-Infrastructure/chaos-mesh/values.yml.
 
 .PARAMETER SkipInotifyTuning
     If specified, skips the inotify sysctl tuning on cluster nodes.
@@ -90,7 +90,7 @@ function Write-Error {
 }
 
 if (-not $ValuesFile) {
-    $ValuesFile = Join-Path $PSScriptRoot "k8s" "chaos-mesh" "values.yml"
+    $ValuesFile = Join-Path $PSScriptRoot ".." "chaos-mesh" "values.yml"
 }
 
 if (-not (Test-Path $ValuesFile)) {

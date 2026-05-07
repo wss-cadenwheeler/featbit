@@ -1,6 +1,8 @@
 # FeatBit Multi-Cluster Deployment
 
-This folder contains automated scripts for deploying FeatBit Pro to two Minikube clusters (west and east). All scripts live under `control-plane-qa/` in the repository root and are run from that directory.
+This document covers deploying FeatBit Pro to two Minikube clusters (west and east). Infrastructure scripts live under `control-plane-qa/01-Infrastructure/`.
+
+> **Working directory:** All commands in this document assume you are in the `01-Infrastructure/` directory unless stated otherwise.
 
 ## Overview
 

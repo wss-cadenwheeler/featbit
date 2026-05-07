@@ -532,7 +532,7 @@ kubectl logs api-server | grep "publishing to"
 
 ## Scenario Cross-Reference: Manual Procedures ↔ Automated Tests
 
-The table below maps human-readable manual test procedures (in `manual_scripts/`) to their automated counterparts (in `automation-py/scenarios/`).
+The table below maps human-readable manual test procedures (in `02-Tests/manual_scripts/`) to their automated counterparts (in `02-Tests/automation-py/scenarios/`).
 
 | Manual Procedure (`manual_scripts/`) | Automated Scenario (`automation-py/scenarios/`) | Description |
 |--------------------------------------|------------------------------------------------|-------------|

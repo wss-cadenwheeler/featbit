@@ -121,10 +121,10 @@ $ErrorActionPreference = "Stop"
 # ── Paths ────────────────────────────────────────────────────────────────────────
 
 $scriptRoot    = $PSScriptRoot
-$repoRoot      = Split-Path -Parent $scriptRoot
+$repoRoot      = (Split-Path -Parent $scriptRoot) | Split-Path -Parent
 $automationDir = Join-Path $scriptRoot "automation-py"
 $testAppDir    = Join-Path $scriptRoot "test-app"
-$k8sUatDir     = Join-Path $scriptRoot "k8s\uat"
+$k8sUatDir     = Join-Path $scriptRoot "uat-k8s"
 $k6ScriptPath  = Join-Path $repoRoot  "benchmark\k6-scripts\uat\uat-connections.js"
 
 # Prefer the automation-py venv Python (has all deps); fall back to system python
