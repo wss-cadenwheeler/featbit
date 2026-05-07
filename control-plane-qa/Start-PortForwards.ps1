@@ -13,6 +13,8 @@
     - East API: 15001 -> api-server:5000
     - West Eval: 5100 -> evaluation-server:5100
     - East Eval: 5101 -> evaluation-server:5100
+    - West Control Plane: 5200 -> control-plane:5200
+    - East Control Plane: 5201 -> control-plane:5200
     - Kafka: 29092 -> kafka:29092 (West, external listener)
     - West Kafka UI: 18080 -> kafka-ui:8080
     - East Kafka UI: 18081 -> kafka-ui:8080
@@ -136,6 +138,8 @@ $jobs = @(
     @{Name="east-api"; Context="east"; Namespace="featbit"; Service="api-server"; LocalPort="15001"; RemotePort="5000"}
     @{Name="west-eval"; Context="west"; Namespace="featbit"; Service="evaluation-server"; LocalPort="5100"; RemotePort="5100"}
     @{Name="east-eval"; Context="east"; Namespace="featbit"; Service="evaluation-server"; LocalPort="5101"; RemotePort="5100"}
+    @{Name="west-control-plane"; Context="west"; Namespace="featbit"; Service="control-plane"; LocalPort="5200"; RemotePort="5200"}
+    @{Name="east-control-plane"; Context="east"; Namespace="featbit"; Service="control-plane"; LocalPort="5201"; RemotePort="5200"}
     @{Name="kafka"; Context="west"; Namespace="featbit"; Service="kafka"; LocalPort="29092"; RemotePort="29092"}
     @{Name="west-kafka-ui"; Context="west"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18080"; RemotePort="8080"}
     @{Name="east-kafka-ui"; Context="east"; Namespace="featbit"; Service="kafka-ui"; LocalPort="18081"; RemotePort="8080"}
@@ -237,6 +241,8 @@ Write-Host "    localhost:15000 → West API" -ForegroundColor Gray
 Write-Host "    localhost:15001 → East API" -ForegroundColor Gray
 Write-Host "    localhost:5100 → West Evaluation" -ForegroundColor Gray
 Write-Host "    localhost:5101 → East Evaluation" -ForegroundColor Gray
+Write-Host "    localhost:5200 → West Control Plane" -ForegroundColor Gray
+Write-Host "    localhost:5201 → East Control Plane" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Infrastructure Services:" -ForegroundColor Yellow
 Write-Host "    localhost:29092 → Kafka (West, external listener)" -ForegroundColor Gray

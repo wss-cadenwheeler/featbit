@@ -6,7 +6,7 @@ namespace Api.Controllers;
 
 [Route("api/admin")]
 [Authorize(AuthenticationSchemes = "ApiKey")]
-public class AdminController: ApiControllerBase
+public class AdminController : ApiControllerBase
 {
     [HttpPost("push-eval-full-sync")]
     public async Task<ApiResponse<bool>> PushFullSyncToAllActiveClients()

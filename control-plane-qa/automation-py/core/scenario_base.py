@@ -377,28 +377,31 @@ class BaseScenario(ABC):
 
         return None
 
-    def run_redis_check(
+    def _run_redis_key_lookup(
         self,
-        region: str,
+        assertion_name: str,
         command: Optional[str],
-        flag_id: Optional[str] = None,
-        flag_key: Optional[str] = None,
-        expected_status: Optional[bool] = None,
+        redis_key: str,
+        identifier: str,
+        identifier_label: str,
+        region: str,
         context: Optional[str] = None,
-    ) -> None:
-        """Run Redis check via provided command or automatic Kubernetes discovery.
+        diagnostics: bool = True,
+        timeline_event: str = "redis-auto-check",
+        timeline_extra: Optional[dict] = None,
+    ) -> tuple:
+        """Core Redis key lookup logic shared by all redis check methods.
 
-        Auto-check targets GUID-based key lookup using featbit:flags:<flag_id>.
+        Returns (found: bool, keys: list, sampled_values: list).
+        Handles service discovery, PING, GET, fallback SCAN, and diagnostics.
+        On failure, records assertions and returns (False, [], []).
         """
-        assertion_name = f"redis-{region}-check"
-
         if command:
             self.run_optional_check(assertion_name, command, required=True)
-            return
+            return (True, [], [])
 
         self._notify_step(assertion_name, "running")
         effective_context = context or region
-        context = effective_context
         namespace = "featbit"
         service_name = "redis"
 
@@ -406,7 +409,7 @@ class BaseScenario(ABC):
             svc_result = self._run_kubectl(
                 [
                     "--context",
-                    context,
+                    effective_context,
                     "-n",
                     namespace,
                     "get",
@@ -419,29 +422,29 @@ class BaseScenario(ABC):
             if svc_result.returncode != 0:
                 self.assertions.add_fail(
                     assertion_name,
-                    f"Auto-discovery failed: could not read service '{service_name}' in context '{context}'. {svc_result.stderr.strip()}",
+                    f"Auto-discovery failed: could not read service '{service_name}' in context '{effective_context}'. {svc_result.stderr.strip()}",
                 )
                 self._notify_step(assertion_name, "failed", "service discovery failed")
-                return
+                return (False, [], [])
 
             svc = json.loads(svc_result.stdout)
             cluster_ip = svc.get("spec", {}).get("clusterIP")
             ports = svc.get("spec", {}).get("ports", [])
             redis_port = ports[0].get("port") if ports else 6379
 
-            pod_name = self._discover_redis_pod(context=context, namespace=namespace)
+            pod_name = self._discover_redis_pod(context=effective_context, namespace=namespace)
             if not pod_name:
                 self.assertions.add_fail(
                     assertion_name,
-                    f"Auto-discovery failed: no running redis pod found in context '{context}' namespace '{namespace}'.",
+                    f"Auto-discovery failed: no running redis pod found in context '{effective_context}' namespace '{namespace}'.",
                 )
                 self._notify_step(assertion_name, "failed", "no redis pod found")
-                return
+                return (False, [], [])
 
             ping_result = self._run_kubectl(
                 [
                     "--context",
-                    context,
+                    effective_context,
                     "-n",
                     namespace,
                     "exec",
@@ -461,52 +464,27 @@ class BaseScenario(ABC):
             if ping_result.returncode != 0 or "PONG" not in ping_result.stdout.upper():
                 self.assertions.add_fail(
                     assertion_name,
-                    f"Auto-check failed for context={context}, namespace={namespace}, pod={pod_name}, endpoint={cluster_ip}:{redis_port}. Output: {output}",
+                    f"Auto-check failed for context={effective_context}, namespace={namespace}, pod={pod_name}, endpoint={cluster_ip}:{redis_port}. Output: {output}",
                 )
                 self._notify_step(assertion_name, "failed", "redis ping failed")
-                return
+                return (False, [], [])
 
-            if not flag_id:
+            if not identifier:
                 self.assertions.add_fail(
                     assertion_name,
-                    f"Redis check requires flag_id for GUID lookup in context={context}.",
+                    f"Redis check requires {identifier_label} for key lookup in context={effective_context}.",
                 )
-                self._notify_step(assertion_name, "failed", "flag_id not resolved")
-                return
+                self._notify_step(assertion_name, "failed", f"{identifier_label} not resolved")
+                return (False, [], [])
 
             keys: list[str] = []
             sampled_values: list[str] = []
-            lookup_mode = "flag_id"
 
-            primary_key = f"featbit:flag:{flag_id}"
-            get_primary_result = self._run_kubectl(
-                [
-                    "--context",
-                    context,
-                    "-n",
-                    namespace,
-                    "exec",
-                    pod_name,
-                    "--",
-                    "redis-cli",
-                    "-h",
-                    service_name,
-                    "-p",
-                    str(redis_port),
-                    "GET",
-                    primary_key,
-                ],
-                timeout=30,
-            )
-            primary_value = (get_primary_result.stdout + get_primary_result.stderr).strip()
-            if get_primary_result.returncode == 0 and primary_value and "(nil)" not in primary_value.lower():
-                keys = [primary_key]
-                sampled_values.append(primary_value)
-            else:
-                scan_result = self._run_kubectl(
+            def _redis_cli(*args):
+                return self._run_kubectl(
                     [
                         "--context",
-                        context,
+                        effective_context,
                         "-n",
                         namespace,
                         "exec",
@@ -517,127 +495,217 @@ class BaseScenario(ABC):
                         service_name,
                         "-p",
                         str(redis_port),
-                        "--scan",
-                        "--pattern",
-                        f"{primary_key}*",
+                        *args,
                     ],
                     timeout=30,
                 )
+
+            get_primary_result = _redis_cli("GET", redis_key)
+            primary_value = (get_primary_result.stdout + get_primary_result.stderr).strip()
+            if get_primary_result.returncode == 0 and primary_value and "(nil)" not in primary_value.lower():
+                keys = [redis_key]
+                sampled_values.append(primary_value)
+            else:
+                scan_result = _redis_cli("--scan", "--pattern", f"{redis_key}*")
                 if scan_result.returncode == 0:
                     keys = [line.strip() for line in scan_result.stdout.splitlines() if line.strip()]
                 else:
                     self.assertions.add_fail(
                         assertion_name,
-                        f"Redis key scan failed for flag_id={flag_id} (key=featbit:flag:{flag_id}) in context={context}. Output: {(scan_result.stdout + scan_result.stderr).strip()}",
+                        f"Redis key scan failed for {identifier_label}={identifier} (key={redis_key}) in context={effective_context}. Output: {(scan_result.stdout + scan_result.stderr).strip()}",
                     )
                     self._notify_step(assertion_name, "failed", "key scan failed")
-                    return
-                diag_scan = self._run_kubectl(
-                    [
-                        "--context",
-                        context,
-                        "-n",
-                        namespace,
-                        "exec",
-                        pod_name,
-                        "--",
-                        "redis-cli",
-                        "-h",
-                        service_name,
-                        "-p",
-                        str(redis_port),
-                        "--scan",
-                        "--pattern",
-                        f"*{flag_id}*",
-                    ],
-                    timeout=30,
-                )
-                diag_keys = [line.strip() for line in diag_scan.stdout.splitlines() if line.strip()]
-                diag_hint = (
-                    f" Wildcard scan found keys: {diag_keys}" if diag_keys
-                    else " Wildcard scan also found no keys containing the flag_id."
-                )
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Redis is reachable but no keys found for flag_id={flag_id} "
-                    f"(tried key=featbit:flag:{flag_id}) in context={context}.{diag_hint}",
-                )
-                self._notify_step(assertion_name, "failed", "no keys found")
-                return
+                    return (False, [], [])
+
+                if not keys:
+                    diag_hint = ""
+                    if diagnostics:
+                        diag_scan = _redis_cli("--scan", "--pattern", f"*{identifier}*")
+                        diag_keys = [line.strip() for line in diag_scan.stdout.splitlines() if line.strip()]
+                        diag_hint = (
+                            f" Wildcard scan found keys: {diag_keys}" if diag_keys
+                            else f" Wildcard scan also found no keys containing the {identifier_label}."
+                        )
+                    self.assertions.add_fail(
+                        assertion_name,
+                        f"Redis is reachable but no keys found for {identifier_label}={identifier} "
+                        f"(tried key={redis_key}) in context={effective_context}.{diag_hint}",
+                    )
+                    self._notify_step(assertion_name, "failed", "no keys found")
+                    return (False, [], [])
 
             for key in keys[:5]:
-                get_result = self._run_kubectl(
-                    [
-                        "--context",
-                        context,
-                        "-n",
-                        namespace,
-                        "exec",
-                        pod_name,
-                        "--",
-                        "redis-cli",
-                        "-h",
-                        service_name,
-                        "-p",
-                        str(redis_port),
-                        "GET",
-                        key,
-                    ],
-                    timeout=30,
-                )
+                get_result = _redis_cli("GET", key)
                 text = (get_result.stdout + get_result.stderr).strip()
                 sampled_values.append(text)
 
-            expected_state_ok = True
-            if expected_status is not None:
-                expected_token = f'"isenabled":{str(expected_status).lower()}'
-                expected_state_ok = any(expected_token in value.lower() for value in sampled_values)
+            event_data = {
+                "check": assertion_name,
+                "output": output,
+                identifier_label: identifier,
+                "matched_key_count": len(keys),
+                "sampled_keys": keys[:5],
+            }
+            if timeline_extra:
+                event_data.update(timeline_extra)
+            self.add_timeline_event(timeline_event, **event_data)
 
-            self.add_timeline_event(
-                "redis-auto-check",
-                check=assertion_name,
-                output=output,
-                source={
-                    "context": context,
-                    "namespace": namespace,
-                    "service": service_name,
-                    "clusterIp": cluster_ip,
-                    "port": redis_port,
-                    "pod": pod_name,
-                    "lookupMode": lookup_mode,
-                    "flagId": flag_id,
-                    "flagKey": flag_key,
-                    "matchedKeyCount": len(keys),
-                    "sampledKeys": keys[:5],
-                    "expectedStatus": expected_status,
-                    "expectedStatusMatched": expected_state_ok,
-                },
-            )
+            return (True, keys, sampled_values)
 
-            if expected_state_ok:
-                self.assertions.add_pass(
-                    assertion_name,
-                    f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context}.",
-                )
-                self._notify_step(assertion_name, "ok")
-                return
-
-            self.assertions.add_fail(
-                assertion_name,
-                f"Redis contains keys for flag_key={flag_key} in context={context}, but sampled values did not include expected isEnabled={expected_status}.",
-            )
-            self._notify_step(assertion_name, "failed", "isEnabled mismatch")
         except subprocess.TimeoutExpired:
             self.assertions.add_fail(
                 assertion_name,
-                f"Auto-check timed out while querying Redis in context '{context}'.",
+                f"Auto-check timed out while querying Redis in context '{effective_context}'.",
             )
             self._notify_step(assertion_name, "failed", "timed out")
+            return (False, [], [])
         except Exception as e:
             self.assertions.add_fail(assertion_name, f"Auto-check error: {e}")
             self._notify_step(assertion_name, "failed", str(e)[:40])
+            return (False, [], [])
 
-    _KAFKA_POD = "kafka"
+    def run_redis_check(
+        self,
+        region: str,
+        command: Optional[str],
+        flag_id: Optional[str] = None,
+        flag_key: Optional[str] = None,
+        expected_status: Optional[bool] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        """Run Redis check for flag via provided command or automatic Kubernetes discovery."""
+        assertion_name = f"redis-{region}-check"
+
+        found, keys, sampled_values = self._run_redis_key_lookup(
+            assertion_name=assertion_name,
+            command=command,
+            redis_key=f"featbit:flag:{flag_id}" if flag_id else "",
+            identifier=flag_id or "",
+            identifier_label="flag_id",
+            region=region,
+            context=context,
+            diagnostics=True,
+            timeline_event="redis-auto-check",
+            timeline_extra={
+                "flag_key": flag_key,
+                "expected_status": expected_status,
+            },
+        )
+        if not found or command:
+            return
+
+        expected_state_ok = True
+        if expected_status is not None:
+            expected_token = f'"isenabled":{str(expected_status).lower()}'
+            expected_state_ok = any(expected_token in value.lower() for value in sampled_values)
+
+        if expected_state_ok:
+            self.assertions.add_pass(
+                assertion_name,
+                f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context or region}.",
+            )
+            self._notify_step(assertion_name, "ok")
+            return
+
+        self.assertions.add_fail(
+            assertion_name,
+            f"Redis contains keys for flag_key={flag_key} in context={context or region}, but sampled values did not include expected isEnabled={expected_status}.",
+        )
+        self._notify_step(assertion_name, "failed", "isEnabled mismatch")
+
+    def run_segment_redis_check(
+        self,
+        region: str,
+        command: Optional[str],
+        segment_id: Optional[str] = None,
+        segment_key: Optional[str] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        """Run Redis check for segment via provided command or automatic Kubernetes discovery."""
+        assertion_name = f"redis-{region}-segment-check"
+
+        found, keys, _ = self._run_redis_key_lookup(
+            assertion_name=assertion_name,
+            command=command,
+            redis_key=f"featbit:segment:{segment_id}" if segment_id else "",
+            identifier=segment_id or "",
+            identifier_label="segment_id",
+            region=region,
+            context=context,
+            diagnostics=True,
+            timeline_event="redis-segment-check",
+            timeline_extra={"segment_key": segment_key},
+        )
+        if not found or command:
+            return
+
+        self.assertions.add_pass(
+            assertion_name,
+            f"Redis contains {len(keys)} key(s) for segment_id={segment_id} in context={context or region}.",
+        )
+        self._notify_step(assertion_name, "ok")
+
+    def run_secret_redis_check(
+        self,
+        region: str,
+        command: Optional[str],
+        secret_string: Optional[str] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        """Run Redis check for secret via provided command or automatic Kubernetes discovery."""
+        assertion_name = f"redis-{region}-secret-check"
+
+        found, keys, _ = self._run_redis_key_lookup(
+            assertion_name=assertion_name,
+            command=command,
+            redis_key=f"featbit:secret:{secret_string}" if secret_string else "",
+            identifier=secret_string or "",
+            identifier_label="secret_string",
+            region=region,
+            context=context,
+            diagnostics=False,
+            timeline_event="redis-secret-check",
+        )
+        if not found or command:
+            return
+
+        self.assertions.add_pass(
+            assertion_name,
+            f"Redis contains {len(keys)} key(s) for secret in context={context or region}.",
+        )
+        self._notify_step(assertion_name, "ok")
+
+    def run_license_redis_check(
+        self,
+        region: str,
+        command: Optional[str],
+        workspace_id: Optional[str] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        """Run Redis check for license via provided command or automatic Kubernetes discovery."""
+        assertion_name = f"redis-{region}-license-check"
+
+        found, keys, _ = self._run_redis_key_lookup(
+            assertion_name=assertion_name,
+            command=command,
+            redis_key=f"featbit:license:{workspace_id}" if workspace_id else "",
+            identifier=workspace_id or "",
+            identifier_label="workspace_id",
+            region=region,
+            context=context,
+            diagnostics=False,
+            timeline_event="redis-license-check",
+        )
+
+        if not found or command:
+            return
+
+        self.assertions.add_pass(
+            assertion_name,
+            f"Redis contains license key for workspace in context={context or region}.",
+        )
+        self._notify_step(assertion_name, "ok")
+
     _KAFKA_BIN = "/opt/bitnami/kafka/bin"
     _KAFKA_BOOTSTRAP = "kafka:9092"
     _KAFKA_AGGREGATE_BOOTSTRAP = "kafka-aggregate:9092"

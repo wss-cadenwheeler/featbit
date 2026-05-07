@@ -106,19 +106,19 @@ Both clusters share a Docker bridge network (`featbit-cluster-network`) for cros
 
 ### Port Mappings (port-forward mode)
 
-| Service | West | East |
-|---------|------|------|
-| UI | http://localhost:8081 | http://localhost:8082 |
-| API | http://localhost:15000 | http://localhost:15001 |
-| Evaluation | http://localhost:5100 | http://localhost:5101 |
-| Kafka UI | http://localhost:18080 | http://localhost:18081 |
+| Service    | West                   | East                   |
+| ---------- | ---------------------- | ---------------------- |
+| UI         | http://localhost:8081  | http://localhost:8082  |
+| API        | http://localhost:15000 | http://localhost:15001 |
+| Evaluation | http://localhost:5100  | http://localhost:5101  |
+| Kafka UI   | http://localhost:18080 | http://localhost:18081 |
 
 ### DNS Names (nginx proxy mode)
 
-| Service | West | East |
-|---------|------|------|
-| UI | http://featbit.west.local | http://featbit.east.local |
-| API | http://featbit-api.west.local | http://featbit-api.east.local |
+| Service    | West                           | East                           |
+| ---------- | ------------------------------ | ------------------------------ |
+| UI         | http://featbit.west.local      | http://featbit.east.local      |
+| API        | http://featbit-api.west.local  | http://featbit-api.east.local  |
 | Evaluation | http://featbit-eval.west.local | http://featbit-eval.east.local |
 
 ---
@@ -151,17 +151,17 @@ nano deployment.env   # or: $EDITOR deployment.env
 
 Key settings (all optional — see comments in the file for defaults):
 
-| Variable | Purpose |
-|---|---|
-| `CUSTOM_IMAGE_REGISTRY` | Registry prefix for infrastructure images rewritten from the image map (e.g. `nexus.tekgeek.io/repository/docker-proxy`). Leave blank to pull from Docker Hub directly. |
-| `INFRA_IMAGE_REPOSITORY` | Full registry path used to compute `MongoImage` and `PostgresImage` for `kubectl set image` calls. Defaults to `CUSTOM_IMAGE_REGISTRY/dockerhub/library` — override this whenever your proxy path does not end in `/dockerhub/library` (e.g. a Nexus proxy at `/repository/docker-proxy`). |
-| `FEATBIT_IMAGE_REGISTRY` | Registry hosting the FeatBit application images. Defaults to `host.minikube.internal:5000`. Set this only if your FeatBit images live on a different registry than your infra images. |
-| `CUSTOM_REGISTRY_USERNAME` / `CUSTOM_REGISTRY_PASSWORD` | Credentials for `CUSTOM_IMAGE_REGISTRY`. When set, the script automatically creates image pull secrets in both clusters. |
-| `MINIKUBE_BASE_IMAGE` | Full custom kicbase image reference, including registry/path/tag (e.g. `harbor.example.com/ci/minikube:v0.0.50-corpca`) |
-| `TRUST_CERTIFICATES` | Corporate CA certs to install at runtime (if not using a custom base image) |
-| `DEPLOYMENT_MODE` | `Basic` (default) or `Advanced` |
-| `DATABASE_PROVIDER` | `MongoDb` (default) or `Postgres` |
-| `WEST_CPUS` / `WEST_MEMORY` | Cluster resource overrides |
+| Variable                                                | Purpose                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CUSTOM_IMAGE_REGISTRY`                                 | Registry prefix for infrastructure images rewritten from the image map (e.g. `nexus.tekgeek.io/repository/docker-proxy`). Leave blank to pull from Docker Hub directly.                                                                                                                    |
+| `INFRA_IMAGE_REPOSITORY`                                | Full registry path used to compute `MongoImage` and `PostgresImage` for `kubectl set image` calls. Defaults to `CUSTOM_IMAGE_REGISTRY/dockerhub/library` — override this whenever your proxy path does not end in `/dockerhub/library` (e.g. a Nexus proxy at `/repository/docker-proxy`). |
+| `FEATBIT_IMAGE_REGISTRY`                                | Registry hosting the FeatBit application images. Defaults to `host.minikube.internal:5000`. Set this only if your FeatBit images live on a different registry than your infra images.                                                                                                      |
+| `CUSTOM_REGISTRY_USERNAME` / `CUSTOM_REGISTRY_PASSWORD` | Credentials for `CUSTOM_IMAGE_REGISTRY`. When set, the script automatically creates image pull secrets in both clusters.                                                                                                                                                                   |
+| `MINIKUBE_BASE_IMAGE`                                   | Full custom kicbase image reference, including registry/path/tag (e.g. `harbor.example.com/ci/minikube:v0.0.50-corpca`)                                                                                                                                                                    |
+| `TRUST_CERTIFICATES`                                    | Corporate CA certs to install at runtime (if not using a custom base image)                                                                                                                                                                                                                |
+| `DEPLOYMENT_MODE`                                       | `Basic` (default) or `Advanced`                                                                                                                                                                                                                                                            |
+| `DATABASE_PROVIDER`                                     | `MongoDb` (default) or `Postgres`                                                                                                                                                                                                                                                          |
+| `WEST_CPUS` / `WEST_MEMORY`                             | Cluster resource overrides                                                                                                                                                                                                                                                                 |
 
 ### Step 1: Build and Push FeatBit Images
 
@@ -193,6 +193,7 @@ To preview what would happen without making any changes:
 ```
 
 This script will:
+
 - ✓ Start the local Docker registry on localhost:5000 (creates it automatically if needed)
 - ✓ Verify FeatBit images are available
 - ✓ Create west and east Minikube clusters
@@ -235,10 +236,12 @@ Run **after** port forwards are active:
 ### Step 5: Access FeatBit
 
 Open your browser to:
+
 - West Cluster: http://localhost:8081
 - East Cluster: http://localhost:8082
 
 **Default credentials:**
+
 - Username: `test@featbit.com`
 - Password: `123456`
 
@@ -260,9 +263,11 @@ sudo pwsh ./Setup-FeatBitProxy.ps1
 After this, FeatBit is accessible at http://featbit.west.local and http://featbit.east.local.
 
 > **Linux note:** `Setup-FeatBitProxy.ps1` attempts to start port forwards automatically, but the background process it spawns may not survive in all terminal environments. If the proxy returns 502 Bad Gateway, restart port forwards manually:
+>
 > ```powershell
 > pwsh ./Start-PortForwards.ps1
 > ```
+>
 > Nginx proxies to the kubectl port-forward ports (8081, 8082, etc.), so both nginx **and** port forwards must be running simultaneously.
 
 ---
@@ -274,6 +279,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 **Purpose:** Builds FeatBit application images from source and pushes them to the local registry. Starts the local registry automatically if needed.
 
 **Parameters:**
+
 - `-Images` — Image(s) to build. Valid values: `api-server`, `ui`, `evaluation-server`, `control-plane`, `data-analytics-server`. Defaults to all five.
 - `-Registry` — Registry to push to (default: `localhost:5000`)
 - `-Tag` — Image tag (default: `latest`)
@@ -282,6 +288,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-WhatIf` — Dry-run mode
 
 **Examples:**
+
 ```powershell
 # Build and push all images
 .\Build-FeatBitImages.ps1
@@ -301,6 +308,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 **Purpose:** Creates Minikube clusters and deploys FeatBit Pro. The primary entry point for standing up the environment.
 
 **Parameters:**
+
 - `-SkipClusterCreation` — Only deploy FeatBit (clusters must already exist)
 - `-RecreateClusters` — Delete and recreate clusters before deploying
 - `-SkipImageCheck` — Skip verification of FeatBit images in the local registry
@@ -315,6 +323,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
 **Examples:**
+
 ```powershell
 # Standard deployment (uses deployment.env defaults)
 .\Deploy-FeatBitClusters.ps1
@@ -412,7 +421,7 @@ Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
 
 **Purpose:** Validates WebSocket connectivity to the evaluation servers on both west and east clusters (via port forwards).
 
-```powershell
+````powershell
 # Test with default server key
 .\Test-EvalWebSocket.ps1
 
@@ -438,7 +447,7 @@ Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
 
 # Use existing nginx installation
 .\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
-```
+````
 
 ## Image Management
 
@@ -477,26 +486,30 @@ docker push localhost:5000/featbit/featbit-data-analytics-server:latest
 ### can't connect to cluster with kubectl
 
 If you get an error similar to the following
+
 ```
 E0305 13:08:56.969153   36228 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:32771/api?timeout=32s\": read tcp 127.0.0.1:55946->127.0.0.1:32771: wsarecv: An existing connection was forcibly closed by the remote host."
 ```
 
 or
+
 ```
 E0305 13:17:37.244838   35172 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"https://127.0.0.1:32771/api?timeout=32s\": net/http: TLS handshake timeout"
 ```
 
-Check the port numbers that have been assigned to your "cluster" pods using `docker ps` against the ports set in your %userprofile$/.kube/config file for the east and west cluster.  If needed set the correct port in your .kube/config file.
+Check the port numbers that have been assigned to your "cluster" pods using `docker ps` against the ports set in your %userprofile$/.kube/config file for the east and west cluster. If needed set the correct port in your .kube/config file.
 
 ### Pods Not Starting
 
 Check pod status:
+
 ```powershell
 kubectl --context west get pods -n featbit
 kubectl --context east get pods -n featbit
 ```
 
 View pod logs:
+
 ```powershell
 kubectl --context west logs <pod-name> -n featbit
 kubectl --context east logs <pod-name> -n featbit
@@ -505,11 +518,13 @@ kubectl --context east logs <pod-name> -n featbit
 ### Image Pull Errors
 
 Verify images in local registry:
+
 ```powershell
 Invoke-RestMethod http://localhost:5000/v2/_catalog
 ```
 
 Test registry accessibility from Minikube:
+
 ```powershell
 minikube -p west ssh -- "curl -I http://host.minikube.internal:5000/v2/"
 minikube -p east ssh -- "curl -I http://host.minikube.internal:5000/v2/"
@@ -518,11 +533,13 @@ minikube -p east ssh -- "curl -I http://host.minikube.internal:5000/v2/"
 ### Port Forward Issues
 
 List active port forwards:
+
 ```powershell
 Get-Process | Where-Object {$_.ProcessName -eq "kubectl"}
 ```
 
 Stop all port forwards:
+
 ```powershell
 Get-Process kubectl | Stop-Process
 ```
@@ -536,22 +553,26 @@ Restart port forwarding:
 ### Nginx Issues
 
 Check nginx status:
+
 ```powershell
 Get-Process nginx -ErrorAction SilentlyContinue
 ```
 
 Test nginx configuration:
+
 ```powershell
 cd C:\nginx
 .\nginx.exe -t
 ```
 
 View nginx logs:
+
 ```powershell
 Get-Content C:\nginx\logs\error.log -Tail 50
 ```
 
 Restart nginx:
+
 ```powershell
 Stop-Process -Name nginx
 cd C:\nginx
@@ -561,16 +582,19 @@ cd C:\nginx
 ### CORS Errors
 
 Ensure nginx is running and configured correctly:
+
 ```powershell
 Get-Process nginx
 ```
 
 Verify hosts file entries:
+
 ```powershell
 Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String "featbit"
 ```
 
 Check UI environment variables:
+
 ```powershell
 kubectl --context west get deployment ui -n featbit -o yaml | Select-String "API_URL" -Context 2
 ```
@@ -578,11 +602,13 @@ kubectl --context west get deployment ui -n featbit -o yaml | Select-String "API
 ### DNS Resolution Issues
 
 Verify hosts file entries:
+
 ```powershell
 Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String "127.0.0.1"
 ```
 
 Test DNS resolution:
+
 ```powershell
 ping featbit.west.local
 ping featbit.east.local
@@ -695,6 +721,7 @@ Then manually remove the FeatBit entries from `C:\Windows\System32\drivers\etc\h
 ### Infrastructure Components
 
 Each cluster runs:
+
 - **MongoDB** - Primary data store
 - **Redis** - Caching and session management
 - **ClickHouse** - Analytics data warehouse
@@ -704,6 +731,7 @@ Each cluster runs:
 ### FeatBit Components
 
 Each cluster runs:
+
 - **UI** - Angular-based web interface (port 8081/8082)
 - **API Server** - REST API backend (port 5000/5001)
 - **Evaluation Server** - Feature flag evaluation engine (port 5100/5101)
@@ -729,6 +757,7 @@ See repository LICENSE file.
 ## Support
 
 For issues with:
+
 - **FeatBit functionality**: https://github.com/featbit/featbit
 - **Deployment scripts**: Create issue in this repository
 - **Minikube**: https://github.com/kubernetes/minikube

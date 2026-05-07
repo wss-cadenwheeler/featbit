@@ -12,6 +12,7 @@ Validates that a license change message is sent through the control plane to upd
 - [ ] East and West Clusters Running in Advanced mode with port forwards and host entries
 - [ ] `playground` Organization Exists
 - [ ] `control-plane-test` Project Exists
+- [ ] A valid Featbit license
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
