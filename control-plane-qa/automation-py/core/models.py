@@ -142,30 +142,30 @@ class ScenarioConfig:
     env_id: str
     west_api_base_url: str
     east_api_base_url: str
-    control_plane_base_url: Optional[str] = None
-    control_plane_api_key: Optional[str] = None
-    license_key: Optional[str] = None
     login_api_base_url: str
-    api_authorization_header: Optional[str]
     login_email: str
     login_password: str
     workspace_key: str
     organization_key: str
     skip_certificate_check: bool
-    flag_key: Optional[str]
     target_status: bool
     timeout_seconds: int
     poll_interval_ms: int
     disruption_hold_seconds: int
-    start_disruption_command: Optional[str]
-    stop_disruption_command: Optional[str]
-    source_topic_check_command: Optional[str]
-    downstream_topic_check_command: Optional[str]
-    retry_log_check_command: Optional[str]
-    redis_west_check_command: Optional[str]
-    redis_east_check_command: Optional[str]
-    app_log_check_command: Optional[str]
     artifacts_root: str
+    control_plane_base_url: Optional[str] = None
+    control_plane_api_key: Optional[str] = None
+    license_key: Optional[str] = None
+    api_authorization_header: Optional[str] = None
+    flag_key: Optional[str] = None
+    start_disruption_command: Optional[str] = None
+    stop_disruption_command: Optional[str] = None
+    source_topic_check_command: Optional[str] = None
+    downstream_topic_check_command: Optional[str] = None
+    retry_log_check_command: Optional[str] = None
+    redis_west_check_command: Optional[str] = None
+    redis_east_check_command: Optional[str] = None
+    app_log_check_command: Optional[str] = None
     api_version: str = "1"
     flag_ids_by_key: Optional[Dict[str, str]] = None
     segment_ids_by_key: Optional[Dict[str, str]] = None
