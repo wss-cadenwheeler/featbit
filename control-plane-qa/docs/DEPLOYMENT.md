@@ -169,19 +169,19 @@ Build all five FeatBit service images from source, start the local Docker regist
 running), and push the images to it:
 
 ```powershell
-.\Build-FeatBitImages.ps1
+.\extras\Build-FeatBitImages.ps1
 ```
 
 To build only specific images:
 
 ```powershell
-.\Build-FeatBitImages.ps1 -Images control-plane, evaluation-server
+.\extras\Build-FeatBitImages.ps1 -Images control-plane, evaluation-server
 ```
 
 To preview what would happen without making any changes:
 
 ```powershell
-.\Build-FeatBitImages.ps1 -WhatIf
+.\extras\Build-FeatBitImages.ps1 -WhatIf
 ```
 
 **Estimated time:** 5–15 minutes (first build; subsequent builds are faster due to Docker layer caching)
@@ -274,7 +274,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 
 ## Script Reference
 
-### Build-FeatBitImages.ps1
+### extras\Build-FeatBitImages.ps1
 
 **Purpose:** Builds FeatBit application images from source and pushes them to the local registry. Starts the local registry automatically if needed.
 
@@ -291,16 +291,16 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 
 ```powershell
 # Build and push all images
-.\Build-FeatBitImages.ps1
+.\extras\Build-FeatBitImages.ps1
 
 # Build specific images only
-.\Build-FeatBitImages.ps1 -Images api-server, control-plane
+.\extras\Build-FeatBitImages.ps1 -Images api-server, control-plane
 
 # Build without pushing
-.\Build-FeatBitImages.ps1 -NoPush
+.\extras\Build-FeatBitImages.ps1 -NoPush
 
 # Push to a custom registry with a version tag
-.\Build-FeatBitImages.ps1 -Registry myregistry.example.com:5000 -Tag 1.2.3
+.\extras\Build-FeatBitImages.ps1 -Registry myregistry.example.com:5000 -Tag 1.2.3
 ```
 
 ### Deploy-FeatBitClusters.ps1
@@ -370,34 +370,34 @@ Keep the window open while using FeatBit. Port mappings are printed on startup.
 .\Initialize-MongoDBReplicaSet.ps1
 ```
 
-### Set-InfraImages.ps1
+### extras\Set-InfraImages.ps1
 
 **Purpose:** Rewrites infrastructure YAML image references for a custom container registry. Generates files under `kubernetes/.generated/` without modifying source-controlled files.
 
 ```powershell
 # Rewrite for custom registry
-.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com
+.\extras\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com
 
 # Preview changes without writing
-.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -WhatIf
+.\extras\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -WhatIf
 
 # Generate and apply to both clusters
-.\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -Apply west,east
+.\extras\Set-InfraImages.ps1 -CustomImageRegistry myregistry.example.com -Apply west,east
 
 # Reset to Docker Hub defaults
-.\Set-InfraImages.ps1 -Reset
+.\extras\Set-InfraImages.ps1 -Reset
 ```
 
-### Repair-KafkaConfig.ps1
+### extras\Repair-KafkaConfig.ps1
 
 **Purpose:** Restores the correct Kafka cross-cluster advertised listener and MirrorMaker configuration after a YAML re-apply resets the env vars to placeholder values.
 
 ```powershell
 # Restore defaults
-.\Repair-KafkaConfig.ps1
+.\extras\Repair-KafkaConfig.ps1
 
 # Preview commands without executing
-.\Repair-KafkaConfig.ps1 -WhatIf
+.\extras\Repair-KafkaConfig.ps1 -WhatIf
 ```
 
 ### Trust-MinikubeCertificates.ps1
@@ -417,18 +417,18 @@ Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
 .\Trust-MinikubeCertificates.ps1 -Clusters @("dev", "test")
 ```
 
-### Test-EvalWebSocket.ps1
+### extras\Test-EvalWebSocket.ps1
 
 **Purpose:** Validates WebSocket connectivity to the evaluation servers on both west and east clusters (via port forwards).
 
 ````powershell
 # Test with default server key
-.\Test-EvalWebSocket.ps1
+.\extras\Test-EvalWebSocket.ps1
 
 # Test with a specific environment server SDK key
-.\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
+.\extras\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
 
-### Configure-FeatBitIngress.ps1
+### extras\Configure-FeatBitIngress.ps1
 
 > **Deprecated.** This script is no longer part of the standard workflow. Use `Start-PortForwards.ps1` for service access. It is retained for reference only.
 
