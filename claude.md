@@ -112,12 +112,13 @@ GitHub Actions workflows in `.github/workflows/`:
 
 ## Control Plane QA
 
-The `control-plane-qa/` directory manages multi-cluster (west/east) Minikube deployments for testing cross-datacenter feature flag propagation.
+The `control-plane-qa/` directory manages multi-cluster (west/east) Minikube deployments for testing cross-datacenter feature flag propagation. It is organized into three numbered subdirectories:
 
-- **Automated scenarios** (`automation-py/scenarios/cp01–cp08.py`): Programmatic tests covering flag changes, segment changes, secret propagation, license changes, cache refresh, and resilience.
-- **Manual procedures** (`manual_scripts/`): Browser-based test checklists for human verification.
+- **`00-Docs/`**: Architecture reference, deployment guide, testing plans.
+- **`01-Infrastructure/`**: Deployment scripts, platform quickstarts (`ubuntu/`, `windows-wsl/`, `windows-hyperv/`), config files, and `extras/` for infrequently-used utilities.
+- **`02-Tests/`**: Automated scenarios (`automation-py/scenarios/cp01–cp08.py`), manual procedures (`manual_scripts/`), test applications (`test-app/`, `quick-test/`), and UAT orchestration (`Run-UATTests.ps1`).
 - **Artifacts are gitignored** — test output goes to `artifacts/` which is excluded from version control.
-- Configuration is in `deployment.env` (copied from `deployment.env.example`); never commit credentials.
+- Configuration is in `01-Infrastructure/deployment.env` (copied from `deployment.env.example`); never commit credentials.
 
 ## Key Architectural Notes
 
