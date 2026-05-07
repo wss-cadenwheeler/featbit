@@ -1215,6 +1215,20 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Success "UI endpoint environment variables configured"
 
+Write-Step "Configuring Control Plane"
+Write-Info "Setting control-plane API key..."
+kubectl --context west -n featbit set env "deployment/control-plane" "Api__ApiKey=api-key" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to set west control-plane API key"
+    exit 1
+}
+kubectl --context east -n featbit set env "deployment/control-plane" "Api__ApiKey=api-key" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to set east control-plane API key"
+    exit 1
+}
+Write-Success "Control-plane API key configured (api-key)"
+
 Write-Step "Configuring Database Connections"
 
 $databaseDeployments = @(

@@ -154,7 +154,6 @@ class ScenarioConfig:
     disruption_hold_seconds: int
     artifacts_root: str
     control_plane_base_url: Optional[str] = None
-    control_plane_api_key: Optional[str] = None
     license_key: Optional[str] = None
     api_authorization_header: Optional[str] = None
     flag_key: Optional[str] = None

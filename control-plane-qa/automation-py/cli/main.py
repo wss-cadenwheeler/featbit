@@ -380,11 +380,6 @@ def seed(
     help="Control-Plane admin endpoint URL (defaults to https://featbit-control-plane.{west|east}.local)",
 )
 @click.option(
-    "--control-plane-api-key",
-    default=lambda: get_env("CONTROL_PLANE_API_KEY", ""),
-    help="API key for control-plane admin endpoints (X-API-Key header)",
-)
-@click.option(
     "--license-key",
     default=lambda: get_env("LICENSE_KEY", ""),
     help="Valid FeatBit license key for CP-07 license change test",
@@ -434,7 +429,6 @@ def scenario(
     west_api_base_url: str,
     east_api_base_url: str,
     control_plane_base_url: str,
-    control_plane_api_key: str,
     license_key: str,
     login_api_base_url: str,
     api_authorization_header: str,
@@ -463,7 +457,6 @@ def scenario(
         west_api_base_url=west_api_base_url,
         east_api_base_url=east_api_base_url,
         control_plane_base_url=control_plane_base_url or None,
-        control_plane_api_key=control_plane_api_key or None,
         license_key=license_key or None,
         login_api_base_url=login_api_base_url or west_api_base_url,
         api_authorization_header=api_authorization_header or None,

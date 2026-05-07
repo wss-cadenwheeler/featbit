@@ -87,9 +87,9 @@ class CP08Scenario(BaseScenario):
             )
 
             control_plane_url = self.config.control_plane_base_url or (
-                "https://featbit-control-plane.west.local"
+                "http://featbit-control-plane.west.local"
                 if definition.source_region == "west"
-                else "https://featbit-control-plane.east.local"
+                else "http://featbit-control-plane.east.local"
             )
 
             # --- Phase 2: Trigger Full Sync ---
@@ -98,11 +98,9 @@ class CP08Scenario(BaseScenario):
 
             # The control-plane admin endpoint uses X-API-Key authentication,
             # not the standard bearer token used by the backend API.
-            # If no key is configured, send empty string (control-plane skips
-            # auth when its own ApiKey config is empty).
             admin_headers = {
                 "Content-Type": "application/json",
-                "X-API-Key": self.config.control_plane_api_key or "",
+                "X-Api-Key": "api-key",
             }
 
             sync_result = self._trigger_full_sync(
@@ -111,9 +109,11 @@ class CP08Scenario(BaseScenario):
             )
 
             if not sync_result.get("success"):
+                error_msg = sync_result.get("error", "Unknown error")
+                
                 self.assertions.add_fail(
                     "full-sync-trigger-failed",
-                    "Full sync endpoint did not respond successfully.",
+                    f"Failed to trigger full sync: {error_msg}",
                 )
                 return False
 
@@ -168,6 +168,8 @@ class CP08Scenario(BaseScenario):
         headers: dict,
     ) -> dict:
         """Trigger a full sync via admin endpoint."""
+        from core.api_client import ApiClientError
+
         client = ApiClient(
             base_url,
             self.config.skip_certificate_check,
@@ -177,11 +179,19 @@ class CP08Scenario(BaseScenario):
         endpoint = "/api/admin/push-eval-full-sync"
 
         try:
-            response = client.post(endpoint, body={}, headers=headers)
-            # Admin endpoint may return 200/204; both are success
-            return {"success": True, "status_code": response.status_code}
+            result = client.post(endpoint, body={}, headers=headers)
+            # Admin endpoint may return empty response (204 style) or JSON
+            return {"success": True, "response": result}
+        except ApiClientError as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+            }
 
     def _run_kafka_command_check(
         self,
