@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Orchestrates UAT testing for FeatBit control-plane features.
 
@@ -343,19 +343,13 @@ function Invoke-Deploy {
     if (-not $script:uatApiKey) {
         $script:uatApiKey = "uat-test-$(Get-Date -Format 'yyyyMMddHHmmss')"
         Write-Info "Setting control-plane API key for UAT admin endpoints..."
-        $currentApiKey = kubectl --context $ClusterContext -n $Namespace get deployment control-plane -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="Api__ApiKey")].value}' 2>$null
-        if (-not $currentApiKey) {
-            kubectl --context $ClusterContext -n $Namespace set env deployment/control-plane "Api__ApiKey=$($script:uatApiKey)" 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Info "Waiting for control-plane rollout..."
-                kubectl --context $ClusterContext -n $Namespace rollout status deployment/control-plane --timeout=120s 2>&1 | Out-Null
-                Write-Pass "Control-plane API key configured"
-            } else {
-                Write-Fail "Failed to set control-plane API key"
-            }
+        kubectl --context $ClusterContext -n $Namespace set env deployment/control-plane "Api__ApiKey=$($script:uatApiKey)" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Info "Waiting for control-plane rollout..."
+            kubectl --context $ClusterContext -n $Namespace rollout status deployment/control-plane --timeout=120s 2>&1 | Out-Null
+            Write-Pass "Control-plane API key configured"
         } else {
-            $script:uatApiKey = $currentApiKey
-            Write-Info "Control-plane already has API key configured"
+            Write-Fail "Failed to set control-plane API key"
         }
     }
 
@@ -376,6 +370,22 @@ function Invoke-RunTests {
     $script:portForwardProcesses = @()
     $testAppUrls = @()
     $basePort = 9100
+
+    # Kill any leftover kubectl port-forward processes on our ports
+    $portsToCheck = @(9200)
+    for ($i = 0; $i -lt $instances.Count; $i++) { $portsToCheck += (9100 + $i) }
+    $existingPFs = Get-CimInstance Win32_Process -Filter "Name='kubectl.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match "port-forward" }
+    foreach ($pf in $existingPFs) {
+        foreach ($port in $portsToCheck) {
+            if ($pf.CommandLine -match "\b$port\b") {
+                Write-Info "Killing leftover port-forward (PID $($pf.ProcessId)) on port $port"
+                Stop-Process -Id $pf.ProcessId -Force -ErrorAction SilentlyContinue
+                break
+            }
+        }
+    }
+    Start-Sleep -Seconds 1
 
     # Wait for pods to be ready before port-forwarding
     Write-Info "Waiting for UAT pods to be ready..."
@@ -456,6 +466,13 @@ function Invoke-RunTests {
     $prevOutputEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+    # k6 writes all output (progress, console.log) to stderr. With
+    # $ErrorActionPreference='Stop', the 2>&1 redirect turns stderr lines
+    # into ErrorRecords that immediately throw. Temporarily switch to
+    # Continue so we capture the full output and rely on $LASTEXITCODE.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
     try {
         $k6Output = k6 run $k6ScriptPath @k6Env --summary-export $k6SummaryPath 2>&1
         $k6ExitCode = $LASTEXITCODE
@@ -463,6 +480,7 @@ function Invoke-RunTests {
         $k6ExitCode = 1
         $k6Output = $_.Exception.Message
     } finally {
+        $ErrorActionPreference = $prevEAP
         [Console]::OutputEncoding = $prevOutputEncoding
     }
 

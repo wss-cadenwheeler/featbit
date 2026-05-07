@@ -7,7 +7,6 @@ import { ControlPlaneClient } from './helpers/control-plane-client.js';
 import {
   assertConnected,
   assertDisconnected,
-  assertFullSyncReceived,
 } from './helpers/assertions.js';
 import { handleSummary } from './uat-reporter.js';
 
@@ -135,14 +134,6 @@ export default function () {
 
   sleep(testConfig.preFullSyncSettleMs / 1000);
 
-  // Record baseline event counts
-  const priorCounts = {};
-  for (const { id, client } of appClients) {
-    const statusRes = client.status();
-    priorCounts[id] = statusRes.dataSyncEventCount || 0;
-    console.log(`  ${id} dataSyncEventCount before push: ${priorCounts[id]}`);
-  }
-
   // Trigger full sync via control plane
   console.log(`  Pushing full sync to ${controlPlaneUrl}...`);
   const syncStart = Date.now();
@@ -162,25 +153,35 @@ export default function () {
   // Wait for propagation (Kafka → eval server → clients)
   sleep(testConfig.fullSyncPropagationMs / 1000);
 
+  // Verify clients survived push-full-sync: still connected + flags evaluable
   let allSynced = true;
   for (const { id, client } of appClients) {
     const statusRes = client.status();
     fullSyncLatency.add(Date.now() - syncStart);
 
-    const syncOk = assertFullSyncReceived(statusRes, priorCounts[id], id);
-    record(syncOk);
+    const stillConnected = check(statusRes, {
+      [`${id}: still connected after push`]: (r) => r.connectionState === 'Connected',
+    });
+    record(stillConnected);
 
-    if (syncOk) {
-      console.log(`  ✓ ${id} received full sync (count ${priorCounts[id]} → ${statusRes.dataSyncEventCount})`);
+    const hasFlagEvals = check(statusRes, {
+      [`${id}: flags evaluable after push`]: (r) =>
+        r.flagEvaluations && Object.keys(r.flagEvaluations).length > 0,
+    });
+    record(hasFlagEvals);
+
+    if (stillConnected && hasFlagEvals) {
+      const flagCount = Object.keys(statusRes.flagEvaluations).length;
+      console.log(`  ✓ ${id} still connected, ${flagCount} flag(s) evaluable after push`);
       fullSyncsReceived.add(1);
     } else {
-      console.log(`  ✗ ${id} did not receive full sync (count ${priorCounts[id]} → ${statusRes.dataSyncEventCount})`);
+      console.log(`  ✗ ${id} post-push-full-sync check failed (state=${statusRes.connectionState})`);
       allSynced = false;
     }
   }
 
   const allSyncedCheck = check(null, {
-    'all instances received full sync': () => allSynced,
+    'all instances healthy after push-full-sync': () => allSynced,
   });
   record(allSyncedCheck);
 

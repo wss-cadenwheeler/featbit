@@ -1,4 +1,4 @@
-# deploy-test-apps.ps1
+﻿# deploy-test-apps.ps1
 #
 # Deploys UAT test app instances to a Kubernetes cluster.
 #

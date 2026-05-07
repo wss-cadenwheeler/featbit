@@ -1,4 +1,4 @@
-# cleanup-test-apps.ps1
+﻿# cleanup-test-apps.ps1
 #
 # Removes all UAT test app deployments and services from the cluster,
 # and scales the evaluation-server back to its default replica count.
