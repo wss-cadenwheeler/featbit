@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Application.Caches;
+using Application.Configuration;
 using Application.Segments;
 using Application.Services;
 using Domain.Messages;
@@ -11,7 +12,7 @@ namespace Api.Application.ControlPlane;
 public class SegmentChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IFeatureFlagAppService featureFlagAppService,
-    ISegmentMessageService segmentMessageService, ILogger<SegmentChangeMessageHandler> logger) : IMessageHandler
+    ISegmentMessageService segmentMessageService, ILogger<SegmentChangeMessageHandler> logger, IConfiguration configuration, IMessageProducer messageProducer) : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSegmentChange;
 
@@ -23,7 +24,8 @@ public class SegmentChangeMessageHandler(
             var root = document.RootElement;
             if (!root.TryGetProperty("segmentNonSpecific", out var segmentNonSpecific) ||
                 !root.TryGetProperty("envIds", out var envIds) ||
-                !root.TryGetProperty("notification", out var notification))
+                !root.TryGetProperty("notification", out var notification) ||
+                !root.TryGetProperty("region", out var region))
             {
                 throw new InvalidDataException("invalid segment change data");
             }
@@ -31,8 +33,10 @@ public class SegmentChangeMessageHandler(
             var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
             var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web);
             var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
+            var deserializedRegionNode = region.Deserialize<string>(ReusableJsonSerializerOptions.Web);
+            
             if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
-                deserializedNotificationNode is not null)
+                deserializedNotificationNode is not null && deserializedRegionNode is not null)
             {
                 await cacheService
                     .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
@@ -50,6 +54,11 @@ public class SegmentChangeMessageHandler(
 
                     // publish segment change message
                     await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, deserializedSegmentNonEnvironmentSpecificNode);
+                }
+                if (region.GetString() != null && region.GetString() == configuration.GetRegion())
+                {
+                    var webHooksMessage = new { message, type = ControlPlaneWebHookType.Segment };
+                    await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneWebHooks, webHooksMessage);
                 }
             }
         }
