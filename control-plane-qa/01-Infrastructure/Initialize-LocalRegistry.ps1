@@ -85,7 +85,7 @@ Set-StrictMode -Version Latest
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-$repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $modulesDir = Join-Path $repoRoot "modules"
 
 # ── Image definitions ─────────────────────────────────────────────────────────
