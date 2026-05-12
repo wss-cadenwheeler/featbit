@@ -7,6 +7,8 @@ namespace Api.Application.ControlPlane;
 
 public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<ClientConnectionMadeHandler> logger) : IMessageHandler
 {
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
     public string Topic => ControlPlaneTopics.ConnectionMade;
 
     public async Task HandleAsync(string message)
@@ -16,7 +18,7 @@ public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<Cli
         ConnectionMessage? connectionInfo;
         try
         {
-            connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message);
+            connectionInfo = JsonSerializer.Deserialize<ConnectionMessage>(message, JsonOptions);
         }
         catch (JsonException ex)
         {
