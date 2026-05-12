@@ -110,6 +110,7 @@ foreach ($tool in @("helm", "kubectl", "minikube")) {
 }
 if ($missingTools.Count -gt 0) {
     Write-Error "Missing required tools: $($missingTools -join ', ')"
+    Write-Error "Have you setup the control-plane?"
     exit 1
 }
 Write-Success "All required tools found (helm, kubectl, minikube)"
