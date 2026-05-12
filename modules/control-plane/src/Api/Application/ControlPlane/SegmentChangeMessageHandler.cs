@@ -57,7 +57,7 @@ public class SegmentChangeMessageHandler(
                 }
                 if (region.GetString() != null && region.GetString() == configuration.GetRegion())
                 {
-                    var webHooksMessage = new { message, type = ControlPlaneWebHookType.Segment };
+                    var webHooksMessage = new { notification = deserializedNotificationNode, envIds = deserializedEnvIdsNode, region = deserializedRegionNode, type = ControlPlaneWebHookType.Segment };
                     await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneWebHooks, webHooksMessage);
                 }
             }

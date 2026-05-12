@@ -29,9 +29,10 @@ public class FeatureFlagChangeMessageHandler([FromKeyedServices("compositeCache"
                 await cacheService.UpsertFlagAsync(deserializedFlagNotification.Flag);
                 await messageProducer.PublishAsync(Topics.FeatureFlagChange, deserializedFlagNotification.Flag);
             }
-            if (region.GetString() != null && region.GetString() == configuration.GetRegion())
+            var deserializedRegion = region.Deserialize<string>(ReusableJsonSerializerOptions.Web);
+            if (deserializedRegion != null && deserializedRegion == configuration.GetRegion())
             {
-                var webHooksMessage = new { message, type = ControlPlaneWebHookType.FeatureFlag };
+                var webHooksMessage = new { notification = deserializedFlagNotification, region = deserializedRegion, type = ControlPlaneWebHookType.FeatureFlag };
                 await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneWebHooks, webHooksMessage);
             }
         }
