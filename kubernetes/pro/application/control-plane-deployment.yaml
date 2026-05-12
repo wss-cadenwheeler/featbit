@@ -24,7 +24,7 @@ spec:
             - name: Kafka__Producer__bootstrap.servers
               value: kafka:9092
             - name: Kafka__Consumer__bootstrap.servers
-              value: kafka-aggregate:9092
+              value: kafka:9092
             - name: MongoDb__ConnectionString
               value: mongodb://admin:password@mongodb:27017
             - name: MongoDb__Database
@@ -32,10 +32,10 @@ spec:
             - name: Redis__Instances__0
               value: redis:6379
           image: featbit/featbit-control-plane:latest
-          # NOTE: The Kafka settings below are overridden at deploy time by Deploy-FeatBitClusters.ps1
-          # based on the deployment mode:
-          #   Advanced — Consumer points to kafka-aggregate:9092 (aggregate broker)
-          #   Basic    — Consumer points to kafka:9092 (no aggregate)
+          # NOTE: The control-plane consumes its trigger topic directly from the main broker
+          # (kafka:9092) and produces downstream messages back to the same broker. The aggregate
+          # broker (kafka-aggregate:9092) is used by eval-servers and other multi-DC consumers;
+          # the control-plane trigger topic is intra-cluster only and does not need the aggregate.
           name: control-plane
           ports:
             - containerPort: 5200
