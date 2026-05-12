@@ -17,10 +17,25 @@ public class ControlPlaneWebHooksMessageHandler(IWebhookHandler webhookHandler, 
     {
         using var document = JsonDocument.Parse(message);
         var root = document.RootElement;
-        if (!root.TryGetProperty("type", out var type) || !root.TryGetProperty("region", out var region))
+        if (!root.TryGetProperty("type", out var type) || !root.TryGetProperty("message", out var messageProperty))
         {
             throw new InvalidDataException("invalid web hook message");
         }
+        
+        // Parse the message property as a JSON string
+        var messageString = messageProperty.GetString();
+        if (string.IsNullOrEmpty(messageString))
+        {
+            throw new InvalidDataException("invalid web hook message");
+        }
+        
+        using var messageDocument = JsonDocument.Parse(messageString);
+        var messageRoot = messageDocument.RootElement;
+        if (!messageRoot.TryGetProperty("region", out var region))
+        {
+            throw new InvalidDataException("invalid web hook message");
+        }
+        
         var controlPlaneWebHookType = type.Deserialize<ControlPlaneWebHookType>(ReusableJsonSerializerOptions.Web);
         var deserializedRegionNode = region.Deserialize<string>(ReusableJsonSerializerOptions.Web);
         if (deserializedRegionNode != configuration.GetRegion())
@@ -31,10 +46,10 @@ public class ControlPlaneWebHooksMessageHandler(IWebhookHandler webhookHandler, 
         switch (controlPlaneWebHookType)
         {
             case ControlPlaneWebHookType.Segment:
-                await HandleSegments(root);
+                await HandleSegments(messageRoot);
                 break;
             case ControlPlaneWebHookType.FeatureFlag:
-                await HandleFlag(root);
+                await HandleFlag(messageRoot);
                 break;
             default:
                 throw new InvalidDataException("unsupported web hook type");
