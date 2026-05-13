@@ -4,6 +4,7 @@ using Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 using Application.Segments;
 using Application.Segments.MessagePublishing.SegmentChange;
 using Domain.Users;
+using Infrastructure;
 using Infrastructure.Caches;
 using Infrastructure.MQ;
 using Infrastructure.Persistence;
@@ -57,6 +58,14 @@ public static class ConfigureServices
         services.AddTransient<IFeatureFlagAppService, AppServices.FeatureFlagAppService>();
         services.AddTransient<ISegmentMessageService, SegmentMessageService>();
         services.AddChangePublishingServices(configuration);
+        if (configuration.GetHostingMode() == HostingMode.SaaS)
+        {
+            services.AddTransient<IBillingService, Services.BillingService>();
+        }
+        else
+        {
+            services.AddTransient<IBillingService, Services.NoopBillingService>();
+        }
 
         // InsightsWriter must be a singleton service
         services.AddSingleton(typeof(AppServices.InsightsWriter));
