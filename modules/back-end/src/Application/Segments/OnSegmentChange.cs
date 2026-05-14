@@ -54,7 +54,8 @@ public class OnSegmentChangeHandler(
     ICacheService cache,
     IAuditLogService auditLogService,
     IWebhookHandler webhookHandler,
-    ISegmentChangePublisher segmentChangePublisher)
+    ISegmentChangePublisher segmentChangePublisher,
+    IConfiguration configuration)
     : INotificationHandler<OnSegmentChange>
 {
     public async Task Handle(OnSegmentChange notification, CancellationToken cancellationToken)
@@ -67,22 +68,21 @@ public class OnSegmentChangeHandler(
 
         // update cache
         await cache.UpsertSegmentAsync(envIds, segment);
-        
+
         await segmentChangePublisher.PublishAsync(notification);
 
-        foreach (var envId in envIds)
+        if (!configuration.UseControlPlane())
         {
-            // handle webhook asynchronously
-            _ = webhookHandler.HandleAsync(
-                envId,
-                segment,
-                notification.DataChange,
-                notification.OperatorId
-            );
+            foreach (var envId in envIds)
+            {
+                // handle webhook asynchronously
+                _ = webhookHandler.HandleAsync(
+                    envId,
+                    segment,
+                    notification.DataChange,
+                    notification.OperatorId
+                );
+            }
         }
-
-        return;
-
-
     }
 }

@@ -3,7 +3,9 @@ using Api.Application.ControlPlane;
 using Application.Caches;
 using Application.Segments;
 using Application.Services;
+using Domain.Messages;
 using Domain.Segments;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Moq;
 
@@ -15,9 +17,11 @@ public class SegmentChangeMessageHandlerTests
     private readonly Mock<IFeatureFlagAppService> _ff = new();
     private readonly Mock<ISegmentMessageService> _segSvc = new();
     private readonly Mock<ILogger<SegmentChangeMessageHandler>> _logger = new();
+    private readonly Mock<IConfiguration> _config = new();
+    private readonly Mock<IMessageProducer> _producer = new();
 
     private SegmentChangeMessageHandler CreateSut()
-        => new(_cache.Object, _ff.Object, _segSvc.Object, _logger.Object);
+        => new(_cache.Object, _ff.Object, _segSvc.Object, _logger.Object, _config.Object, _producer.Object);
 
     [Fact]
     public async Task HandleAsync_WhenRequiredPropertiesMissing_Throws()
@@ -48,6 +52,10 @@ public class SegmentChangeMessageHandlerTests
             .Setup(x => x.PublishSegmentChangeMessage(It.IsAny<Guid>(), It.IsAny<ICollection<FlagReference>>(),
                 It.IsAny<Segment>()))
             .Returns(Task.CompletedTask);
+        
+        _config
+            .Setup(x => x.GetSection(It.IsAny<string>()).Value)
+            .Returns("us-east-1");
 
         var sut = CreateSut();
 
@@ -58,7 +66,8 @@ public class SegmentChangeMessageHandlerTests
                         {
                           "segmentNonSpecific": {},
                           "envIds": ["{{env1}}","{{env2}}"],
-                          "notification": {}
+                          "notification": {},
+                          "region": "us-east-1"
                         }
                         """;
 

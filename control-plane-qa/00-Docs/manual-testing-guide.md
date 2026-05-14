@@ -46,6 +46,8 @@ Look for these topics (some may not exist yet until first use):
 - `featbit-control-plane-segment-change` - API publishes segment changes here
 - `featbit-control-plane-secret-change` - API publishes secret changes here
 - `featbit-control-plane-license-change` - License updates
+- `featbit-control-plane-web-hooks` - Web hooks
+- `featbit-control-plane-command` - Control plane publishes admin commands here
 
 **Default Topics (eval servers consume from these):**
 - `featbit-feature-flag-change` - Control plane republishes here

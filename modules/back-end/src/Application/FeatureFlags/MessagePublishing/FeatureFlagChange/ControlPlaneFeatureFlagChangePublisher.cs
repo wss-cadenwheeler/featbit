@@ -1,12 +1,18 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Application.Configuration;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Utils;
+using Microsoft.Extensions.Configuration;
 
 namespace Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 
-public class ControlPlaneFeatureFlagChangePublisher(IMessageProducer messageProducer) : IFeatureFlagChangePublisher
+public class ControlPlaneFeatureFlagChangePublisher(IMessageProducer messageProducer, IConfiguration configuration) : IFeatureFlagChangePublisher
 {
-    public async Task PublishAsync(FeatureFlag flag)
+    public async Task PublishAsync(OnFeatureFlagChanged notification)
     {
-        await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneFeatureFlagChange, flag);
+        var flagMessage = new { notification, region = configuration.GetRegion() };
+        await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneFeatureFlagChange, flagMessage);
     }
 }
