@@ -1069,7 +1069,7 @@
         </context-group>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.ts</context>
-          <context context-type="linenumber">69</context>
+          <context context-type="linenumber">73</context>
         </context-group>
       </trans-unit>
       <trans-unit id="integrations.access-token.personal" datatype="html">
@@ -1924,10 +1924,6 @@
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/core/components/header/header.component.html</context>
           <context context-type="linenumber">138,139</context>
-        </context-group>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">171,172</context>
         </context-group>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/core/components/props-drawer/props-drawer.component.html</context>
@@ -4443,10 +4439,6 @@
           <context context-type="linenumber">20</context>
         </context-group>
         <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">155,156</context>
-        </context-group>
-        <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/login/do-login/do-login.component.html</context>
           <context context-type="linenumber">8,9</context>
         </context-group>
@@ -4502,81 +4494,32 @@
           <context context-type="linenumber">103,105</context>
         </context-group>
       </trans-unit>
-      <trans-unit id="common.feedback" datatype="html">
-        <source>Feedback</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">117,118</context>
-        </context-group>
-      </trans-unit>
       <trans-unit id="common.profile" datatype="html">
         <source>Profile</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">124,125</context>
+          <context context-type="linenumber">118,119</context>
+        </context-group>
+      </trans-unit>
+      <trans-unit id="common.support" datatype="html">
+        <source>Support</source>
+        <context-group purpose="location">
+          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
+          <context context-type="linenumber">125,126</context>
+        </context-group>
+      </trans-unit>
+      <trans-unit id="common.documentation" datatype="html">
+        <source>Documentation</source>
+        <context-group purpose="location">
+          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
+          <context context-type="linenumber">131,132</context>
         </context-group>
       </trans-unit>
       <trans-unit id="common.logout" datatype="html">
         <source>Logout</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">131,132</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.send-feedback" datatype="html">
-        <source>Send feedback</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">151,152</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.email-invalid" datatype="html">
-        <source>Invalid Email</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">156,157</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.message" datatype="html">
-        <source>Message</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">161,162</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.message-mandatory" datatype="html">
-        <source>Message is mandatory</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">162</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.message-placeholder" datatype="html">
-        <source>Have you any feedback for us?</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">163,165</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.send" datatype="html">
-        <source>Send</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.html</context>
-          <context context-type="linenumber">172,173</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.feedback-success-message" datatype="html">
-        <source>Thank you for sending us your feedback, we&apos;ll get back to you very soon!</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.ts</context>
-          <context context-type="linenumber">71</context>
-        </context-group>
-      </trans-unit>
-      <trans-unit id="common.feedback-failure-message" datatype="html">
-        <source>We were not able to send your feedback, Please try again!</source>
-        <context-group purpose="location">
-          <context context-type="sourcefile">src/app/core/components/menu/menu.component.ts</context>
-          <context context-type="linenumber">74</context>
+          <context context-type="linenumber">137,138</context>
         </context-group>
       </trans-unit>
       <trans-unit id="expt.metric.name-cannot-be-empty" datatype="html">
@@ -10420,56 +10363,56 @@
         </context-group>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">24,25</context>
+          <context context-type="linenumber">25,26</context>
         </context-group>
       </trans-unit>
       <trans-unit id="common.license-cannot-be-empty" datatype="html">
         <source>License cannot be empty</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">25</context>
+          <context context-type="linenumber">26</context>
         </context-group>
       </trans-unit>
       <trans-unit id="license.enter-your-license-here" datatype="html">
         <source>Enter your license here</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">28</context>
+          <context context-type="linenumber">29</context>
         </context-group>
       </trans-unit>
       <trans-unit id="common.updateLicense" datatype="html">
         <source>Update</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">35,36</context>
+          <context context-type="linenumber">36,37</context>
         </context-group>
       </trans-unit>
       <trans-unit id="license.no-license-available" datatype="html">
         <source>No License Available</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">46,47</context>
+          <context context-type="linenumber">48,49</context>
         </context-group>
       </trans-unit>
       <trans-unit id="license.contact-featbit-team-to-get-license" datatype="html">
         <source>Please contact FeatBit team to get a license or generate a trial license from</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.html</context>
-          <context context-type="linenumber">53,54</context>
+          <context context-type="linenumber">55,56</context>
         </context-group>
       </trans-unit>
       <trans-unit id="org.org.license-update-success" datatype="html">
         <source>License updated!</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.ts</context>
-          <context context-type="linenumber">55</context>
+          <context context-type="linenumber">59</context>
         </context-group>
       </trans-unit>
       <trans-unit id="org.org.invalid-license" datatype="html">
         <source>Invalid license, please contact FeatBit team to get a license!</source>
         <context-group purpose="location">
           <context context-type="sourcefile">src/app/features/safe/workspaces/license/license.component.ts</context>
-          <context context-type="linenumber">61</context>
+          <context context-type="linenumber">65</context>
         </context-group>
       </trans-unit>
       <trans-unit id="workspace.usage.unique-users" datatype="html">
