@@ -12,7 +12,10 @@ namespace Api.Application.ControlPlane;
 public class SegmentChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IFeatureFlagAppService featureFlagAppService,
-    ISegmentMessageService segmentMessageService, ILogger<SegmentChangeMessageHandler> logger, IConfiguration configuration, IMessageProducer messageProducer) : IMessageHandler
+    ISegmentMessageService segmentMessageService,
+    ILogger<SegmentChangeMessageHandler> logger,
+    IConfiguration configuration,
+    IMessageProducer messageProducer) : IMessageHandler
 {
     public string Topic => ControlPlaneTopics.ControlPlaneSegmentChange;
 
@@ -30,20 +33,24 @@ public class SegmentChangeMessageHandler(
                 throw new InvalidDataException("invalid segment change data");
             }
 
-            var deserializedSegmentNonEnvironmentSpecificNode = segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
+            var deserializedSegmentNonEnvironmentSpecificNode =
+                segmentNonSpecific.Deserialize<Segment>(ReusableJsonSerializerOptions.Web);
             var deserializedEnvIdsNode = envIds.Deserialize<ICollection<Guid>>(ReusableJsonSerializerOptions.Web);
-            var deserializedNotificationNode = notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
+            var deserializedNotificationNode =
+                notification.Deserialize<OnSegmentChange>(ReusableJsonSerializerOptions.Web);
             var deserializedRegionNode = region.Deserialize<string>(ReusableJsonSerializerOptions.Web);
-            
+
             if (deserializedSegmentNonEnvironmentSpecificNode is not null && deserializedEnvIdsNode is not null &&
-                deserializedNotificationNode is not null && deserializedRegionNode is not null)
+                deserializedNotificationNode is not null && deserializedRegionNode is not null &&
+                deserializedRegionNode == configuration.GetRegion())
             {
                 await cacheService
                     .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
 
                 foreach (var envId in deserializedEnvIdsNode)
                 {
-                    var affectedFlags = await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
+                    var affectedFlags =
+                        await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
 
                     // update affected flags
                     if (affectedFlags.Count > 0)
@@ -53,13 +60,16 @@ public class SegmentChangeMessageHandler(
                     }
 
                     // publish segment change message
-                    await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, deserializedSegmentNonEnvironmentSpecificNode);
+                    await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags,
+                        deserializedSegmentNonEnvironmentSpecificNode);
                 }
-                if (region.GetString() != null && region.GetString() == configuration.GetRegion())
+
+                var webHooksMessage = new
                 {
-                    var webHooksMessage = new { notification = deserializedNotificationNode, envIds = deserializedEnvIdsNode, region = deserializedRegionNode, type = ControlPlaneWebHookType.Segment };
-                    await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneWebHooks, webHooksMessage);
-                }
+                    notification = deserializedNotificationNode, envIds = deserializedEnvIdsNode,
+                    region = deserializedRegionNode, type = ControlPlaneWebHookType.Segment
+                };
+                await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneWebHooks, webHooksMessage);
             }
         }
         catch (Exception e)
@@ -67,6 +77,5 @@ public class SegmentChangeMessageHandler(
             logger.LogError(e, "Error processing segment change message");
             throw;
         }
-
     }
 }
