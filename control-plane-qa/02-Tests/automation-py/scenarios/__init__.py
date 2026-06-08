@@ -1,4 +1,4 @@
-"""Scenario implementations: CP-01 basic propagation, CP-02 correctness, CP-03 resilience, CP-04 segment change, CP-05 secret change, CP-06 environment added, CP-07 license change, CP-08 cache refresh."""
+"""Scenario implementations: CP-01 basic propagation, CP-02 correctness, CP-03 resilience, CP-04 segment change, CP-05 secret change, CP-06 environment added, CP-07 license change, CP-08 cache refresh, CP-09 pod heartbeats."""
 from .cp01 import CP01Scenario
 from .cp02 import CP02Scenario
 from .cp03 import CP03Scenario
@@ -7,6 +7,7 @@ from .cp05 import CP05Scenario
 from .cp06 import CP06Scenario
 from .cp07 import CP07Scenario
 from .cp08 import CP08Scenario
+from .cp09 import CP09Scenario
 
 __all__ = [
     "CP01Scenario",
@@ -17,5 +18,6 @@ __all__ = [
     "CP06Scenario",
     "CP07Scenario",
     "CP08Scenario",
+    "CP09Scenario",
 ]
 

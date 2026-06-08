@@ -117,7 +117,31 @@ def resolve_request_context(
 
         workspace_id = profile_data.get("workspaceId") or profile_data.get("WorkspaceId")
         if not workspace_id:
-            raise RuntimeError("Unable to resolve workspace ID from /user/profile.")
+            # Profile no longer always includes the workspace id; fall back
+            # to /user/workspaces (same pattern used by provision_uat.py).
+            workspaces_endpoint = f"/api/v{api_version}/user/workspaces"
+            workspaces_response = client.get(workspaces_endpoint, headers=headers)
+            workspaces_data = extract_data(workspaces_response) or []
+            workspaces = (
+                workspaces_data if isinstance(workspaces_data, list) else [workspaces_data]
+            )
+            if organization_key:
+                match = next(
+                    (
+                        ws
+                        for ws in workspaces
+                        if (ws.get("key") or ws.get("Key")) == organization_key
+                    ),
+                    None,
+                )
+                if match:
+                    workspace_id = match.get("id") or match.get("Id")
+            if not workspace_id and workspaces:
+                workspace_id = workspaces[0].get("id") or workspaces[0].get("Id")
+            if not workspace_id:
+                raise RuntimeError(
+                    "Unable to resolve workspace ID from /user/profile or /user/workspaces."
+                )
 
         # Add workspace to headers for org list call
         headers["Workspace"] = workspace_id
