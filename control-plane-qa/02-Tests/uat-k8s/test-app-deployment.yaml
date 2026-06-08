@@ -43,6 +43,12 @@ spec:
               value: "__FLAG_KEYS__"
             - name: TEST_APP_PORT
               value: "8080"
+            # Disable file-system-watcher-based config reload. Each .NET host
+            # registers an inotify watcher; under load (many pods on one node)
+            # this exhausts fs.inotify.max_user_instances on the minikube host
+            # and the container crashes at WebApplication.CreateBuilder.
+            - name: DOTNET_hostBuilder__reloadConfigOnChange
+              value: "false"
           readinessProbe:
             httpGet:
               path: /api/health

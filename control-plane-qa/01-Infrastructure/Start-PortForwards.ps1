@@ -212,13 +212,13 @@ foreach ($job in $jobs) {
         AddArgument($job.Name).
         AddArgument($job.Context).
         AddArgument($job.Namespace).
-        AddArgument($job.Service).
-        AddArgument($job.Pod).
+        AddArgument($(if ($job.ContainsKey('Service')) { $job['Service'] } else { $null })).
+        AddArgument($(if ($job.ContainsKey('Pod')) { $job['Pod'] } else { $null })).
         AddArgument($job.LocalPort).
         AddArgument($job.RemotePort).
         AddArgument($logFile).
         AddArgument($PSScriptRoot).
-        AddArgument($job.Address) | Out-Null
+        AddArgument($(if ($job.ContainsKey('Address')) { $job['Address'] } else { $null })) | Out-Null
     
     $handle = $powerShell.BeginInvoke()
     

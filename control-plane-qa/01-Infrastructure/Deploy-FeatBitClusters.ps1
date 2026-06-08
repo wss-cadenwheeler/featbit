@@ -128,11 +128,17 @@ if (-not $InfraImageRepository -and $CustomImageRegistry) {
     $InfraImageRepository = "$CustomImageRegistry/dockerhub/library"
 }
 
-if (-not $MongoImage) {
+# Only build infra image overrides when a repository is actually configured.
+# When neither $CustomImageRegistry nor $InfraImageRepository is set, leave
+# $MongoImage / $PostgresImage empty so that downstream `kubectl set image`
+# calls are skipped and the manifests' default Docker Hub images are used as-is.
+# Previously these defaulted to "/mongo:7.0" (leading slash), which kubelet
+# rejects as InvalidImageName.
+if (-not $MongoImage -and $InfraImageRepository) {
     $MongoImage = "$InfraImageRepository/mongo:7.0"
 }
 
-if (-not $PostgresImage) {
+if (-not $PostgresImage -and $InfraImageRepository) {
     $PostgresImage = "$InfraImageRepository/postgres:15.10"
 }
 
@@ -168,7 +174,7 @@ function Write-Error {
 function Get-InfraImageMap {
     param([string]$MapFile)
 
-    $repoRoot    = Split-Path -Parent $PSScriptRoot
+    $repoRoot    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $defaultPath = Join-Path $repoRoot "kubernetes\infra-image-map.json"
     $localPath   = Join-Path $repoRoot "kubernetes\infra-image-map.local.json"
     $resolved = if ($MapFile) { $MapFile } else { $defaultPath }
@@ -589,7 +595,7 @@ function Ensure-HostBridgeServices {
     }
 }
 
-$scriptPath = Split-Path -Parent $PSScriptRoot
+$scriptPath = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $kubernetesProPath = Join-Path $scriptPath "kubernetes\pro"
 
 # Ephemeral manifests directory — gitignored.  Every YAML file applied to a
@@ -1055,7 +1061,9 @@ $imagePullSecretPatch = @{
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB west StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
-    kubectl --context west set image statefulset/mongodb-west mongodb=$MongoImage -n featbit | Out-Null
+    if ($MongoImage) {
+        kubectl --context west set image statefulset/mongodb-west mongodb=$MongoImage -n featbit | Out-Null
+    }
     kubectl --context west patch statefulset mongodb-west -n featbit --type merge -p $imagePullSecretPatch | Out-Null
     Write-Success "MongoDB west StatefulSet deployed"
 
@@ -1066,7 +1074,9 @@ $imagePullSecretPatch = @{
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB east StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
-    kubectl --context east set image statefulset/mongodb-east mongodb=$MongoImage -n featbit | Out-Null
+    if ($MongoImage) {
+        kubectl --context east set image statefulset/mongodb-east mongodb=$MongoImage -n featbit | Out-Null
+    }
     kubectl --context east patch statefulset mongodb-east -n featbit --type merge -p $imagePullSecretPatch | Out-Null
     Write-Success "MongoDB east StatefulSet deployed"
 

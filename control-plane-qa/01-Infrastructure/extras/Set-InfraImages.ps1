@@ -88,7 +88,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $defaultMapPath = Join-Path $repoRoot "kubernetes\infra-image-map.json"
 $localMapPath   = Join-Path $repoRoot "kubernetes\infra-image-map.local.json"
 $mapPath = if ($MapFile) { $MapFile } else { $defaultMapPath }
