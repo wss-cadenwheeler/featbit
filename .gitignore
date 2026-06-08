@@ -60,3 +60,6 @@ benchmark/k6-scripts/test-results/
 
 # Quickstart wizard progress state files
 control-plane-qa/.quickstart-state-*.json
+
+# Automation test artifacts (scenario run outputs, timelines, assertion results)
+control-plane-qa/artifacts/
