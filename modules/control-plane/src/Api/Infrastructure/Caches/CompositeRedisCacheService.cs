@@ -35,12 +35,37 @@ public class CompositeRedisCacheService(
 
     public async Task<string> GetOrSetLicenseAsync(Guid workspaceId, Func<Task<string>> licenseGetter)
     {
-        // Read from the first instance; write-through to all
-        var first = cacheServices.First();
-        var license = await first.GetOrSetLicenseAsync(workspaceId, licenseGetter);
+        // Try each instance in order until one succeeds; write-through to all.
+        var license = string.Empty;
+        var succeeded = false;
+        foreach (var service in cacheServices)
+        {
+            try
+            {
+                license = await service.GetOrSetLicenseAsync(workspaceId, licenseGetter);
+                succeeded = true;
+                break;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Redis cache operation '{Operation}' failed for implementation {CacheService}. Trying next instance.",
+                    nameof(GetOrSetLicenseAsync),
+                    service.GetType().FullName);
+            }
+        }
 
-        // Ensure the rest have it too (best-effort)
-        var rest = cacheServices.Skip(1);
+        if (!succeeded)
+        {
+            throw new InvalidOperationException(
+                $"All Redis cache instances failed for {nameof(GetOrSetLicenseAsync)}.");
+        }
+
         await BroadcastAsync(
             s => s.GetOrSetLicenseAsync(workspaceId, () => Task.FromResult(license)),
             nameof(GetOrSetLicenseAsync));
@@ -75,7 +100,7 @@ public class CompositeRedisCacheService(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(
+            logger.LogError(
                 ex,
                 "Redis cache broadcast operation '{Operation}' failed for implementation {CacheService}. Continuing.",
                 operationName,
