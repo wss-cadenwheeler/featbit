@@ -55,7 +55,7 @@ public static class MqServiceCollectionExtensions
 
                 var topics = new[]
                 {
-                    Topics.EndUser, Topics.Insights, Topics.Usage
+                    Topics.EndUser, Topics.Insights, Topics.Usage, ControlPlaneTopics.ControlPlaneWebHooks
                 };
 
                 return new RedisMessageConsumer(redisClient, sp, logger, topics);
@@ -83,13 +83,11 @@ public static class MqServiceCollectionExtensions
 
                 var topics = new[]
                 {
-                    Topics.EndUser, Topics.Usage
+                    Topics.EndUser, Topics.Usage, ControlPlaneTopics.ControlPlaneWebHooks
                 };
 
                 return new KafkaMessageConsumer(cfg, provider, logger, topics);
             });
-
-            services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
         }
 
         void AddPostgres()
@@ -113,7 +111,7 @@ public static class MqServiceCollectionExtensions
             {
                 var topics = new[]
                 {
-                    Topics.EndUser, Topics.Insights, Topics.Usage
+                    Topics.EndUser, Topics.Insights, Topics.Usage, ControlPlaneTopics.ControlPlaneWebHooks
                 };
 
                 var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
@@ -131,6 +129,7 @@ public static class MqServiceCollectionExtensions
             services.AddKeyedTransient<IMessageHandler, EndUserMessageHandler>(Topics.EndUser);
             services.AddKeyedTransient<IMessageHandler, InsightMessageHandler>(Topics.Insights);
             services.AddKeyedTransient<IMessageHandler, UsageMessageHandler>(Topics.Usage);
+            services.AddKeyedTransient<IMessageHandler, ControlPlaneWebHooksMessageHandler>(ControlPlaneTopics.ControlPlaneWebHooks);
         }
     }
 }

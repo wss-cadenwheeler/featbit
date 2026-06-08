@@ -12,7 +12,7 @@ public class MongoDbService<TEntity> : IService<TEntity> where TEntity : Entity
 
     public IMongoCollection<TEntity> Collection { get; }
 
-    public IMongoQueryable<TEntity> Queryable { get; }
+    public IQueryable<TEntity> Queryable { get; }
 
     public MongoDbService(MongoDbClient mongoDb)
     {
@@ -40,6 +40,11 @@ public class MongoDbService<TEntity> : IService<TEntity> where TEntity : Entity
     public async Task<ICollection<TEntity>> FindManyAsync(Expression<Func<TEntity, bool>> predicate)
     {
         return await Queryable.Where(predicate).ToListAsync();
+    }
+
+    public Task<long> CountAsync(Expression<Func<TEntity, bool>> predicate)
+    {
+        return Queryable.LongCountAsync(predicate);
     }
 
     public async Task<bool> AnyAsync(Expression<Func<TEntity, bool>> predicate)

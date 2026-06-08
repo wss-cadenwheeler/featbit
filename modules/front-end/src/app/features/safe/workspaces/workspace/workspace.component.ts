@@ -6,12 +6,14 @@ import { WorkspaceService } from "@services/workspace.service";
 import { debounceTime, first, map, switchMap } from "rxjs/operators";
 import { generalResourceRNPattern, permissionActions } from "@shared/policy";
 import { PermissionsService } from "@services/permissions.service";
+import { getCurrentWorkspace } from "@utils/project-env";
+import { of } from "rxjs";
 
 @Component({
-    selector: 'workspace',
-    templateUrl: './workspace.component.html',
-    styleUrls: ['./workspace.component.less'],
-    standalone: false
+  selector: 'workspace',
+  templateUrl: './workspace.component.html',
+  styleUrls: ['./workspace.component.less'],
+  standalone: false
 })
 export class WorkspaceComponent implements OnInit {
 
@@ -39,9 +41,8 @@ export class WorkspaceComponent implements OnInit {
 
   async ngOnInit() {
     this.isLoading = true;
-    const workspace = await this.workspaceService.getWorkspace();
-    this.workspace = workspace;
-    this.license = new License(workspace.license);
+    this.workspace = getCurrentWorkspace();
+    this.license = new License(this.workspace.license);
     this.isSsoGranted = this.license.isGranted(LicenseFeatureEnum.Sso);
 
     this.canUpdateGeneralSettings = this.permissionsService.isGranted(generalResourceRNPattern.workspace, permissionActions.UpdateWorkspaceGeneralSettings);
@@ -51,21 +52,28 @@ export class WorkspaceComponent implements OnInit {
     this.isLoading = false;
   }
 
-  keyAsyncValidator = (control: FormControl) => control.valueChanges.pipe(
-    debounceTime(300),
-    switchMap(value => this.workspaceService.isKeyUsed(value as string)),
-    map(isKeyUsed => {
-      switch (isKeyUsed) {
-        case true:
-          return { error: true, duplicated: true };
-        case undefined:
-          return { error: true, unknown: true };
-        default:
-          return null;
-      }
-    }),
-    first()
-  );
+  keyAsyncValidator = (control: FormControl) => {
+    const value = control.value as string;
+    if (!this.workspace || value === this.workspace.key) {
+      return of(null);
+    }
+
+    return control.valueChanges.pipe(
+      debounceTime(300),
+      switchMap(value => this.workspaceService.isKeyUsed(value as string)),
+      map(isKeyUsed => {
+        switch (isKeyUsed) {
+          case true:
+            return { error: true, duplicated: true };
+          case undefined:
+            return { error: true, unknown: true };
+          default:
+            return null;
+        }
+      }),
+      first()
+    );
+  }
 
   initForm() {
     this.nameKeyForm = new FormGroup({
@@ -99,16 +107,15 @@ export class WorkspaceComponent implements OnInit {
     const { id } = this.workspace;
 
     this.isNameKeyLoading = true;
-    this.workspaceService.update(id, name, key)
-      .subscribe({
-        next: (workspace) => {
-          this.workspace = workspace;
-          this.isNameKeyLoading = false;
-          this.message.success($localize`:@@common.operation-success:Operation succeeded`);
-          this.workspaceService.setWorkspace(workspace);
-        },
-        error: () => this.isNameKeyLoading = false
-      });
+    this.workspaceService.update(id, name, key).subscribe({
+      next: (workspace) => {
+        this.workspace = workspace;
+        this.isNameKeyLoading = false;
+        this.message.success($localize`:@@common.operation-success:Operation succeeded`);
+        this.workspaceService.setWorkspace(workspace);
+      },
+      error: () => this.isNameKeyLoading = false
+    });
   }
 
   updateOidcSetting() {
@@ -126,15 +133,14 @@ export class WorkspaceComponent implements OnInit {
     };
 
     this.isSsoLoading = true;
-    this.workspaceService.updateOidcSetting(payload)
-      .subscribe({
-        next: (workspace) => {
-          this.workspace = workspace;
-          this.isSsoLoading = false;
-          this.message.success($localize`:@@common.operation-success:Operation succeeded`);
-          this.workspaceService.setWorkspace(workspace);
-        },
-        error: () => this.isSsoLoading = false
-      });
+    this.workspaceService.updateOidcSetting(payload).subscribe({
+      next: (workspace) => {
+        this.workspace = workspace;
+        this.isSsoLoading = false;
+        this.message.success($localize`:@@common.operation-success:Operation succeeded`);
+        this.workspaceService.setWorkspace(workspace);
+      },
+      error: () => this.isSsoLoading = false
+    });
   }
 }

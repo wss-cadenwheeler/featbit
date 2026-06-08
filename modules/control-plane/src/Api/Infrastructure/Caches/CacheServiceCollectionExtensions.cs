@@ -34,10 +34,16 @@ public static class CacheServiceCollectionExtensions
         {
             var redisInstances = configuration
                 .GetSection("Redis:Instances")
-                .Get<string[]>() ?? [];
-            
+                .Get<RedisInstanceConfig[]>() ?? [];
+
             var clients = redisInstances
-                .Select(connStr => new RedisClient(connStr))
+                .Select(instance =>
+                {
+                    var connStr = instance.ConnectionString;
+                    if (!string.IsNullOrEmpty(instance.Password))
+                        connStr += $",password={instance.Password}";
+                    return new RedisClient(connStr);
+                })
                 .ToList();
 
             services.AddSingleton<IRedisClient>(clients[0]);
@@ -45,7 +51,7 @@ public static class CacheServiceCollectionExtensions
             var cacheServices = clients
                 .Select(client => (ICacheService)new RedisCacheService(client))
                 .ToList();
-                
+
             services.AddTransient<ICacheService, RedisCacheService>();
 
             services.AddKeyedSingleton<ICacheService>(

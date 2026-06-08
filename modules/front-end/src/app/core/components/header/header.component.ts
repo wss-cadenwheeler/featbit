@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, HostListener, OnInit } from '@angular/core';
 import {
   IOrganization,
   IProject,
@@ -16,6 +16,10 @@ import { copyToClipboard } from '@utils/index';
 import { EnvService } from '@core/services/env.service';
 import { getCurrentLicense, getCurrentOrganization, getCurrentProjectEnv } from "@utils/project-env";
 import { BroadcastService } from "@services/broadcast.service";
+import { environment } from "src/environments/environment";
+import { HOSTING_MODE } from "@shared/constants";
+import { PlanKeys } from "@core/components/pricing-plans/types";
+import { Router } from "@angular/router";
 
 @Component({
     selector: 'app-header',
@@ -26,10 +30,18 @@ import { BroadcastService } from "@services/broadcast.service";
 export class HeaderComponent implements OnInit {
   protected readonly SecretTypeEnum = SecretTypeEnum;
 
+  isSmallScreen = window.innerWidth <= 1080;
+
+  @HostListener('window:resize')
+  onResize() {
+    this.isSmallScreen = window.innerWidth <= 1080;
+  }
+
   currentProjectEnv: IProjectEnv;
   currentOrganization: IOrganization;
 
   license: License;
+  isSaasFreePlan: boolean = false;
   isLicenseExpired: boolean = false;
   isLicenseExpiring: boolean = false;
   daysUntilExpiration: number = 0;
@@ -41,18 +53,17 @@ export class HeaderComponent implements OnInit {
 
   breadcrumbs$: Observable<Breadcrumb[]>;
 
-  flags = {};
-
   env: IEnvironment;
 
   constructor(
     private projectService: ProjectService,
     private message: NzMessageService,
-    private breadcrumbService: BreadcrumbService,
+    breadcrumbService: BreadcrumbService,
     private messageQueueService: MessageQueueService,
     private envService: EnvService,
-    private broadcastService: BroadcastService
-  ) {
+    private broadcastService: BroadcastService,
+    private router: Router
+) {
     this.breadcrumbs$ = breadcrumbService.breadcrumbs$;
   }
 
@@ -61,6 +72,7 @@ export class HeaderComponent implements OnInit {
     this.isLicenseExpired = this.license?.isExpired() ?? false;
     this.isLicenseExpiring = this.license?.isExpiringSoon() ?? false;
     this.daysUntilExpiration = this.license?.getDaysUntilExpiration() ?? 0;
+    this.isSaasFreePlan = environment.hostingMode === HOSTING_MODE.SAAS && this.license?.data?.plan === PlanKeys.FREE;
 
     this.setSelectedProjectEnv();
     await this.setAllProjects();
@@ -77,6 +89,39 @@ export class HeaderComponent implements OnInit {
     this.messageQueueService.subscribe(this.messageQueueService.topics.CURRENT_ENV_SECRETS_CHANGED, () => {
       this.setCurrentEnv();
     });
+  }
+
+  onClickLicenseBadge() {
+    if (this.isSaasFreePlan) {
+      this.router.navigate([ '/workspace/billing' ], {
+        queryParams: { open: 'pricing' }
+      });
+    } else {
+      this.router.navigate([ '/workspace/license' ]);
+    }
+  }
+
+  get licenseBadgeTooltip(): string {
+    if (this.isSaasFreePlan) {
+      return `${$localize`:@@common.free-plan:Free Plan`} – ${$localize`:@@common.upgrade-now:Upgrade Now`}`;
+    } else if (this.license.data) {
+      if (this.isLicenseExpired) {
+        return `${$localize`:@@common.license-expired:License Expired`} – ${this.license.data.plan}`;
+      } else if (this.isLicenseExpiring) {
+        return `${$localize`:@@common.license-expiring-soon:Expiring in ${this.daysUntilExpiration}:INTERPOLATION: days`} – ${this.license.data.plan}`;
+      } else {
+        return `${$localize`:@@common.current-plan:Current Plan`} – ${this.license.data.plan}`;
+      }
+    }
+    return `${$localize`:@@common.upgrade-now:Upgrade Now`} – ${$localize`:@@common.get-enterprise:Get Enterprise`}`;
+  }
+
+  get orgTooltip(): string {
+    return `${$localize`:@@common.organization:Organization`}: ${this.currentOrganization?.name}`;
+  }
+
+  get projectTooltip(): string {
+    return `${$localize`:@@common.project:Project`}: ${this.currentProjectEnv?.projectName}`;
   }
 
   isCurrentProject(project: IProject): boolean {
@@ -112,7 +157,8 @@ export class HeaderComponent implements OnInit {
       envId: this.selectedEnv.id,
       envKey: this.selectedEnv.key,
       envName: this.selectedEnv.name,
-      envSecrets: this.selectedEnv.secrets
+      envSecrets: this.selectedEnv.secrets,
+      envSettings: this.selectedEnv.settings
     };
 
     this.projectService.upsertCurrentProjectEnvLocally(projectEnv);

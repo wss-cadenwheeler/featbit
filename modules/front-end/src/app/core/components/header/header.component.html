@@ -9,19 +9,25 @@
 
   <div class="header-btns">
     <div
-      [routerLink]="['/workspace/license']"
+      (click)="onClickLicenseBadge()"
       class="license-badge"
+      [nz-tooltip]="isSmallScreen ? licenseBadgeTooltip : null"
+      nzTooltipPlacement="bottomRight"
       [ngClass]="{
+        'license-saas-free': isSaasFreePlan,
         'license-expiring': isLicenseExpiring,
         'license-expired': isLicenseExpired,
-        'license-active': license.data && !isLicenseExpired && !isLicenseExpiring
+        'license-active': license.data && !isLicenseExpired && !isLicenseExpiring && !isSaasFreePlan
       }"
     >
       <div class="badge-icon">
         <i nz-icon nzType="icons:icon-medal"></i>
       </div>
       <div class="badge-content">
-        @if (license.data) {
+        @if (isSaasFreePlan) {
+          <span class="badge-label" i18n="@@common.free-plan">Free Plan</span>
+          <span class="badge-plan" i18n="@@common.upgrade-now">Upgrade Now</span>
+        } @else if (license.data) {
           @if (isLicenseExpired) {
             <span class="badge-label badge-warning" i18n="@@common.license-expired">License Expired</span>
             <span class="badge-plan">{{ license.data?.plan }}</span>
@@ -45,7 +51,9 @@
     <div class="org-btns">
       <div class="workspace-selector">
         <div class="selector-items">
-          <div class="selector-item" [routerLink]="['/workspace/organization']">
+          <div class="selector-item" [routerLink]="['/organization']"
+               [nz-tooltip]="isSmallScreen ? orgTooltip : null"
+               nzTooltipPlacement="bottom">
             <div class="item-icon org-icon">
               <i nz-icon nzType="icons:icon-org"></i>
             </div>
@@ -55,7 +63,9 @@
             </div>
           </div>
           <div class="selector-divider"></div>
-          <div class="selector-item" [routerLink]="['/workspace/projects']">
+          <div class="selector-item" [routerLink]="['/organization/projects']"
+               [nz-tooltip]="isSmallScreen ? projectTooltip : null"
+               nzTooltipPlacement="bottom">
             <div class="item-icon proj-icon">
               <i nz-icon nzType="icons:icon-proj"></i>
             </div>

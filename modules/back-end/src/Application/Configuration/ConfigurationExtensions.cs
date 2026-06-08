@@ -8,4 +8,9 @@ public static class ConfigurationExtensions
     {
         return configuration.GetValue<bool>("UseControlPlane");
     }
+    
+    public static string GetRegion(this IConfiguration configuration)
+    {
+        return configuration.GetValue<string>("Region");
+    }
 }
