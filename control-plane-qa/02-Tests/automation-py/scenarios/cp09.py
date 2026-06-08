@@ -39,7 +39,7 @@ HEARTBEAT_HASH_KEY = "featbit:heartbeat:all"
 # Default pod heartbeat timeout used by evaluation-server is 90s.
 # We allow a small grace period for the back-end janitor pass.
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 91
-DEFAULT_FAILOVER_TIMEOUT_SECONDS = 180
+DEFAULT_FAILOVER_TIMEOUT_SECONDS = 240
 
 # Evaluation-server publishes a heartbeat every
 # ControlPlane:HeartbeatIntervalSeconds (default 60) — see
