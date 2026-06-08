@@ -2,29 +2,59 @@
 
 namespace Api.Application.ControlPlane;
 
-public class PodHealthChecker(ICacheService cacheService, ILogger<HeartbeatMessageHandler> logger, IConfiguration configuration) : BackgroundService
+public class PodHealthChecker(ICacheService cacheService, ILogger<PodHealthChecker> logger, IConfiguration configuration) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var checkIntervalSeconds = configuration.GetValue<int>("PodHealthCheckIntervalSeconds", 90);
-        var podTimeoutSeconds = configuration.GetValue<int>("PodHealthTimeoutSeconds", 90);
+        var checkIntervalSeconds = configuration.GetValue("PodHealth:CheckIntervalInSeconds", 90);
+        var podTimeoutSeconds = configuration.GetValue("PodHealth:TimeoutInSeconds", 90);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var deadPodTimeStamp = DateTime.UtcNow.AddSeconds(podTimeoutSeconds * -1);
-
-            var healthMessages = await cacheService.GetAllHealthMessages();
-
-            foreach (var healthMessage in healthMessages)
+            try
             {
-                if (healthMessage.Timestamp < deadPodTimeStamp)
+                var deadPodTimeStamp = DateTimeOffset.UtcNow.AddSeconds(-podTimeoutSeconds);
+
+                var healthMessages = await cacheService.GetAllHealthMessages();
+
+                foreach (var healthMessage in healthMessages)
                 {
-                    logger.LogWarning("Pod {PodId} is considered unhealthy. Last heartbeat at {Timestamp}", healthMessage.PodId, healthMessage.Timestamp);
-                    await cacheService.DeletePodConnection(Guid.Parse(healthMessage.PodId));
+                    if (healthMessage.Timestamp >= deadPodTimeStamp)
+                    {
+                        continue;
+                    }
+
+                    if (!Guid.TryParse(healthMessage.PodId, out var podId))
+                    {
+                        logger.LogWarning(
+                            "Skipping unhealthy pod with invalid PodId {PodId} (last heartbeat at {Timestamp})",
+                            healthMessage.PodId, healthMessage.Timestamp);
+                        continue;
+                    }
+
+                    logger.LogWarning(
+                        "Pod {PodId} is considered unhealthy. Last heartbeat at {Timestamp}",
+                        healthMessage.PodId, healthMessage.Timestamp);
+                    await cacheService.DeletePodConnection(podId);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Pod health check iteration failed; will retry next interval");
+            }
 
-            await Task.Delay(TimeSpan.FromSeconds(checkIntervalSeconds), stoppingToken);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(checkIntervalSeconds), stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // graceful shutdown
+            }
         }
     }
 }

@@ -84,22 +84,17 @@ public class CompositeRedisCacheService(
         }
     }
 
-    public async Task UpsertPodHeartbeat(HealthMessage healthMessage)
-    {
-        await BroadcastAsync(s => s.UpsertPodHeartbeat(healthMessage), nameof(UpsertPodHeartbeat));
-    }
+    public Task UpsertPodHeartbeat(HealthMessage healthMessage) =>
+        BroadcastAsync(s => s.UpsertPodHeartbeat(healthMessage), nameof(UpsertPodHeartbeat));
 
-    public Task DeletePodConnection(Guid podId)
-    {
-        throw new NotImplementedException();
-    }
+    public Task DeletePodConnection(Guid podId) =>
+        BroadcastAsync(s => s.DeletePodConnection(podId), nameof(DeletePodConnection));
 
-    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    public Task<List<HealthMessage>> GetAllHealthMessages()
     {
-        throw new NotImplementedException();
-            
-        await BroadcastAsync(
-            s => s.GetAllHealthMessages(),
-            nameof(GetAllHealthMessages));
+        // Heartbeats are local to the DC of the pod that produced them, so we only
+        // read from the first (local) instance rather than aggregating across DCs.
+        var first = cacheServices.First();
+        return first.GetAllHealthMessages();
     }
 }

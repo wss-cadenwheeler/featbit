@@ -27,9 +27,7 @@ public static class RedisKeys
 
     public static RedisKey Connection(string connectionId) => new($"{ConnectionPrefix}{connectionId}");
 
-    public static RedisKey Heartbeat(string podId) => new($"{HeartbeatPrefix}{podId}");
+    public static RedisKey Heartbeats => new($"{HeartbeatPrefix}all");
 
-    public static RedisValue GetAllHeartBeats => new($"{HeartbeatPrefix}*");
-
-    public static RedisValue GetAllConnections => new($"{ConnectionPrefix}*");
+    public const string ConnectionPattern = $"{ConnectionPrefix}*";
 }
