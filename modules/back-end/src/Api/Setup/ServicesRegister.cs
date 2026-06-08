@@ -1,4 +1,3 @@
-using System.Text;
 using Api.Authentication;
 using Api.Authentication.OAuth;
 using Api.Authentication.OpenIdConnect;
@@ -6,7 +5,6 @@ using Api.Authorization;
 using Api.Swagger;
 using Application.Services;
 using Domain.Workspaces;
-using Domain.Identity;
 using Domain.Policies;
 using Infrastructure;
 using Infrastructure.Services;
@@ -27,7 +25,6 @@ public static class ServicesRegister
         builder.Services.AddSerilog((_, lc) => ConfigureSerilog.Configure(lc, builder.Configuration));
 
         // add services for controllers
-        builder.Services.AddTransient<IConfigureOptions<MvcOptions>, ConfigureMvcOptions>();
         builder.Services.AddControllers();
 
         // make all generated paths URLs are lowercase
@@ -71,8 +68,9 @@ public static class ServicesRegister
         builder.Services.AddApplicationServices();
 
         // authentication
-        var jwtOption = builder.Configuration.GetSection(JwtOptions.Jwt);
-        builder.Services.Configure<JwtOptions>(jwtOption);
+        var jwtOptions = JwtOptionsBuilder.Build(builder.Configuration);
+        builder.Services.AddSingleton(jwtOptions);
+
         builder.Services
             .AddAuthentication(options =>
             {
@@ -99,13 +97,15 @@ public static class ServicesRegister
                     AuthenticationType = Schemes.JwtBearer,
 
                     ValidateIssuer = true,
-                    ValidIssuer = jwtOption["Issuer"],
+                    ValidIssuer = jwtOptions.Issuer,
 
                     ValidateAudience = true,
-                    ValidAudience = jwtOption["Audience"],
+                    ValidAudience = jwtOptions.Audience,
 
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOption["Key"]!)),
+                    IssuerSigningKey = jwtOptions.VerificationSecurityKey,
+
+                    ValidAlgorithms = [jwtOptions.Algorithm],
 
                     ValidateLifetime = true,
                     ClockSkew = TimeSpan.Zero

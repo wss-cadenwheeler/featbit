@@ -1,6 +1,7 @@
 using Application.Members;
 using Application.Policies;
 using Application.Users;
+using Application.Workspaces;
 
 namespace Api.Controllers;
 
@@ -21,14 +22,6 @@ public class UserController : ApiControllerBase
         var profile = await Mediator.Send(request);
 
         return Ok(profile);
-    }
-
-    [AllowAnonymous]
-    [HttpPost("has-multiple-workspaces")]
-    public async Task<ApiResponse<bool>> HasMultipleWorkspacesAsync(HasMultipleWorkspaces request)
-    {
-        var hasMultipleWorkspaces = await Mediator.Send(request);
-        return Ok(hasMultipleWorkspaces);
     }
 
     [HttpGet("policies")]
@@ -52,5 +45,17 @@ public class UserController : ApiControllerBase
 
         var result = await Mediator.Send(request);
         return Ok(result);
+    }
+
+    [HttpGet("workspaces")]
+    public async Task<ApiResponse<ICollection<WorkspaceVm>>> GetWorkspaces()
+    {
+        var request = new GetWorkspaces
+        {
+            UserId = CurrentUser.Id
+        };
+
+        var workspaces = await Mediator.Send(request);
+        return Ok(workspaces);
     }
 }

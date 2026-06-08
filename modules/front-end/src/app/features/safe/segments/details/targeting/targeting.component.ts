@@ -1,5 +1,5 @@
 import { Component, OnInit } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute } from '@angular/router';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { EnvUserService } from '@services/env-user.service';
 import { SegmentService } from '@services/segment.service';
@@ -10,13 +10,13 @@ import { CdkDragDrop, moveItemInArray } from "@angular/cdk/drag-drop";
 import { EnvUserPropService } from "@services/env-user-prop.service";
 import { EnvUserFilter } from "@features/safe/end-users/types/featureflag-user";
 import { ICondition, IRule } from "@shared/rules";
-import { getPathPrefix } from "@utils/index";
 import { RefTypeEnum } from "@core/components/audit-log/types";
 import { getCurrentProjectEnv } from "@utils/project-env";
 import { finalize } from 'rxjs';
 import { PermissionsService } from "@services/permissions.service";
 import { PermissionLicenseService } from "@services/permission-license.service";
 import { permissionActions } from "@shared/policy";
+import { ChangeReviewModalData, ReviewModalKindEnum } from "@core/components/change-review/types";
 
 @Component({
     selector: 'segment-targeting',
@@ -32,11 +32,10 @@ export class TargetingComponent implements OnInit {
   public id: string;
   public targetUsersActive = true;
   public flagReferences: ISegmentFlagReference[] = [];
+  flagReferencesModalVisible: boolean = false;
 
-  originalData: string = '{}';
-  currentData: string = '{}';
-  refType: RefTypeEnum = RefTypeEnum.Segment;
   reviewModalVisible: boolean = false;
+  reviewModalData: ChangeReviewModalData;
 
   canUpdateTargetingUsers: boolean = false;
   canUpdateRules: boolean = false;
@@ -47,8 +46,13 @@ export class TargetingComponent implements OnInit {
       return;
     }
 
-    this.originalData = JSON.stringify(this.segmentDetail.originalData);
-    this.currentData = JSON.stringify(this.segmentDetail.dataToSave);
+    this.reviewModalData = {
+      previous: JSON.stringify(this.segmentDetail.originalData),
+      current: JSON.stringify(this.segmentDetail.dataToSave),
+      refType: RefTypeEnum.Segment,
+      refName: this.segmentDetail.name,
+      kind: ReviewModalKindEnum.Save
+    };
 
     this.reviewModalVisible = true;
   }
@@ -60,7 +64,6 @@ export class TargetingComponent implements OnInit {
   currentEnvId: string = '';
 
   constructor(
-    private router: Router,
     private route: ActivatedRoute,
     private segmentService: SegmentService,
     private envUserService: EnvUserService,
@@ -106,21 +109,9 @@ export class TargetingComponent implements OnInit {
             this.loadSegment(result);
           }
         },
-        error: (err) => this.msg.success($localize`:@@common.load-data-failed:Failed to load data, please refresh the page.`)
+        error: () => this.msg.error($localize`:@@common.load-data-failed:Failed to load data, please refresh the page.`)
       });
     });
-  }
-
-  public openFlagPage(flag: ISegmentFlagReference) {
-    if (flag.envId !== this.currentEnvId) {
-      return;
-    }
-
-    const url = this.router.serializeUrl(
-      this.router.createUrlTree([`/${getPathPrefix()}feature-flags/${flag.key}/targeting`])
-    );
-
-    window.open(url, '_blank');
   }
 
   private loadSegment(segment: ISegment) {

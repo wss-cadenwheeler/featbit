@@ -48,7 +48,6 @@ export interface IProfile {
   id: string;
   email: string;
   name: string;
-  workspaceId: string;
   origin: UserOriginEnum;
 }
 
@@ -72,6 +71,34 @@ export interface IWorkspace {
   key: string,
   license?: string,
   sso?: ISso
+}
+
+export interface WorkspaceSubscription {
+  key: string;
+  name: string;
+  description: string;
+  order: number;
+  includedMau: number;
+  extraMau: number;
+  totalMau: number;
+  fineGrainedAcEnabled: boolean;
+  basePrice: number;
+  price: number;
+  billingCycle: string;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+  subscriberSince?: Date;
+  usage?: {
+    mau: number;
+  },
+  pendingDowngrade?: {
+    plan: string;
+    mau: number;
+    billingCycle: string;
+    addOnFeatures: string[];
+    effectiveAt: Date;
+  };
+  isLocal: boolean;
 }
 
 export interface IOrganizationPermissions {
@@ -181,7 +208,8 @@ export interface IProjectEnv {
   envId: string,
   envKey: string,
   envName: string,
-  envSecrets: ISecret[]
+  envSecrets: ISecret[],
+  envSettings: EnvironmentSetting
 }
 
 export interface IProject {
@@ -197,7 +225,12 @@ export interface IEnvironment {
   name: string,
   key: string,
   description: string,
-  secrets: ISecret[]
+  secrets: ISecret[],
+  settings: EnvironmentSetting
+}
+
+export interface EnvironmentSetting {
+  requireChangeComment: boolean;
 }
 
 export interface ISecret {
@@ -210,19 +243,6 @@ export interface ISecret {
 export enum SecretTypeEnum {
   Client = 'client',
   Server = 'server'
-}
-
-export interface EnvironmentSetting {
-  id: string;
-  type: string;
-  key: string;
-  value: string;
-  tag?: string;
-  remark?: string;
-}
-
-export const EnvironmentSettingTypes = {
-  SyncUrls: 'sync-urls',
 }
 
 export enum OAuthProviderEnum {

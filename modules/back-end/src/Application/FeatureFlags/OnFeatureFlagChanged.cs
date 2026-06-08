@@ -48,7 +48,8 @@ public class OnFeatureFlagChangedHandler(
     ICacheService cache,
     IAuditLogService auditLogService,
     IWebhookHandler webhookHandler,
-    IFeatureFlagChangePublisher featureFlagChangePublisher)
+    IFeatureFlagChangePublisher featureFlagChangePublisher, 
+    IConfiguration configuration)
     : INotificationHandler<OnFeatureFlagChanged>
 {
     public async Task Handle(OnFeatureFlagChanged notification, CancellationToken cancellationToken)
@@ -66,9 +67,13 @@ public class OnFeatureFlagChangedHandler(
         await flagRevisionService.AddOneAsync(revision);
 
         // publish feature flag change message
-        await featureFlagChangePublisher.PublishAsync(flag);
+        await featureFlagChangePublisher.PublishAsync(notification);
 
-        // handle webhooks
-        _ = webhookHandler.HandleAsync(notification.Flag, notification.DataChange, notification.OperatorId);
+        if (!configuration.UseControlPlane())
+        {
+            // handle webhooks
+            _ = webhookHandler.HandleAsync(notification.Flag, notification.DataChange, notification.OperatorId);
+        }
+        
     }
 }

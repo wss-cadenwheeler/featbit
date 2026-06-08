@@ -50,7 +50,11 @@ public static class ServicesRegister
         builder.Services.AddAuthentication("ApiKey")
             .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>("ApiKey", options => { });
         
-       builder.Services.AddHostedService<PodHealthChecker>();
+        var podHealthEnabled = bool.Parse(builder.Configuration["PodHealth:Enabled"] ?? "false");
+        if (podHealthEnabled)
+        {
+            builder.Services.AddHostedService<PodHealthChecker>();
+        }
 
         return builder;
     }

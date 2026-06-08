@@ -23,7 +23,6 @@ using Domain.Webhooks;
 using Microsoft.Extensions.Options;
 using MongoDB.Bson;
 using MongoDB.Driver;
-using MongoDB.Driver.Linq;
 using Environment = Domain.Environments.Environment;
 
 namespace Infrastructure.Persistence.MongoDb;
@@ -32,7 +31,7 @@ public class MongoDbClient
 {
     protected MongoClient MongoClient { get; }
 
-    protected IMongoDatabase Database { get; }
+    public IMongoDatabase Database { get; }
 
     public MongoDbClient(IOptions<MongoDbOptions> options)
     {
@@ -48,6 +47,8 @@ public class MongoDbClient
         { typeof(RefreshToken), "RefreshTokens" },
 
         { typeof(Workspace), "Workspaces" },
+
+        { typeof(WorkspaceUser), "WorkspaceUsers" },
 
         { typeof(Organization), "Organizations" },
         { typeof(OrganizationUser), "OrganizationUsers" },
@@ -106,7 +107,7 @@ public class MongoDbClient
         return collectionName;
     }
 
-    public IMongoQueryable<TEntity> QueryableOf<TEntity>()
+    public IQueryable<TEntity> QueryableOf<TEntity>()
     {
         return CollectionOf<TEntity>().AsQueryable();
     }

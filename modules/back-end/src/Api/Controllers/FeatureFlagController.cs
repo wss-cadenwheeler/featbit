@@ -1,14 +1,14 @@
-using Newtonsoft.Json;
 using System.Text.Json;
 using Api.Authentication;
 using Api.Swagger.Examples;
+using Application.AuditLogs;
 using Application.Bases.Models;
 using Application.FeatureFlags;
 using Domain.Workspaces;
 using Domain.FeatureFlags;
 using Domain.Policies;
-using Microsoft.AspNetCore.JsonPatch;
-using Microsoft.AspNetCore.JsonPatch.Operations;
+using Microsoft.AspNetCore.JsonPatch.SystemTextJson;
+using Microsoft.AspNetCore.JsonPatch.SystemTextJson.Operations;
 using Swashbuckle.AspNetCore.Filters;
 
 namespace Api.Controllers;
@@ -100,12 +100,16 @@ public class FeatureFlagController : ApiControllerBase
     [OpenApi]
     [HttpPut("{key}/archive")]
     [Authorize(Permissions.ArchiveFlag)]
-    public async Task<ApiResponse<bool>> ArchiveAsync(Guid envId, string key)
+    public async Task<ApiResponse<bool>> ArchiveAsync(
+        Guid envId, 
+        string key, 
+        [FromBody] ResourceChangeRequest? changeRequest = null)
     {
         var request = new ArchiveFeatureFlag
         {
             EnvId = envId,
-            Key = key
+            Key = key,
+            Comment = changeRequest?.Comment ?? string.Empty
         };
 
         var success = await Mediator.Send(request);
@@ -121,12 +125,16 @@ public class FeatureFlagController : ApiControllerBase
     [OpenApi]
     [HttpPut("{key}/restore")]
     [Authorize(Permissions.RestoreFlag)]
-    public async Task<ApiResponse<bool>> RestoreAsync(Guid envId, string key)
+    public async Task<ApiResponse<bool>> RestoreAsync(
+        Guid envId, 
+        string key, 
+        [FromBody] ResourceChangeRequest? changeRequest = null)
     {
         var request = new RestoreFeatureFlag
         {
             EnvId = envId,
-            Key = key
+            Key = key,
+            Comment = changeRequest?.Comment ?? string.Empty
         };
 
         var success = await Mediator.Send(request);
@@ -142,12 +150,16 @@ public class FeatureFlagController : ApiControllerBase
     [OpenApi]
     [HttpDelete("{key}")]
     [Authorize(Permissions.DeleteFlag)]
-    public async Task<ApiResponse<bool>> DeleteAsync(Guid envId, string key)
+    public async Task<ApiResponse<bool>> DeleteAsync(
+        Guid envId, 
+        string key, 
+        [FromBody] ResourceChangeRequest? changeRequest = null)
     {
         var request = new DeleteFeatureFlag
         {
             EnvId = envId,
-            Key = key
+            Key = key,
+            Comment = changeRequest?.Comment ?? string.Empty
         };
 
         var success = await Mediator.Send(request);
@@ -163,13 +175,18 @@ public class FeatureFlagController : ApiControllerBase
     [OpenApi]
     [HttpPut("{key}/toggle/{status}")]
     [Authorize(Permissions.ToggleFlag)]
-    public async Task<ApiResponse<Guid>> ToggleAsync(Guid envId, string key, bool status)
+    public async Task<ApiResponse<Guid>> ToggleAsync(
+        Guid envId, 
+        string key, 
+        bool status, 
+        [FromBody] ResourceChangeRequest? changeRequest = null)
     {
         var request = new ToggleFeatureFlag
         {
             EnvId = envId,
             Key = key,
-            Status = status
+            Status = status,
+            Comment = changeRequest?.Comment ?? string.Empty
         };
 
         var revision = await Mediator.Send(request);
@@ -231,9 +248,10 @@ public class FeatureFlagController : ApiControllerBase
     }
 
     /// <summary>
-    /// Update a feature flag with the JSON patch method
+    /// Update a feature flag with the JSON patch method. 
     /// </summary>
     /// <remarks>
+    /// Use with caution as this can make arbitrary changes to the feature flag, incorrect usage may lead to malformed data.
     /// Perform a partial update to a feature flag. The request body must be a valid JSON patch.
     /// </remarks>
     [OpenApi]
@@ -241,7 +259,11 @@ public class FeatureFlagController : ApiControllerBase
     [HttpPatch("{key}")]
     public async Task<ApiResponse<bool>> PatchAsync(Guid envId, string key, [FromBody] JsonElement jsonElement)
     {
-        var patch = JsonConvert.DeserializeObject<JsonPatchDocument>(jsonElement.GetRawText());
+        var patch = JsonSerializer.Deserialize<JsonPatchDocument<FeatureFlag>>(
+            jsonElement.GetRawText(),
+            JsonSerializerOptions.Web
+        );
+
         var request = new PatchFeatureFlag
         {
             EnvId = envId,
@@ -304,9 +326,6 @@ public class FeatureFlagController : ApiControllerBase
         return Ok(success);
     }
 
-    /// <summary>
-    /// Delete a flag schedule
-    /// </summary>
     [Authorize(LicenseFeatures.Schedule)]
     [HttpDelete("schedules/{id:guid}")]
     public async Task<ApiResponse<bool>> DeleteScheduleAsync(Guid id)
@@ -377,9 +396,6 @@ public class FeatureFlagController : ApiControllerBase
         return Ok(success);
     }
 
-    /// <summary>
-    /// Delete a flag change request
-    /// </summary>
     [Authorize(LicenseFeatures.ChangeRequest)]
     [HttpDelete("change-requests/{id:guid}")]
     public async Task<ApiResponse<bool>> DeleteChangeRequestAsync(Guid id)
@@ -393,12 +409,18 @@ public class FeatureFlagController : ApiControllerBase
         return Ok(success);
     }
 
+    /// <summary>
+    /// Update the targeting of a feature flag
+    /// </summary>
+    /// <remarks>
+    /// Update the targeting users, rules and default rule of a feature flag.
+    /// </remarks>
+    [OpenApi]
     [HttpPut("{key}/targeting")]
-    public async Task<ApiResponse<Guid>> UpdateTargetingAsync(Guid envId, string key, UpdateTargeting request)
+    public async Task<ApiResponse<Guid>> UpdateTargetingAsync(Guid envId, string key, UpdateTargetingPayload payload)
     {
-        request.OrgId = OrgId;
-        request.Key = key;
-        request.EnvId = envId;
+        var permissions = await GetRequestPermissionsAsync();
+        var request = new UpdateTargeting(OrgId, envId, key, payload, permissions);
 
         var revision = await Mediator.Send(request);
         return Ok(revision);
@@ -492,6 +514,7 @@ public class FeatureFlagController : ApiControllerBase
     /// </remarks>
     [OpenApi]
     [HttpGet("all-tags")]
+    [Authorize(Permissions.CanAccessEnv)]
     public async Task<ApiResponse<ICollection<string>>> GetAllTagsAsync(Guid envId)
     {
         var request = new GetAllTag
@@ -512,14 +535,10 @@ public class FeatureFlagController : ApiControllerBase
     [OpenApi]
     [HttpPut("{key}/tags")]
     [Authorize(Permissions.UpdateFlagTags)]
-    public async Task<ApiResponse<bool>> SetTagsAsync(Guid envId, string key, string[] tags)
+    public async Task<ApiResponse<bool>> SetTagsAsync(Guid envId, string key, SetTags request)
     {
-        var request = new SetTags
-        {
-            EnvId = envId,
-            Key = key,
-            Tags = tags
-        };
+        request.EnvId = envId;
+        request.Key = key;
 
         var success = await Mediator.Send(request);
         return Ok(success);

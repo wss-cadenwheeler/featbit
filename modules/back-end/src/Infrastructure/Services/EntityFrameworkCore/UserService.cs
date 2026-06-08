@@ -28,16 +28,15 @@ public class UserService(AppDbContext dbContext) : EntityFrameworkCoreService<Us
     public async Task<ICollection<User>> GetListAsync(IEnumerable<Guid> ids)
         => await FindManyAsync(x => ids.Contains(x.Id));
 
-    public async Task<ICollection<Workspace>> GetWorkspacesAsync(string email)
+    public async Task<ICollection<Workspace>> GetWorkspacesAsync(Guid userId)
     {
         var workspaces = QueryableOf<Workspace>();
-        var users = QueryableOf<User>();
+        var users = QueryableOf<WorkspaceUser>();
 
         var query =
             from workspace in workspaces
-            join user in users
-                on workspace.Id equals user.WorkspaceId
-            where user.Email == email
+            join user in users on workspace.Id equals user.WorkspaceId
+            where user.UserId == userId
             select workspace;
 
         return await query.ToListAsync();

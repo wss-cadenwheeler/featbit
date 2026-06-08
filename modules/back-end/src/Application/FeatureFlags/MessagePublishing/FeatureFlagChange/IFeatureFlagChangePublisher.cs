@@ -4,5 +4,5 @@ namespace Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
 
 public interface IFeatureFlagChangePublisher
 {
-    Task PublishAsync(FeatureFlag flag);
+    Task PublishAsync(OnFeatureFlagChanged notification);
 }

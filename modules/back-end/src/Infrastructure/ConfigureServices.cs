@@ -1,3 +1,4 @@
+using Application;
 using Application.Usages;
 using Application.Configuration;
 using Application.FeatureFlags.MessagePublishing.FeatureFlagChange;
@@ -57,6 +58,14 @@ public static class ConfigureServices
         services.AddTransient<IFeatureFlagAppService, AppServices.FeatureFlagAppService>();
         services.AddTransient<ISegmentMessageService, SegmentMessageService>();
         services.AddChangePublishingServices(configuration);
+        if (configuration.IsSaasHosting())
+        {
+            services.AddTransient<IBillingService, Services.BillingService>();
+        }
+        else
+        {
+            services.AddTransient<IBillingService, Services.NoopBillingService>();
+        }
 
         // InsightsWriter must be a singleton service
         services.AddSingleton(typeof(AppServices.InsightsWriter));

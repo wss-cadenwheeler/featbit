@@ -1,4 +1,5 @@
 using Application.Bases;
+using Application.Bases.Exceptions;
 using Application.Caches;
 using Application.Configuration;
 using Domain.Messages;
@@ -40,6 +41,11 @@ public class UpdateLicenseHandler(
 {
     public async Task<WorkspaceVm> Handle(UpdateLicense request, CancellationToken cancellationToken)
     {
+        if (configuration.IsSaasHosting())
+        {
+            throw new BusinessException(ErrorCodes.Forbidden);
+        }
+
         var workspace = await service.GetAsync(request.Id);
 
         // save to database
