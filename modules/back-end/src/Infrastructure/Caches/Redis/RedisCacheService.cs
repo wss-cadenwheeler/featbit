@@ -160,7 +160,7 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         return [
            ..values
         .Where(v => v.Value.HasValue)
-        .Select(v => JsonSerializer.Deserialize<HealthMessage>(v.Value!))
+        .Select(v => JsonSerializer.Deserialize<HealthMessage>((string)v.Value!))
         .OfType<HealthMessage>()
        ];
     }
