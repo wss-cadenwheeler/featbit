@@ -81,4 +81,20 @@ public class HeartbeatMessageHandlerTests
 
         _cache.Verify(x => x.UpsertPodHeartbeat(It.IsAny<HealthMessage>()), Times.Never);
     }
+
+    [Fact]
+    public async Task HandleAsync_WhenPayloadUsesCamelCase_CallsUpsertPodHeartbeat()
+    {
+        // Eval-server publishes camelCase JSON; the handler must accept it.
+        var sut = CreateSut();
+        var podId = Guid.NewGuid().ToString();
+        var timestamp = DateTimeOffset.UtcNow;
+        var payload =
+            $"{{\"podId\":\"{podId}\",\"timestamp\":\"{timestamp:O}\"}}";
+
+        await sut.HandleAsync(payload);
+
+        _cache.Verify(x => x.UpsertPodHeartbeat(It.Is<HealthMessage>(m =>
+            m.PodId == podId && m.Timestamp == timestamp)), Times.Once);
+    }
 }

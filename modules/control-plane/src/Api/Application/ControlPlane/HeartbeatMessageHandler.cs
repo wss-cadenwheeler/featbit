@@ -7,6 +7,8 @@ namespace Api.Application.ControlPlane;
 
 public class HeartbeatMessageHandler(ICacheService cacheService, ILogger<HeartbeatMessageHandler> logger) : IMessageHandler
 {
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
     public string Topic => ControlPlaneTopics.PodHeartbeat;
 
     public async Task HandleAsync(string message)
@@ -15,7 +17,7 @@ public class HeartbeatMessageHandler(ICacheService cacheService, ILogger<Heartbe
 
         try
         {
-            var heartBeatMessage = JsonSerializer.Deserialize<HealthMessage>(message);
+            var heartBeatMessage = JsonSerializer.Deserialize<HealthMessage>(message, JsonOptions);
 
             if (!TryValidate(heartBeatMessage, message))
             {
