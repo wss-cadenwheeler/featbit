@@ -1,8 +1,8 @@
 using Api.Application.ControlPlane;
 using Application.Caches;
 using Domain.Health;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -12,15 +12,21 @@ public class PodHealthCheckerTests
     private readonly Mock<ICacheService> _cache = new();
     private readonly Mock<ILogger<PodHealthChecker>> _logger = new();
 
-    private static IConfiguration BuildConfig(int timeoutSeconds, int checkIntervalSeconds)
+    private static IOptionsMonitor<PodHealthOptions> BuildOptions(
+        int timeoutSeconds,
+        int checkIntervalSeconds,
+        bool enabled = true)
     {
-        return new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["PodHealth:TimeoutInSeconds"] = timeoutSeconds.ToString(),
-                ["PodHealth:CheckIntervalInSeconds"] = checkIntervalSeconds.ToString()
-            })
-            .Build();
+        var value = new PodHealthOptions
+        {
+            Enabled = enabled,
+            TimeoutInSeconds = timeoutSeconds,
+            CheckIntervalInSeconds = checkIntervalSeconds
+        };
+
+        var monitor = new Mock<IOptionsMonitor<PodHealthOptions>>();
+        monitor.SetupGet(m => m.CurrentValue).Returns(value);
+        return monitor.Object;
     }
 
     private async Task RunOnceAsync(PodHealthChecker sut)
@@ -44,7 +50,7 @@ public class PodHealthCheckerTests
                 new() { PodId = deadPodId.ToString(), Timestamp = DateTimeOffset.UtcNow.AddSeconds(-300) }
             });
 
-        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildConfig(60, 60));
+        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildOptions(60, 60));
 
         await RunOnceAsync(sut);
 
@@ -61,7 +67,7 @@ public class PodHealthCheckerTests
                 new() { PodId = livePodId.ToString(), Timestamp = DateTimeOffset.UtcNow }
             });
 
-        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildConfig(60, 60));
+        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildOptions(60, 60));
 
         await RunOnceAsync(sut);
 
@@ -77,7 +83,7 @@ public class PodHealthCheckerTests
                 new() { PodId = "not-a-guid", Timestamp = DateTimeOffset.UtcNow.AddSeconds(-300) }
             });
 
-        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildConfig(60, 60));
+        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildOptions(60, 60));
 
         await RunOnceAsync(sut);
 
@@ -90,9 +96,20 @@ public class PodHealthCheckerTests
         _cache.Setup(c => c.GetAllHealthMessages())
             .ThrowsAsync(new InvalidOperationException("boom"));
 
-        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildConfig(60, 60));
+        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildOptions(60, 60));
 
         // Should not throw; failure inside the loop is logged and the next iteration is attempted.
         await RunOnceAsync(sut);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenDisabled_DoesNotQueryCache()
+    {
+        var sut = new PodHealthChecker(_cache.Object, _logger.Object, BuildOptions(60, 60, enabled: false));
+
+        await RunOnceAsync(sut);
+
+        _cache.Verify(c => c.GetAllHealthMessages(), Times.Never);
+        _cache.Verify(c => c.DeletePodConnection(It.IsAny<Guid>()), Times.Never);
     }
 }

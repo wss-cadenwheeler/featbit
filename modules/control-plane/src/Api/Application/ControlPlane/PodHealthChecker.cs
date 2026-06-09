@@ -1,55 +1,71 @@
 ﻿using Application.Caches;
+using Microsoft.Extensions.Options;
 
 namespace Api.Application.ControlPlane;
 
-public class PodHealthChecker(ICacheService cacheService, ILogger<PodHealthChecker> logger, IConfiguration configuration) : BackgroundService
+public class PodHealthChecker(
+    ICacheService cacheService,
+    ILogger<PodHealthChecker> logger,
+    IOptionsMonitor<PodHealthOptions> options) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var checkIntervalSeconds = configuration.GetValue("PodHealth:CheckIntervalInSeconds", 90);
-        var podTimeoutSeconds = configuration.GetValue("PodHealth:TimeoutInSeconds", 90);
+        bool? lastEnabled = null;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try
+            var current = options.CurrentValue;
+
+            if (lastEnabled != current.Enabled)
             {
-                var deadPodTimeStamp = DateTimeOffset.UtcNow.AddSeconds(-podTimeoutSeconds);
+                logger.LogInformation(
+                    "PodHealthChecker is now {State}",
+                    current.Enabled ? "enabled" : "disabled");
+                lastEnabled = current.Enabled;
+            }
 
-                var healthMessages = await cacheService.GetAllHealthMessages();
-
-                foreach (var healthMessage in healthMessages)
+            if (current.Enabled)
+            {
+                try
                 {
-                    if (healthMessage.Timestamp >= deadPodTimeStamp)
-                    {
-                        continue;
-                    }
+                    var deadPodTimeStamp = DateTimeOffset.UtcNow.AddSeconds(-current.TimeoutInSeconds);
 
-                    if (!Guid.TryParse(healthMessage.PodId, out var podId))
+                    var healthMessages = await cacheService.GetAllHealthMessages();
+
+                    foreach (var healthMessage in healthMessages)
                     {
+                        if (healthMessage.Timestamp >= deadPodTimeStamp)
+                        {
+                            continue;
+                        }
+
+                        if (!Guid.TryParse(healthMessage.PodId, out var podId))
+                        {
+                            logger.LogWarning(
+                                "Skipping unhealthy pod with invalid PodId {PodId} (last heartbeat at {Timestamp})",
+                                healthMessage.PodId, healthMessage.Timestamp);
+                            continue;
+                        }
+
                         logger.LogWarning(
-                            "Skipping unhealthy pod with invalid PodId {PodId} (last heartbeat at {Timestamp})",
+                            "Pod {PodId} is considered unhealthy. Last heartbeat at {Timestamp}",
                             healthMessage.PodId, healthMessage.Timestamp);
-                        continue;
+                        await cacheService.DeletePodConnection(podId);
                     }
-
-                    logger.LogWarning(
-                        "Pod {PodId} is considered unhealthy. Last heartbeat at {Timestamp}",
-                        healthMessage.PodId, healthMessage.Timestamp);
-                    await cacheService.DeletePodConnection(podId);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Pod health check iteration failed; will retry next interval");
                 }
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Pod health check iteration failed; will retry next interval");
-            }
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(checkIntervalSeconds), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(current.CheckIntervalInSeconds), stoppingToken);
             }
             catch (OperationCanceledException)
             {

@@ -49,12 +49,10 @@ public static class ServicesRegister
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));    
         builder.Services.AddAuthentication("ApiKey")
             .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthenticationHandler>("ApiKey", options => { });
-        
-        var podHealthEnabled = bool.Parse(builder.Configuration["PodHealth:Enabled"] ?? "false");
-        if (podHealthEnabled)
-        {
-            builder.Services.AddHostedService<PodHealthChecker>();
-        }
+
+        builder.Services.Configure<PodHealthOptions>(
+            builder.Configuration.GetSection(PodHealthOptions.SectionName));
+        builder.Services.AddHostedService<PodHealthChecker>();
 
         return builder;
     }
