@@ -368,6 +368,7 @@ $hostsFile = if ($script:onWindows) {
 }
 
 $hostsEntries = @(
+    "127.0.0.1 featbit.local featbit-api.local featbit-eval.local",
     "127.0.0.1 featbit.west.local featbit-api.west.local featbit-eval.west.local featbit-kafka.west.local featbit-control-plane.west.local redis.west.local",
     "127.0.0.1 featbit.east.local featbit-api.east.local featbit-eval.east.local featbit-kafka.east.local featbit-control-plane.east.local redis.east.local",
     "127.0.0.1 mongodb-0.west.local mongodb-1.west.local mongodb-2.east.local"
@@ -439,6 +440,10 @@ spec:
               value: https://featbit-samples.vercel.app
             - name: EVALUATION_URL
               value: http://featbit-eval.west.local
+            - name: DISPLAY_API_URL
+              value: http://featbit.local
+            - name: DISPLAY_EVALUATION_URL
+              value: http://featbit.local
           image: host.minikube.internal:5000/featbit/featbit-ui:latest
           name: ui
           ports:
@@ -473,6 +478,10 @@ spec:
               value: https://featbit-samples.vercel.app
             - name: EVALUATION_URL
               value: http://featbit-eval.east.local
+            - name: DISPLAY_API_URL
+              value: http://featbit.local
+            - name: DISPLAY_EVALUATION_URL
+              value: http://featbit.local
           image: host.minikube.internal:5000/featbit/featbit-ui:latest
           name: ui
           ports:
@@ -506,7 +515,7 @@ $portForwardScript = Join-Path $scriptDir "Start-PortForwards.ps1"
 
 if ($script:onWindows)
 {
-    Start-Process powershell -ArgumentList @(
+    Start-Process pwsh -ArgumentList @(
         "-NoExit",
         "-WindowStyle", "Minimized",
         "-File", $portForwardScript
@@ -716,8 +725,8 @@ Write-Host "Management Commands:" -ForegroundColor Yellow
 if ($script:onWindows)
 {
     Write-Host "  Stop nginx:    Stop-Process -Name nginx" -ForegroundColor Gray
-    Write-Host "  Reload nginx:  cd C:\nginx; .\nginx.exe -s reload" -ForegroundColor Gray
-    Write-Host "  View logs:     Get-Content C:\nginx\logs\error.log -Tail 50" -ForegroundColor Gray
+    Write-Host "  Reload nginx:  Push-Location '$NginxPath'; .\nginx.exe -s reload; Pop-Location" -ForegroundColor Gray
+    Write-Host "  View logs:     Get-Content '$NginxPath\logs\error.log' -Tail 50" -ForegroundColor Gray
 }
 else
 {

@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-$repoRoot   = Split-Path -Parent $PSScriptRoot
+$repoRoot   = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $modulesDir = Join-Path $repoRoot "modules"
 
 # Map each short name to its Dockerfile path and build context (both relative to repo root).

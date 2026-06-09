@@ -3,9 +3,9 @@ using FeatBit.Sdk.Server.Model;
 using FeatBit.Sdk.Server.Options;
 
 // setup sdk options
-var options = new FbOptionsBuilder("CGz8HbYg0UOMLZExZtLOSwqsCDPKrSGE2zzI333dqu9g")
-    .Event(new Uri("http://featbit-eval.east.local"))
-    .Streaming(new Uri("ws://featbit-eval.east.local"))
+var options = new FbOptionsBuilder("n0_d4UoepUq05K5rxeeE8wewodPbUp6k-uQvnG3YZTzA")
+    .Event(new Uri("http://featbit-eval.local"))
+    .Streaming(new Uri("ws://featbit-eval.local"))
     .Build();
 
 // creates a new client instance that connects to FeatBit with the custom option.
@@ -22,7 +22,7 @@ else
 }
 
 // flag to be evaluated
-const string flagKey = "test-east-1";
+const string flagKey = "test-active-1";
 
 // create a user
 var user = FbUser.Builder("tester-id").Name("tester").Build();

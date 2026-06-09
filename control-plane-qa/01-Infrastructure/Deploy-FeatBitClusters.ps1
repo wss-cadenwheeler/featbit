@@ -168,7 +168,7 @@ function Write-Error {
 function Get-InfraImageMap {
     param([string]$MapFile)
 
-    $repoRoot    = Split-Path -Parent $PSScriptRoot
+    $repoRoot    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $defaultPath = Join-Path $repoRoot "kubernetes\infra-image-map.json"
     $localPath   = Join-Path $repoRoot "kubernetes\infra-image-map.local.json"
     $resolved = if ($MapFile) { $MapFile } else { $defaultPath }
@@ -589,7 +589,7 @@ function Ensure-HostBridgeServices {
     }
 }
 
-$scriptPath = Split-Path -Parent $PSScriptRoot
+$scriptPath = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $kubernetesProPath = Join-Path $scriptPath "kubernetes\pro"
 
 # Ephemeral manifests directory — gitignored.  Every YAML file applied to a
