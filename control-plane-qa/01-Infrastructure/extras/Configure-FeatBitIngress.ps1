@@ -325,17 +325,17 @@ if ($UsePortForward) {
     Write-Info "Starting west UI port-forward on port 8081..."
     Write-Info "Starting east UI port-forward on port 8082..."
     
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/ui 8081:8081"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/ui 8081:8081"
     Start-Sleep -Seconds 2
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/ui 8082:8081"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/ui 8082:8081"
     Start-Sleep -Seconds 2
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/api-server 5000:5000"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/api-server 5000:5000"
     Start-Sleep -Seconds 2
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/api-server 5001:5000"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/api-server 5001:5000"
     Start-Sleep -Seconds 2
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/evaluation-server 5100:5100"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context west port-forward -n featbit svc/evaluation-server 5100:5100"
     Start-Sleep -Seconds 2
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/evaluation-server 5101:5100"
+    Start-Process pwsh -ArgumentList "-NoExit", "-Command", "kubectl --context east port-forward -n featbit svc/evaluation-server 5101:5100"
     
     Write-Success "Port forwarding started in separate windows"
     Write-Host "`nAccess URLs:" -ForegroundColor Green
