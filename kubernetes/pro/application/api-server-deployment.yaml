@@ -19,6 +19,8 @@ spec:
         - env:
             - name: IS_PRO
               value: "true"
+            - name: Jwt__Key
+              value: please_change_me_to_a_secure_secret_key
             - name: MqProvider
               value: Kafka
             - name: Kafka__Producer__bootstrap.servers

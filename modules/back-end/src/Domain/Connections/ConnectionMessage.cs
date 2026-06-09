@@ -7,4 +7,6 @@ public class ConnectionMessage
     public Guid EnvId { get; init; }
 
     public string Secret { get; init; }
+
+    public string HeartbeatId { get; set; }
 }

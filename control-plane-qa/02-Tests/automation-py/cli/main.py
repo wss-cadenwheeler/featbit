@@ -22,6 +22,7 @@ from scenarios import (
     CP06Scenario,
     CP07Scenario,
     CP08Scenario,
+    CP09Scenario,
 )
 from scripts import seed_data as seed_module
 
@@ -364,6 +365,7 @@ def seed(
     "cp07-west-to-east",
     "cp07-east-to-west",
     "cp08-full-sync",
+    "cp09-pod-heartbeats",
 ]))
 @click.option("--env-id", required=True, help="Environment ID")
 @click.option(
@@ -495,8 +497,10 @@ def scenario(
         scenario_obj = CP06Scenario(config)
     elif scenario.startswith("cp07"):
         scenario_obj = CP07Scenario(config)
-    else:
+    elif scenario.startswith("cp08"):
         scenario_obj = CP08Scenario(config)
+    else:
+        scenario_obj = CP09Scenario(config)
 
     click.echo(f"Running {scenario}...")
     passed = scenario_obj.run()
@@ -589,7 +593,7 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08"]))
+@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08", "cp09"]))
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -716,8 +720,10 @@ def suite(
         scenario_names = ["cp06-west-to-east", "cp06-east-to-west"]
     elif suite == "cp07":
         scenario_names = ["cp07-west-to-east", "cp07-east-to-west"]
-    else:
+    elif suite == "cp08":
         scenario_names = ["cp08-full-sync"]
+    else:
+        scenario_names = ["cp09-pod-heartbeats"]
 
     dashboard = SuiteDashboard(
         suite=suite,
@@ -869,8 +875,10 @@ def suite(
                 scenario_obj = CP06Scenario(config)
             elif scenario_name.startswith("cp07"):
                 scenario_obj = CP07Scenario(config)
-            else:
+            elif scenario_name.startswith("cp08"):
                 scenario_obj = CP08Scenario(config)
+            else:
+                scenario_obj = CP09Scenario(config)
 
             if use_dashboard:
                 _sname = scenario_name

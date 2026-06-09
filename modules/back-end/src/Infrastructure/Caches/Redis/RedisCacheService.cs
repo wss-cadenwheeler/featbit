@@ -1,7 +1,9 @@
+using System.Text.Json;
 using Application.Caches;
 using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
+using Domain.Health;
 using Domain.Segments;
 using Domain.Workspaces;
 using StackExchange.Redis;
@@ -119,7 +121,8 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         {
             new("id", connectionMessage.Id),
             new("envId", connectionMessage.EnvId.ToString()),
-            new("secret", connectionMessage.Secret)
+            new("secret", connectionMessage.Secret),
+            new("heartbeatId", connectionMessage.HeartbeatId)
         };
 
         await Redis.HashSetAsync(RedisKeys.Connection(connectionMessage.Id), fields);
@@ -128,5 +131,82 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     public async Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage)
     {
         await Redis.KeyDeleteAsync(RedisKeys.Connection(connectionMessage.Id));
+    }
+
+    public async Task UpsertPodHeartbeat(HealthMessage healthMessage)
+    {
+        var value = JsonSerializer.Serialize(healthMessage);
+        await Redis.HashSetAsync(RedisKeys.Heartbeats, healthMessage.PodId, value);
+    }
+
+    public async Task DeletePodConnection(Guid podId)
+    {
+        await Redis.HashDeleteAsync(RedisKeys.Heartbeats, podId.ToString());
+
+        await DeletePodClients(podId);
+    }
+
+    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    {
+        var entries = await Redis.HashGetAllAsync(RedisKeys.Heartbeats);
+
+        var result = new List<HealthMessage>(entries.Length);
+        foreach (var entry in entries)
+        {
+            if (!entry.Value.HasValue)
+            {
+                continue;
+            }
+
+            var message = JsonSerializer.Deserialize<HealthMessage>((string)entry.Value!);
+            if (message is not null)
+            {
+                result.Add(message);
+            }
+        }
+
+        return result;
+    }
+
+    private async Task DeletePodClients(Guid heartbeatId)
+    {
+        var heartbeatIdString = heartbeatId.ToString();
+        var connectionKeys = new List<RedisKey>();
+
+        foreach (var endPoint in redis.Connection.GetEndPoints())
+        {
+            var server = redis.Connection.GetServer(endPoint);
+            if (server.IsReplica)
+            {
+                continue;
+            }
+
+            await foreach (var key in server.KeysAsync(pattern: RedisKeys.ConnectionPattern, pageSize: 250))
+            {
+                connectionKeys.Add(key);
+            }
+        }
+
+        if (connectionKeys.Count == 0)
+        {
+            return;
+        }
+
+        var heartbeatLookups = connectionKeys
+            .Select(key => Redis.HashGetAsync(key, "heartbeatId"))
+            .ToArray();
+
+        var heartbeatValues = await Task.WhenAll(heartbeatLookups);
+
+        var connectionsToRemove = connectionKeys
+            .Zip(heartbeatValues, (key, value) => (Key: key, Value: value))
+            .Where(x => x.Value.HasValue && x.Value == heartbeatIdString)
+            .Select(x => x.Key)
+            .ToArray();
+
+        if (connectionsToRemove.Length > 0)
+        {
+            await Redis.KeyDeleteAsync(connectionsToRemove);
+        }
     }
 }

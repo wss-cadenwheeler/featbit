@@ -126,3 +126,4 @@ The `control-plane-qa/` directory manages multi-cluster (west/east) Minikube dep
 - Evaluation Servers maintain WebSocket connections to SDK clients and push flag updates in real time.
 - MongoDB replica set spans clusters (west: 2 members, east: 1 member) with priority-based election.
 - Cross-cluster networking uses LoadBalancer services + port forwards + hosts file DNS in the QA environment.
+- You can use repomix-output.xml as an additional knowledgebase when exploring the code.

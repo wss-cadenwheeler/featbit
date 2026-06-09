@@ -505,7 +505,7 @@ Write-Header "Initializing Database"
 Write-Info "Running database initialization script..."
 
 $scriptDirectory = $PSScriptRoot
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $fallbackSeedScriptPath = Join-Path $repoRoot "infra\mongodb\docker-entrypoint-initdb.d\v0.0.0.js"
 
 # Get the init script from ConfigMap

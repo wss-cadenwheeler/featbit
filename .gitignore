@@ -33,8 +33,16 @@ benchmark/k6-scripts/test-results/
 #Ignore IntelliJ IDEA files
 .idea/
 
+# Control-plane QA local artifacts (never commit)
+/control-plane-qa/deployment.env
+/control-plane-qa/port-forwards.log
+/control-plane-qa/windows-hyperv/.quickstart-state-hyperv.json
+/control-plane-qa/Setup Challenges.txt
+/build-featbit-images.ps1
+
 # Quickstart wizard progress state files
 control-plane-qa/.quickstart-state-*.json
 
 # Automation test artifacts (scenario run outputs, timelines, assertion results)
 control-plane-qa/artifacts/
+control-plane-qa/01-Infrastructure/windows-hyperv/.quickstart-state-hyperv.json

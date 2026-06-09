@@ -27,7 +27,9 @@ public class ClientConnectionMadeHandler(ICacheService cacheService, ILogger<Cli
         }
 
         if (!TryValidate(connectionInfo, message))
+        {
             return;
+        }
 
         await cacheService.UpsertConnectionMadeAsync(connectionInfo);
     }

@@ -1,0 +1,54 @@
+﻿using System.Text.Json;
+using Application.Caches;
+using Domain.Health;
+using Domain.Messages;
+
+namespace Api.Application.ControlPlane;
+
+public class HeartbeatMessageHandler(ICacheService cacheService, ILogger<HeartbeatMessageHandler> logger) : IMessageHandler
+{
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    public string Topic => ControlPlaneTopics.PodHeartbeat;
+
+    public async Task HandleAsync(string message)
+    {
+        logger.LogInformation("Received heartbeat message: {Message}", message);
+
+        try
+        {
+            var heartBeatMessage = JsonSerializer.Deserialize<HealthMessage>(message, JsonOptions);
+
+            if (!TryValidate(heartBeatMessage, message))
+            {
+                return;
+            }
+
+            await cacheService.UpsertPodHeartbeat(heartBeatMessage!);
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Failed to process heartbeat message: {Message}", message);
+        }
+    }
+
+    private bool TryValidate(HealthMessage? heartBeatMessage, string rawMessage)
+    {
+        if (heartBeatMessage is null)
+        {
+            logger.LogError("Heartbeat message is null after deserialization: {Message}", rawMessage);
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(heartBeatMessage.PodId))
+        {
+            logger.LogError("Pod id is null or empty: {Message}", rawMessage);
+            return false;
+        }
+        if (heartBeatMessage.Timestamp == default)
+        {
+            logger.LogError("Timestamp is default value: {Message}", rawMessage);
+            return false;
+        }
+        return true;
+    }
+}

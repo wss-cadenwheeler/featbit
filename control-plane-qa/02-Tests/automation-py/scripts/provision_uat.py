@@ -132,6 +132,30 @@ def _resolve_auth_and_context(
         profile_response = client.get(profile_endpoint, headers=headers)
         profile_data = extract_data(profile_response)
         workspace_id = profile_data.get("workspaceId") or profile_data.get("WorkspaceId")
+
+        # Fallback: profile no longer includes workspaceId. Look it up via /user/workspaces.
+        if not workspace_id:
+            workspaces_endpoint = f"/api/v{api_version}/user/workspaces"
+            if verbose:
+                logger.info(
+                    "provision_uat.workspace.fetching",
+                    endpoint=workspaces_endpoint,
+                    reason="profile_missing_workspace_id",
+                )
+            workspaces_response = client.get(workspaces_endpoint, headers=headers)
+            workspaces_list = _as_list(extract_data(workspaces_response))
+            workspace = _find_by_key(workspaces_list, workspace_key) if workspace_key else None
+            if not workspace and workspaces_list:
+                workspace = workspaces_list[0]
+            if workspace:
+                workspace_id = workspace.get("id") or workspace.get("Id")
+
+        if not workspace_id:
+            raise RuntimeError(
+                "Unable to resolve workspace: profile has no workspaceId and "
+                "/user/workspaces returned no workspaces for this user."
+            )
+
         headers["Workspace"] = workspace_id
         logger.info("provision_uat.profile.resolved", workspace_id=workspace_id)
     except Exception as e:
