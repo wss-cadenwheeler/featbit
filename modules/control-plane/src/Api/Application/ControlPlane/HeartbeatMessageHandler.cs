@@ -5,7 +5,9 @@ using Domain.Messages;
 
 namespace Api.Application.ControlPlane;
 
-public class HeartbeatMessageHandler(ICacheService cacheService, ILogger<HeartbeatMessageHandler> logger) : IMessageHandler
+public class HeartbeatMessageHandler(
+    [FromKeyedServices("compositeCache")] ICacheService cacheService,
+    ILogger<HeartbeatMessageHandler> logger) : IMessageHandler
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 

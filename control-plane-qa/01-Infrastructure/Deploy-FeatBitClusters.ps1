@@ -111,7 +111,12 @@ param(
     # On Windows with Hyper-V, pass the vEthernet (WSL (Hyper-V firewall)) adapter IP
     # (e.g. 172.31.128.1) because host.minikube.internal resolves to the Hyper-V virtual
     # switch address (192.168.127.254) which is not reachable from within pods.
-    [string]$CrossClusterRedisHost = "host.minikube.internal"
+    [string]$CrossClusterRedisHost = "host.minikube.internal",
+    # When set, skips caching infra images (redis, kafka, mongo, clickhouse, etc.) in
+    # the local registry. By default all mapped infra images are pulled from the remote
+    # source once and cached at localhost:5000/infra/* so subsequent deploys don't need
+    # VPN access or risk hitting remote rate limits.
+    [switch]$NoCacheInfraImages
 )
 
 $ErrorActionPreference = "Stop"
@@ -200,6 +205,83 @@ function Get-InfraImageMap {
     return $map
 }
 
+# Pulls each infra image from its remote source (CustomImageRegistry or Docker Hub)
+# and pushes it to the local registry at localhost:5000/infra/<name>:<tag>, skipping
+# any image that is already present in the registry catalog.
+# Returns a hashtable of { remoteImage -> "host.minikube.internal:5000/infra/<name>:<tag>" }
+# so Invoke-KubectlApplyFile can rewrite manifest image references to the local cache.
+function Sync-InfraImagesToLocalRegistry {
+    param(
+        [hashtable]$ImageMap,
+        [string]$RemoteRegistry,
+        [int]$LocalPort = 5000
+    )
+
+    $localBase  = "localhost:$LocalPort/infra"
+    $minikubeBase = "host.minikube.internal:$LocalPort/infra"
+    $result     = @{}
+
+    # Query the local registry catalog once up-front to avoid a round-trip per image.
+    $catalogRepos = @()
+    try {
+        $catalog = Invoke-RestMethod -Uri "http://localhost:$LocalPort/v2/_catalog" -TimeoutSec 5
+        if ($catalog.repositories) { $catalogRepos = $catalog.repositories }
+    }
+    catch {
+        Write-Warn "Could not reach local registry at localhost:$LocalPort — infra image caching skipped."
+        return $result
+    }
+
+    Write-Step "Syncing Infra Images to Local Registry"
+
+    foreach ($canonicalImage in $ImageMap.Keys) {
+        # Derive a flat repository name safe for a registry path:
+        # e.g. "bitnamilegacy/kafka:3.8" -> repo="infra/bitnamilegacy-kafka" tag="3.8"
+        $nameAndTag = $canonicalImage -split ":",2
+        $imageName  = $nameAndTag[0]
+        $imageTag   = if ($nameAndTag.Count -gt 1) { $nameAndTag[1] } else { "latest" }
+        $repoName   = "infra/" + ($imageName -replace "/", "-")
+        $localTag   = "$localBase/$($imageName -replace '/', '-'):$imageTag"
+        $minikubeTag = "$minikubeBase/$($imageName -replace '/', '-'):$imageTag"
+
+        if ($catalogRepos -contains $repoName) {
+            Write-Info "  [cached] $canonicalImage"
+            $result[$canonicalImage] = $minikubeTag
+            continue
+        }
+
+        # Determine the full pull reference.
+        $remoteImage = if ($RemoteRegistry) {
+            "$RemoteRegistry/$($ImageMap[$canonicalImage])"
+        } else {
+            $canonicalImage
+        }
+
+        Write-Host "  Pulling  $remoteImage ..." -ForegroundColor Gray
+        docker pull $remoteImage
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to pull $remoteImage — skipping cache for this image."
+            continue
+        }
+
+        docker tag $remoteImage $localTag
+        docker push $localTag
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to push $localTag — skipping cache for this image."
+            continue
+        }
+
+        # Remove the bulky remote-tagged copy from the local daemon; the local registry
+        # is the authoritative source going forward.
+        docker rmi $remoteImage 2>$null | Out-Null
+
+        Write-Success "  Cached   $canonicalImage -> $localTag"
+        $result[$canonicalImage] = $minikubeTag
+    }
+
+    return $result
+}
+
 # Writes a source YAML file to the per-cluster generated directory
 # (kubernetes/.generated/<context>/) with image references rewritten for the
 # custom registry, then applies the generated file with kubectl.
@@ -210,7 +292,10 @@ function Invoke-KubectlApplyFile {
         [string]$FilePath,
         [string]$Namespace,
         [string]$Registry,
-        [hashtable]$ImageMap
+        [hashtable]$ImageMap,
+        # Optional: canonical->localRegistry rewrites built by Sync-InfraImagesToLocalRegistry.
+        # Applied AFTER the remote-registry rewrite so local cache wins.
+        [hashtable]$InfraLocalImageMap = @{}
     )
 
     $content = Get-Content $FilePath -Raw
@@ -221,6 +306,20 @@ function Invoke-KubectlApplyFile {
             $customImage   = "${Registry}/${registryPath}"
             $escapedDefault = [regex]::Escape($defaultImage)
             $content = $content -replace "(\bimage:\s+)${escapedDefault}\b", "`${1}${customImage}"
+        }
+    }
+
+    # Rewrite infra image references to the local cache (overrides remote registry).
+    if ($InfraLocalImageMap -and $InfraLocalImageMap.Count -gt 0) {
+        foreach ($canonicalImage in $InfraLocalImageMap.Keys) {
+            $localImage = $InfraLocalImageMap[$canonicalImage]
+            # Match either the canonical name or the already-rewritten remote path.
+            foreach ($searchImage in @($canonicalImage, ("${Registry}/$($ImageMap[$canonicalImage])"))) {
+                if ($searchImage) {
+                    $escaped = [regex]::Escape($searchImage)
+                    $content = $content -replace "(\bimage:\s+)${escaped}\b", "`${1}${localImage}"
+                }
+            }
         }
     }
 
@@ -780,6 +879,17 @@ if (-not $SkipImageCheck) {
     Write-Success "All required images found in local registry"
 }
 
+# ── Infra image caching ───────────────────────────────────────────────────────
+# Pull each mapped infra image from the remote registry and cache it in the
+# local registry (localhost:5000/infra/*).  Subsequent deploys skip the pull
+# entirely, which avoids VPN dependency and remote rate limits.
+$script:infraLocalImageMap = @{}
+if (-not $NoCacheInfraImages -and $infraImageMap -and $infraImageMap.Count -gt 0) {
+    $script:infraLocalImageMap = Sync-InfraImagesToLocalRegistry `
+        -ImageMap $infraImageMap `
+        -RemoteRegistry $CustomImageRegistry
+}
+
 if ($RecreateClusters -and -not $SkipClusterCreation) {
     Write-Step "Cluster Creation"
 
@@ -940,6 +1050,48 @@ else {
     Write-Info "Skipping registry image pull secret creation (no registry configured or no credentials provided)."
 }
 
+# ── Corporate Certificate Trust ───────────────────────────────────────────────
+# When TRUST_CERTIFICATES is set in deployment.env (or passed directly), install
+# corporate CA certs into both clusters BEFORE any pods are scheduled.  This
+# prevents ImagePullBackOff on registries that present certs signed by a
+# corporate CA that Minikube's stock kicbase does not trust.
+$trustCertsScript = Join-Path $PSScriptRoot "Trust-MinikubeCertificates.ps1"
+$trustCertsEnv = ""
+$trustCertStoreSubjects = @()
+foreach ($line in (Get-Content (Join-Path $PSScriptRoot "deployment.env") -ErrorAction SilentlyContinue)) {
+    $t = $line.Trim()
+    if ($t -and -not $t.StartsWith("#")) {
+        if ($t.StartsWith("TRUST_CERTIFICATES=")) {
+            $trustCertsEnv = $t.Substring("TRUST_CERTIFICATES=".Length).Trim()
+        }
+        elseif ($t.StartsWith("TRUST_CERT_STORE_SUBJECTS=")) {
+            $v = $t.Substring("TRUST_CERT_STORE_SUBJECTS=".Length).Trim()
+            if ($v) { $trustCertStoreSubjects = [string[]]@($v -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        }
+    }
+}
+if (($trustCertsEnv -or $trustCertStoreSubjects.Count -gt 0) -and (Test-Path $trustCertsScript)) {
+    Write-Step "Installing Corporate CA Certificates"
+    $registryHosts = @()
+    if ($CustomImageRegistry) { $registryHosts += $CustomImageRegistry.Split(":")[0] }
+    $trustArgs = @{ Clusters = @("west", "east"); RegistryHosts = $registryHosts }
+    if ($trustCertStoreSubjects.Count -gt 0) {
+        $trustArgs["WindowsCertStoreSubjects"] = $trustCertStoreSubjects
+    }
+    & $trustCertsScript @trustArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Certificate trust installation reported errors — image pulls from $CustomImageRegistry may fail."
+    }
+    else {
+        Write-Success "Corporate CA certificates installed in both clusters"
+    }
+}
+elseif ($CustomImageRegistry) {
+    Write-Warning "CUSTOM_IMAGE_REGISTRY is set but no cert trust is configured in deployment.env."
+    Write-Warning "If $CustomImageRegistry uses a corporate CA, pods may get ImagePullBackOff."
+    Write-Warning "Add TRUST_CERT_STORE_SUBJECTS or TRUST_CERTIFICATES to deployment.env."
+}
+
 if ($DeploymentMode -eq "Basic") {
     Write-Step "Starting Host Infrastructure"
     Start-HostInfrastructure -Components $hostComponentSet -RepositoryRoot $scriptPath `
@@ -981,7 +1133,8 @@ else {
             foreach ($filePattern in $infraPatternByComponent[$componentName]) {
                 Get-ChildItem ".\infrastructure\$filePattern" | ForEach-Object {
                     Invoke-KubectlApplyFile -Context $clusterContext -FilePath $_.FullName `
-                        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+                        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+                        -InfraLocalImageMap $script:infraLocalImageMap
                 }
             }
         }
@@ -1051,13 +1204,15 @@ $imagePullSecretPatch = @{
     Write-Info "Deploying MongoDB ConfigMap..."
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-init-configMap.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -InfraLocalImageMap $script:infraLocalImageMap
     Write-Success "MongoDB ConfigMap deployed"
 
     Write-Info "Deploying MongoDB to west cluster (2 replicas)..."
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-west-statefulset.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -InfraLocalImageMap $script:infraLocalImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB west StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
@@ -1070,7 +1225,8 @@ $imagePullSecretPatch = @{
     Write-Info "Deploying MongoDB to east cluster (1 replica)..."
     Invoke-KubectlApplyFile -Context "east" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-east-statefulset.yaml") `
-        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap
+        -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -InfraLocalImageMap $script:infraLocalImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB east StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
     }
@@ -1392,12 +1548,12 @@ foreach ($clusterContext in @("west", "east")) {
         Write-Warning "Failed to set UseControlPlane/CacheProvider on api-server in $clusterContext"
     }
 
-    # evaluation-server: ControlPlane__UseControlPlane enables the heartbeat service.
+    # evaluation-server: ControlPlane__Enabled enables the heartbeat service.
     kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
         "MqProvider=Kafka" `
         "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
         "Kafka__Consumer__bootstrap.servers=$kafkaConsumerServers" `
-        "ControlPlane__UseControlPlane=true" | Out-Null
+        "ControlPlane__Enabled=true" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
     }
