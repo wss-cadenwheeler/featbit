@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 namespace Api.Application.ControlPlane;
 
 public class PodHealthChecker(
-    ICacheService cacheService,
+    [FromKeyedServices("compositeCache")] ICacheService cacheService,
     ILogger<PodHealthChecker> logger,
     IOptionsMonitor<PodHealthOptions> options) : BackgroundService
 {
