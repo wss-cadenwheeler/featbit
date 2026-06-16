@@ -43,7 +43,7 @@
  *   k6 run -e WEST_CLIENTS=2 -e EAST_CLIENTS=2 -e SERVER_SECRET=... -e RUN_DURATION=30s cp09-connections.js
  */
 import ws from 'k6/ws';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Gauge } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.4/index.js';
 
@@ -63,9 +63,18 @@ const HOST = __ENV.HOST || 'localhost';
 const EVENT_LOG_PREFIX = __ENV.EVENT_LOG_PREFIX || 'CP09_EVENT';
 const RUN_DURATION = __ENV.RUN_DURATION || '5m';
 
-const MAX_RECONNECT_ATTEMPTS = 3;
 const PING_INTERVAL_MS = 18 * 1000; // Mirrors benchmark/k6-scripts/data-sync.js.
 const RUN_DURATION_MS = parseDurationMs(RUN_DURATION);
+
+// Exponential reconnect backoff (ms): 250, 500, 1000, 2000, 4000, 5000 then cap.
+// Total worst-case wait before giving up within a 30s nginx fail_timeout window
+// is ~12s; with our tuned 2s fail_timeout we expect the second retry to succeed.
+const RECONNECT_BACKOFF_MS = [250, 500, 1000, 2000, 4000, 5000];
+
+function reconnectBackoffMs(attempt) {
+  const idx = Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1);
+  return RECONNECT_BACKOFF_MS[Math.max(0, idx)];
+}
 
 if (SDK_TYPE !== 'server' && SDK_TYPE !== 'client') {
   throw new Error(`SDK_TYPE must be "server" or "client"; got "${SDK_TYPE}"`);
@@ -100,6 +109,11 @@ const opensCounter = new Counter('cp09_opens');
 const closesCounter = new Counter('cp09_closes');
 const reconnectsCounter = new Counter('cp09_reconnects');
 const openFailuresCounter = new Counter('cp09_open_failures');
+// Errors raised on an established socket (counted in addition to opens/closes).
+// Distinguishes "upgrade succeeded then nginx tore us down" (errorsCounter > 0
+// AND closesCounter > 0) from "couldn't even connect" (openFailuresCounter > 0
+// alone). The migration assertion in scenarios/cp09.py uses both fields.
+const errorsCounter = new Counter('cp09_errors');
 const messagesCounter = new Counter('cp09_data_sync_pushes');
 const activeConnections = new Gauge('cp09_active_connections');
 
@@ -121,7 +135,7 @@ export default function () {
   const cluster = USE_LOAD_BALANCER ? 'lb' : (vu <= WEST_CLIENTS ? 'west' : 'east');
   const runStartedAt = Date.now();
   let activeForVu = 0;
-  let reconnectAttempts = 0;
+  let attempt = 0;
 
   function remainingRunMs() {
     return Math.max(0, RUN_DURATION_MS - (Date.now() - runStartedAt));
@@ -140,13 +154,71 @@ export default function () {
     emitEvent(vu, cluster, event, code, details, extra);
   }
 
+  // Outer reconnect loop. Each `connect(attempt)` call blocks until the
+  // socket establishes, runs until the underlying connection closes or
+  // errors, then returns. We loop until RUN_DURATION elapses so a VU whose
+  // backend pod dies will reconnect via the LB indefinitely (this is what
+  // proves cp09's migration assertion). Backoff is exponential-capped so we
+  // do not slam nginx during its 2s fail_timeout window.
+  while (withinRunDuration()) {
+    connect(attempt);
+    if (!withinRunDuration()) {
+      break;
+    }
+    attempt += 1;
+    const backoff = reconnectBackoffMs(attempt);
+    emit('reconnect-backoff', null, `attempt=${attempt} backoff_ms=${backoff}`);
+    sleep(backoff / 1000);
+  }
+
   function connect(reconnectAttempt) {
     const url = buildStreamingUrl(cluster);
     let opened = false;
+    let closeRecorded = false;
+    let errorRecorded = false;
+
+    function recordTerminal(source, code, details) {
+      // Both on('close') and on('error') can fire for the same teardown.
+      // We only book-keep once so the migration assertion's
+      // closes+reconnects counts are not double-counted.
+      if (closeRecorded || errorRecorded) {
+        return;
+      }
+      if (source === 'close') {
+        closeRecorded = true;
+        closesCounter.add(1);
+      } else {
+        errorRecorded = true;
+        errorsCounter.add(1);
+      }
+      if (opened) {
+        recordActiveConnectionDelta(-1);
+      }
+      emit(source, code, details);
+    }
 
     const response = ws.connect(url, {}, function (socket) {
       let pingInterval = null;
       let runTimeout = null;
+
+      // Centralised teardown: stop the ping pump and the RUN_DURATION timer.
+      // k6 v1.x exposes setInterval/clearInterval/setTimeout/clearTimeout as
+      // GLOBAL functions inside the ws callback (see benchmark/k6-scripts/
+      // data-sync.js for the canonical pattern). The legacy socket.setInterval
+      // and socket.clearInterval methods used by older revisions of this file
+      // throw TypeError on k6 v1.0.0+, which silently swallows every close
+      // event and is the root cause of cp09's `closes=0, reconnects=0`
+      // failure prior to this fix.
+      function clearSocketTimers() {
+        if (pingInterval !== null) {
+          try { clearInterval(pingInterval); } catch (_) {}
+          pingInterval = null;
+        }
+        if (runTimeout !== null) {
+          try { clearTimeout(runTimeout); } catch (_) {}
+          runTimeout = null;
+        }
+      }
 
       socket.on('open', function () {
         opened = true;
@@ -161,14 +233,14 @@ export default function () {
 
         socket.send(buildDataSyncHandshake(vu));
 
-        pingInterval = socket.setInterval(function () {
-          socket.send(PING_MESSAGE);
+        pingInterval = setInterval(function () {
+          try { socket.send(PING_MESSAGE); } catch (_) {}
         }, PING_INTERVAL_MS);
 
         const remaining = remainingRunMs();
         if (remaining > 0) {
-          runTimeout = socket.setTimeout(function () {
-            socket.close();
+          runTimeout = setTimeout(function () {
+            try { socket.close(); } catch (_) {}
           }, remaining);
         }
       });
@@ -178,7 +250,7 @@ export default function () {
         try {
           message = JSON.parse(normalizeSocketMessage(rawMessage));
         } catch (error) {
-          emit('error', null, `invalid json: ${formatError(error)}`);
+          emit('parse-error', null, `invalid json: ${formatError(error)}`);
           return;
         }
 
@@ -199,36 +271,23 @@ export default function () {
       });
 
       socket.on('close', function (closeEvent) {
-        if (pingInterval !== null) {
-          socket.clearInterval(pingInterval);
-        }
-        if (runTimeout !== null) {
-          socket.clearTimeout(runTimeout);
-        }
-
-        if (opened) {
-          recordActiveConnectionDelta(-1);
-        }
-
+        clearSocketTimers();
         const code = extractCloseCode(closeEvent);
         const wasUnexpected = code !== 1000;
-        closesCounter.add(1);
-        emit('close', code, `wasUnexpected=${wasUnexpected}`, { wasUnexpected });
-
-        if (wasUnexpected && withinRunDuration() && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          reconnectAttempts += 1;
-          connect(reconnectAttempts);
-          return;
-        }
-
-        if (wasUnexpected && withinRunDuration() && reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          emit('error', code, `max reconnect attempts reached (${MAX_RECONNECT_ATTEMPTS})`);
-        }
+        recordTerminal('close', code, `wasUnexpected=${wasUnexpected}`);
       });
 
       socket.on('error', function (error) {
-        openFailuresCounter.add(1);
-        emit('error', null, formatError(error));
+        // Errors on an established socket (e.g., the upstream pod died
+        // mid-stream and nginx tore the connection down). In k6 the
+        // on('close') handler fires AFTER on('error'); recordTerminal's
+        // idempotency guard ensures we count each teardown exactly once.
+        // Without this path the close handler may never fire on TCP-reset
+        // teardowns and the VU would never reconnect — this is precisely
+        // cp09's Failure 1 mechanic.
+        clearSocketTimers();
+        recordTerminal('error', null, formatError(error));
+        try { socket.close(); } catch (_) {}
       });
     });
 
@@ -238,11 +297,9 @@ export default function () {
 
     if (!response || response.status !== 101) {
       openFailuresCounter.add(1);
-      emit('error', response ? response.status : null, 'websocket upgrade failed');
+      emit('upgrade-failed', response ? response.status : null, 'websocket upgrade failed');
     }
   }
-
-  connect(0);
 }
 
 function buildStreamingUrl(cluster) {

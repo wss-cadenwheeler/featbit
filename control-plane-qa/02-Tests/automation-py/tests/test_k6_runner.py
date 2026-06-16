@@ -145,3 +145,46 @@ def test_k6_event_fields_are_populated_from_sample_json(tmp_path):
             "extra": "preserved",
         },
     )
+
+
+def test_read_events_parses_k6_v1_wrapped_log_lines(tmp_path):
+    """k6 v1.x wraps console.log as: time="..." level=info msg="CP09_EVENT {\\"ts\\":...}" source=console"""
+    log_path = tmp_path / "k6-output.log"
+    log_path.write_text(
+        'time="2026-06-16T14:49:05-04:00" level=info '
+        'msg="CP09_EVENT {\\"ts\\":1781635745700,\\"vu\\":17,\\"cluster\\":\\"lb\\",'
+        '\\"event\\":\\"open\\",\\"code\\":null,\\"details\\":\\"initial\\"}" source=console\n'
+        'time="2026-06-16T14:49:06-04:00" level=info '
+        'msg="CP09_EVENT {\\"ts\\":1781635746812,\\"vu\\":21,\\"cluster\\":\\"lb\\",'
+        '\\"event\\":\\"error\\",\\"code\\":1006,\\"details\\":\\"abnormal close\\"}" source=console\n',
+        encoding="utf-8",
+    )
+    runner = K6Runner(tmp_path / "script.js", {}, tmp_path)
+
+    events = runner.read_events()
+
+    assert [event.event for event in events] == ["open", "error"]
+    assert events[0].ts == 1_781_635_745.7
+    assert events[0].vu == 17
+    assert events[0].cluster == "lb"
+    assert events[0].details == "initial"
+    assert events[1].code == 1006
+    assert events[1].details == "abnormal close"
+
+
+def test_read_events_parses_bare_and_wrapped_lines_together(tmp_path):
+    """Ensures the parser is backward-compatible with the bare ``CP09_EVENT {...}`` form."""
+    log_path = tmp_path / "k6-output.log"
+    log_path.write_text(
+        'CP09_EVENT {"ts":1000000,"vu":1,"cluster":"west","event":"open"}\n'
+        'time="..." level=info msg="CP09_EVENT {\\"ts\\":2000000,\\"vu\\":2,\\"cluster\\":\\"east\\",'
+        '\\"event\\":\\"reconnect\\"}" source=console\n',
+        encoding="utf-8",
+    )
+    runner = K6Runner(tmp_path / "script.js", {}, tmp_path)
+
+    events = runner.read_events()
+
+    assert len(events) == 2
+    assert events[0].vu == 1 and events[0].cluster == "west" and events[0].event == "open"
+    assert events[1].vu == 2 and events[1].cluster == "east" and events[1].event == "reconnect"

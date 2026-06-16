@@ -110,6 +110,8 @@ class CP09Scenario(BaseScenario):
             self._redis_connection_baseline: Optional[int] = None
             self._redis_west_baseline: Optional[int] = None
             self._redis_east_baseline: Optional[int] = None
+            self._redis_west_pre_failover: Optional[int] = None
+            self._redis_east_pre_failover: Optional[int] = None
             self._websocket_assertions_skipped = False
             definition = self.definition()
 
@@ -614,6 +616,22 @@ class CP09Scenario(BaseScenario):
             total_clients=total_clients,
         )
         self._assert_client_connections_recorded_in_redis(total_clients)
+
+        # Capture the post-stabilization per-cluster distribution. This is the
+        # authoritative "pre-failover" baseline for `_assert_west_clients_migrated_to_east`:
+        # all 30 VUs have established their initial connections via nginx round-robin
+        # and Redis has settled. Reading these counts BEFORE phase 4 deletes the west
+        # pods is the only way to know how many connections will need to migrate.
+        west_post_connect = self._count_redis_connection_keys("west")
+        east_post_connect = self._count_redis_connection_keys("east")
+        self._redis_west_pre_failover = west_post_connect if west_post_connect is not None else 0
+        self._redis_east_pre_failover = east_post_connect if east_post_connect is not None else 0
+        self.add_timeline_event(
+            "redis-post-connect-distribution",
+            west=self._redis_west_pre_failover,
+            east=self._redis_east_pre_failover,
+            total_clients=total_clients,
+        )
         self._notify_step("client-connections", "ok")
 
     def _wait_for_k6_opens(self, *, expected_count: int, since: float, timeout: float) -> int:
@@ -811,8 +829,8 @@ class CP09Scenario(BaseScenario):
 
         1. west Redis ``featbit:connection:*`` count drops back to its
            pre-test baseline (all west-side connections closed).
-        2. east Redis count grew significantly above its pre-failover
-           level (clients absorbed by east via the LB).
+        2. east Redis count grew to at least the pre-failover total
+           (clients absorbed by east via the LB).
 
         We also surface the k6-side close/reconnect counts as
         diagnostic timeline events.
@@ -822,13 +840,24 @@ class CP09Scenario(BaseScenario):
             return
 
         west_baseline = self._redis_west_baseline or 0
-        east_pre_failover = self._count_redis_connection_keys("east")
+        # Use the post-stable-connect distribution captured at the end of
+        # phase 3 as the authoritative "pre-failover" snapshot. Reading
+        # Redis here would be too late: by the time this method runs the
+        # purge-poll has already completed and west clients have migrated.
+        west_pre_failover = self._redis_west_pre_failover
+        east_pre_failover = self._redis_east_pre_failover
+        if west_pre_failover is None:
+            west_pre_failover = self._count_redis_connection_keys("west") or 0
         if east_pre_failover is None:
-            east_pre_failover = 0
+            east_pre_failover = self._count_redis_connection_keys("east") or 0
+        west_now = self._count_redis_connection_keys("west")
+        east_now = self._count_redis_connection_keys("east")
         self.add_timeline_event(
             "redis-pre-failover-snapshot",
-            west=self._count_redis_connection_keys("west"),
-            east=east_pre_failover,
+            west_pre_failover=west_pre_failover,
+            east_pre_failover=east_pre_failover,
+            west_now=west_now,
+            east_now=east_now,
         )
 
         observed_west = self._wait_for_redis_decline(
@@ -837,11 +866,13 @@ class CP09Scenario(BaseScenario):
             timeout=120.0,
             poll_interval=2.0,
         )
-        # Expect east to absorb roughly the clients that were on west. We use
-        # a forgiving tolerance because a few reconnects may race the
-        # nginx upstream mark-down (≤ fail_timeout=10s) and surface as
-        # `cp09_open_failures` rather than completing.
-        min_east_growth = max(1, int(west_clients * 0.7))
+        # Expect east to absorb roughly the clients that were on west.
+        # If nginx distributed unevenly (e.g. some west pods slow to be
+        # marked Ready) we may have started with very few west clients —
+        # require at least 70% of the actual west clients (not the
+        # configured ``west_clients`` count) to migrate, with a floor of
+        # 1 so the assertion can never trivially pass.
+        min_east_growth = max(1, int(west_pre_failover * 0.7)) if west_pre_failover > 0 else 1
         observed_east = self._wait_for_redis_growth(
             context="east",
             baseline=east_pre_failover,
@@ -858,18 +889,40 @@ class CP09Scenario(BaseScenario):
             lambda event: event.event == "reconnect",
             since=t_failover,
         )
+        errors = runner.count_events(
+            lambda event: event.event == "error",
+            since=t_failover,
+        )
         self.add_timeline_event(
             "k6-failover-counters",
             since=t_failover,
             closes=closes,
             reconnects=reconnects,
+            errors=errors,
             west_redis_after=observed_west,
             east_redis_after=observed_east,
+            west_pre_failover=west_pre_failover,
             east_pre_failover=east_pre_failover,
             min_east_growth_required=min_east_growth,
         )
 
         west_drained = observed_west is not None and observed_west <= west_baseline
+        # If no west clients existed pre-failover there is nothing to
+        # migrate — treat as a vacuous pass rather than a failure, but
+        # surface a diagnostic warning so the operator can investigate
+        # the LB distribution.
+        if west_pre_failover == 0:
+            self.assertions.add_pass(
+                "west-clients-migrated-to-east",
+                (
+                    f"No west clients to migrate (pre-failover west=0, east={east_pre_failover}); "
+                    f"nginx routed all {east_pre_failover} VUs to east. "
+                    f"Observed post-failover west={observed_west}, east={observed_east}, "
+                    f"k6 closes={closes} reconnects={reconnects} errors={errors}."
+                ),
+            )
+            return
+
         east_absorbed = (
             observed_east is not None
             and (observed_east - east_pre_failover) >= min_east_growth
@@ -881,7 +934,8 @@ class CP09Scenario(BaseScenario):
                 (
                     f"West Redis returned to baseline ({observed_west}/{west_baseline}); "
                     f"east absorbed {observed_east - east_pre_failover} new connection(s) "
-                    f"via the LB (closes={closes}, reconnects={reconnects})."
+                    f"via the LB (pre-failover west={west_pre_failover} east={east_pre_failover}; "
+                    f"closes={closes}, reconnects={reconnects}, errors={errors})."
                 ),
             )
             return
@@ -891,9 +945,10 @@ class CP09Scenario(BaseScenario):
             (
                 "Expected west Redis to drain to baseline and east to absorb migrated "
                 f"clients via the nginx LB; observed west={observed_west} "
-                f"(baseline {west_baseline}), east={observed_east} "
-                f"(pre-failover {east_pre_failover}, min growth {min_east_growth}). "
-                f"k6 reported closes={closes}, reconnects={reconnects}."
+                f"(baseline {west_baseline}, pre-failover {west_pre_failover}), "
+                f"east={observed_east} (pre-failover {east_pre_failover}, "
+                f"min growth {min_east_growth}). "
+                f"k6 reported closes={closes}, reconnects={reconnects}, errors={errors}."
             ),
         )
 

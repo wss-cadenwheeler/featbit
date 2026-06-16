@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -272,16 +273,86 @@ class K6Runner:
         if prefix_index < 0:
             return None
 
+        # k6 v1.x wraps console.log output as: time="..." level=info msg="CP09_EVENT {\"ts\":...}" source=console
+        # The JSON inside msg="..." is backslash-escaped. Older k6 (and direct stdout) writes the
+        # JSON unescaped. Try the unescaped form first, then fall back to extracting and unescaping
+        # the msg="..." content.
         json_start = line.find("{", prefix_index + len(self.event_prefix))
-        if json_start < 0:
-            return None
+        if json_start >= 0:
+            try:
+                raw_event, _ = json.JSONDecoder().raw_decode(line[json_start:])
+                if isinstance(raw_event, dict):
+                    return raw_event
+            except json.JSONDecodeError:
+                pass
 
+        # Fallback: parse the k6 v1.x wrapped form. Extract the JSON object embedded in msg="...".
+        # We look for `{` (possibly preceded by `\`) after the event prefix and walk until the
+        # matching `}` while honoring backslash-escaped quotes (treating \" as a string boundary).
+        wrapped = self._extract_wrapped_json(line, prefix_index + len(self.event_prefix))
+        if wrapped is None:
+            return None
         try:
-            raw_event, _ = json.JSONDecoder().raw_decode(line[json_start:])
+            raw_event = json.loads(wrapped)
         except json.JSONDecodeError:
             return None
-
         return raw_event if isinstance(raw_event, dict) else None
+
+    @staticmethod
+    def _extract_wrapped_json(line: str, start: int) -> Optional[str]:
+        """Extract a JSON object embedded in a k6 v1.x ``msg="..."`` log line.
+
+        The on-disk representation escapes every ``"`` inside the message as ``\\"``.
+        We unescape ``\\"`` → ``"`` and ``\\\\`` → ``\\`` and return the JSON substring
+        from the first ``{`` through the matching ``}``.
+        """
+
+        idx = start
+        n = len(line)
+        # Skip whitespace/backslashes between prefix and first `{`.
+        while idx < n and line[idx] not in "{":
+            idx += 1
+        if idx >= n:
+            return None
+
+        # Walk the wrapped content, tracking string state. Inside the k6 log line every literal
+        # quote that belongs to the embedded JSON appears as the two characters \ and ".
+        depth = 0
+        in_string = False
+        buf: list[str] = []
+        i = idx
+        while i < n:
+            ch = line[i]
+            if ch == "\\" and i + 1 < n:
+                nxt = line[i + 1]
+                if nxt == '"':
+                    buf.append('"')
+                    in_string = not in_string
+                    i += 2
+                    continue
+                if nxt == "\\":
+                    buf.append("\\")
+                    i += 2
+                    continue
+                # Pass through other escape sequences (e.g. \n, \t) verbatim — json.loads handles them.
+                buf.append(ch)
+                buf.append(nxt)
+                i += 2
+                continue
+            if ch == '"' and not in_string:
+                # A bare un-escaped quote terminates the k6 msg="..." wrapper.
+                break
+            buf.append(ch)
+            if not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return "".join(buf)
+            i += 1
+
+        return None
 
     def _to_event(self, raw_event: dict) -> Optional[K6Event]:
         try:

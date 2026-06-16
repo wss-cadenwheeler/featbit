@@ -5,7 +5,7 @@ metadata:
     app: evaluation-server
   name: evaluation-server
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: evaluation-server
@@ -15,6 +15,7 @@ spec:
       labels:
         app: evaluation-server
     spec:
+      terminationGracePeriodSeconds: 10
       containers:
         - env:
             - name: IS_PRO
@@ -41,6 +42,12 @@ spec:
           name: evaluation-server
           ports:
             - containerPort: 5100
+          readinessProbe:
+            tcpSocket:
+              port: 5100
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
           resources: 
             requests:
               memory: 512Mi
