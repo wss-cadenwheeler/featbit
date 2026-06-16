@@ -45,6 +45,13 @@
     relative to the repository root.  The source directory structure is mirrored
     beneath this path so files are easy to locate and apply directly with kubectl.
 
+.PARAMETER PullSecretName
+    Name of the image pull secret referenced in generated YAML files.  Defaults
+    to "registry-credentials" (the baked-in name in every committed manifest).
+    Set this when CUSTOM_REGISTRY_SECRET_NAME is overridden in deployment.env
+    so the imagePullSecrets entries in generated YAML match the actual secret
+    that Deploy-FeatBitClusters.ps1 created in each namespace.
+
 .PARAMETER Apply
     One or more kubectl context names to apply the generated manifests to after
     generating them.  Example: -Apply west,east
@@ -80,6 +87,11 @@ param(
     # Where to write the generated YAML files.  Defaults to kubernetes/.generated/
     # relative to the repository root.  Source-controlled files are never modified.
     [string]$OutputDirectory = "",
+
+    # Rewrites the `name: registry-credentials` entries inside imagePullSecrets
+    # blocks to the supplied secret name. Leave at the default to keep manifests
+    # using the committed default secret name.
+    [string]$PullSecretName = "registry-credentials",
 
     # Kubectl contexts to apply the generated manifests to after generating them.
     # E.g. -Apply west,east
@@ -162,6 +174,13 @@ foreach ($file in $yamlFiles) {
             # Only match if not already prefixed by a registry hostname.
             $modified = $modified -replace "(\bimage:\s+)${escapedDefault}\b", "`${1}${CustomImageRegistry}/${registryPath}"
         }
+    }
+
+    # Rewrite the imagePullSecrets reference to use the supplied secret name when
+    # it differs from the committed default. Skipped in -Reset mode so the
+    # generated copies restore the manifest defaults exactly.
+    if (-not $Reset -and $PullSecretName -and $PullSecretName -ne "registry-credentials") {
+        $modified = $modified -replace "(\bname:\s+)registry-credentials\b", "`${1}${PullSecretName}"
     }
 
     if ($modified -ne $content) {

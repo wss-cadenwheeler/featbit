@@ -18,9 +18,11 @@
       2. system-prereqs     — install git via apt                     [root]
       3. dev-tools          — Docker Engine, Minikube, kubectl, k9s (optional)
       4. repo-setup         — clone repo, checkout control-plane, configure deployment.env
+      4b. collect-creds     — prompt for registry credentials early (so you can walk away)
       5. build-images       — build FeatBit images and push to localhost:5000  (~10-15 min)
       6. proxy-first-run    — first run of Setup-FeatBitProxy.ps1     [root]
       7. deploy-clusters    — Deploy-FeatBitClusters.ps1 Advanced + MongoDB   (~20 min)
+      7b. verify-pull-backoff — assert no ImagePullBackOff in west/east clusters
       8. proxy-second-run   — second run of Setup-FeatBitProxy.ps1    [root]
       9. port-forwards      — instructions + launch Start-PortForwards.ps1
      10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
@@ -62,6 +64,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Holds registry credentials collected by Invoke-CollectCreds for the lifetime
+# of this process. Initialized so strict-mode code that references it before
+# the collect-creds phase runs (e.g. when collect-creds is skipped on resume)
+# doesn't error with "variable cannot be retrieved because it has not been set".
+$script:CollectedRegistryCred = $null
 
 # This wizard is Linux-only. The sibling Quickstart-HyperV.ps1 covers Windows.
 if (-not $IsLinux) {
@@ -169,6 +177,34 @@ function Wait-UserChoice([string]$Prompt, [string[]]$Choices) {
     return $r
 }
 
+function Wait-DockerReady {
+    param(
+        [int]$TimeoutSeconds = 180,
+        [int]$IntervalSeconds = 3
+    )
+    Write-Host ""
+    Write-Host "  ► Waiting for Docker daemon to become ready (up to $TimeoutSeconds s)..." -ForegroundColor Yellow
+
+    & docker info --format '{{.ServerVersion}}' *>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Docker daemon is already running." -ForegroundColor Green
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $attempt  = 0
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        & docker info --format '{{.ServerVersion}}' *>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Docker daemon is ready (after $attempt poll$(if ($attempt -eq 1) { '' } else { 's' }))." -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+    throw "Docker daemon did not become ready within $TimeoutSeconds seconds. Start the Docker daemon (e.g. 'sudo service docker start' or enable systemd in WSL) and re-run this Quickstart."
+}
+
 # ── Phase implementations ─────────────────────────────────────────────────────
 
 function Invoke-EnsurePwsh {
@@ -236,7 +272,7 @@ function Invoke-DevTools([PSCustomObject]$State) {
     Complete-Phase $State "dev-tools"
     Write-Success "Developer tools ready"
     Write-Warn "Ensure the Docker daemon is running before continuing (e.g. 'sudo service docker start' or enable systemd in WSL)."
-    Wait-UserConfirm "Press Enter once 'docker ps' succeeds..."
+    Wait-DockerReady
 }
 
 function Invoke-RepoSetup([PSCustomObject]$State) {
@@ -312,6 +348,47 @@ function Invoke-RepoSetup([PSCustomObject]$State) {
 
     Complete-Phase $State "repo-setup"
     Write-Success "Repository configured"
+}
+
+function Invoke-CollectCreds([PSCustomObject]$State) {
+    Write-Step "Phase 4b — Collect Registry Credentials"
+    Write-Info "Asking for any required credentials NOW so the long deploy phase can run unattended."
+    Write-Info ""
+
+    $importScript = Join-Path $script:SiblingDir "Import-DeploymentEnv.ps1"
+    if (-not (Test-Path $importScript)) {
+        Write-Warn "Import-DeploymentEnv.ps1 not found at $importScript — skipping credential pre-flight."
+        return
+    }
+
+    try { $envParams = & $importScript } catch {
+        Write-Warn "Import-DeploymentEnv.ps1 failed: $_"
+        return
+    }
+
+    $registry = $envParams['CustomImageRegistry']
+    $insecure = $envParams['InsecureCustomRegistry']
+    $cred     = $envParams['CustomRegistryCredential']
+
+    if (-not $registry) {
+        Write-Info "No CUSTOM_IMAGE_REGISTRY configured — credential prompt skipped."
+    }
+    elseif ($insecure) {
+        Write-Info "INSECURE_CUSTOM_REGISTRY=true — TLS bypass enabled, credential prompt skipped."
+    }
+    elseif ($cred) {
+        Write-Info "Credentials present in deployment.env — no prompt needed."
+    }
+    else {
+        Write-Info "Prompting for '$registry' credentials. Press Enter at both prompts to skip if the registry is anonymous."
+        $script:CollectedRegistryCred = Get-Credential -Message "Registry credentials for $registry (Enter to skip)"
+        if ($script:CollectedRegistryCred -and -not [string]::IsNullOrWhiteSpace($script:CollectedRegistryCred.UserName)) {
+            Write-Success "Captured credentials for $($script:CollectedRegistryCred.UserName)@$registry — you can walk away now."
+        } else {
+            $script:CollectedRegistryCred = $null
+            Write-Warn "No credentials provided. Pods may fail with 'unauthorized' if '$registry' requires login."
+        }
+    }
 }
 
 function Invoke-BuildImages([PSCustomObject]$State) {
@@ -453,12 +530,33 @@ function Invoke-DeployClusters([PSCustomObject]$State) {
     if (-not (Test-Path $deployScript)) { throw "Deploy-FeatBitClusters.ps1 not found at $deployScript" }
 
     if ($PSCmdlet.ShouldProcess("west + east clusters", "Deploy FeatBit per deployment.env")) {
-        & $deployScript -RecreateClusters
+        $deployArgs = @{ RecreateClusters = $true }
+        if ($script:CollectedRegistryCred) { $deployArgs['CustomRegistryCredential'] = $script:CollectedRegistryCred }
+        & $deployScript @deployArgs
         if ($LASTEXITCODE -ne 0) { throw "Deploy-FeatBitClusters.ps1 failed with exit code $LASTEXITCODE" }
     }
 
     Complete-Phase $State "deploy-clusters"
     Write-Success "Clusters deployed successfully"
+}
+
+function Invoke-VerifyPullBackoff([PSCustomObject]$State) {
+    Write-Step "Phase 7b — Verify cluster health (no ImagePullBackOff)"
+    Write-Info "Polls both clusters for pods stuck in ImagePullBackOff or ErrImagePull."
+    Write-Info "This is a belt-and-suspenders check: the deploy script already runs this"
+    Write-Info "assertion, but re-running here catches infra drift after a resume."
+    Write-Info ""
+
+    $assertScript = Join-Path $script:SiblingDir "Assert-NoImagePullBackoff.ps1"
+    if (-not (Test-Path $assertScript)) { throw "Assert-NoImagePullBackoff.ps1 not found at $assertScript" }
+
+    & $assertScript -Contexts @("west","east") -Namespaces @("featbit") -TimeoutSeconds 120 -IntervalSeconds 5
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pull-backoff verification failed. See Assert-NoImagePullBackoff output above. Re-run this Quickstart after resolving the registry trust / credentials issue."
+    }
+
+    Complete-Phase $State "verify-pull-backoff"
+    Write-Success "All pods healthy in both clusters — no ImagePullBackOff detected."
 }
 
 function Invoke-ProxySecondRun([PSCustomObject]$State) {
@@ -651,9 +749,11 @@ $allPhases = @(
     @{ Key = "system-prereqs";    Fn = { Invoke-SystemPrereqs $state } }
     @{ Key = "dev-tools";         Fn = { Invoke-DevTools $state } }
     @{ Key = "repo-setup";        Fn = { Invoke-RepoSetup $state } }
+    @{ Key = "collect-creds";     Fn = { Invoke-CollectCreds $state } }
     @{ Key = "build-images";      Fn = { Invoke-BuildImages $state } }
     @{ Key = "proxy-first-run";   Fn = { Invoke-ProxyFirstRun $state } }
-    @{ Key = "deploy-clusters";   Fn = { Invoke-DeployClusters $state } }
+    @{ Key = "deploy-clusters";    Fn = { Invoke-DeployClusters $state } }
+    @{ Key = "verify-pull-backoff"; Fn = { Invoke-VerifyPullBackoff $state } }
     @{ Key = "proxy-second-run";  Fn = { Invoke-ProxySecondRun $state } }
     @{ Key = "port-forwards";     Fn = { Invoke-PortForwards $state } }
     @{ Key = "mongo-replica-set"; Fn = { Invoke-MongoReplicaSet $state } }
@@ -661,7 +761,9 @@ $allPhases = @(
 
 $allComplete = $true
 foreach ($phase in $allPhases) {
-    if (Test-PhaseComplete $state $phase.Key) {
+    # 'collect-creds' holds in-memory credentials only and must always re-run;
+    # all other phases honor the saved completion state for resumability.
+    if ($phase.Key -ne "collect-creds" -and (Test-PhaseComplete $state $phase.Key)) {
         Write-Host "  ✓ $($phase.Key) — already complete" -ForegroundColor DarkGreen
         continue
     }
@@ -674,7 +776,10 @@ foreach ($phase in $allPhases) {
     $allComplete = $false
     try {
         & $phase.Fn
-        if ($phase.Key -ne "ensure-pwsh") { Complete-Phase $state $phase.Key }
+        # 'collect-creds' is intentionally never persisted to state — credentials
+        # only exist for the lifetime of this process, so the phase must re-run
+        # every invocation.
+        if ($phase.Key -notin @("ensure-pwsh", "collect-creds")) { Complete-Phase $state $phase.Key }
     } catch {
         Write-Fail "Phase '$($phase.Key)' failed: $_"
         Write-Info ""

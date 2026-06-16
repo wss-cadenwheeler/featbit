@@ -5,6 +5,8 @@ metadata:
     app: clickhouse-server
   name: clickhouse-server
 spec:
+  imagePullSecrets:
+    - name: registry-credentials
   containers:
     - image: clickhouse/clickhouse-server:24.8
       name: clickhouse-server

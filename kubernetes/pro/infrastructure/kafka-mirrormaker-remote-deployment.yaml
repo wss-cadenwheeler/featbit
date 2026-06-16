@@ -30,6 +30,8 @@ spec:
       securityContext:
         runAsUser: 1001
         runAsGroup: 1001
+      imagePullSecrets:
+        - name: registry-credentials
       containers:
         - name: mirrormaker
           image: bitnamilegacy/kafka:3.8

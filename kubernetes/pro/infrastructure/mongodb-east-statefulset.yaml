@@ -55,6 +55,8 @@ spec:
         app: mongodb
         region: east
     spec:
+      imagePullSecrets:
+        - name: registry-credentials
       containers:
       - name: mongodb
         image: mongo:7.0

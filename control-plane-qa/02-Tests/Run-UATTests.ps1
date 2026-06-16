@@ -10,6 +10,7 @@
     The full pipeline comprises eight steps:
 
       1. Validate prerequisites (docker, kubectl, k6, python, minikube, registry)
+      1b. Pre-flight image pull health check (no ImagePullBackOff pods)
       2. Provision FeatBit resources (projects, environments, flags)
       3. Build the test app Docker image and push to the local registry
       4. Deploy test app instances and scale the evaluation server
@@ -64,6 +65,12 @@
 .PARAMETER SkipTeardown
     Skip teardown (step 8) even in Full mode.
 
+.PARAMETER SkipPullBackoffCheck
+    Bypass the pre-flight ImagePullBackOff check (step 1b). Use when you know
+    infrastructure is intentionally being torn down or replaced and pull failures
+    are expected. Has no effect in DeployOnly, TestOnly, or TeardownOnly modes
+    (those modes never run the check).
+
 .PARAMETER Verbose
     Emit additional diagnostic output.
 
@@ -112,6 +119,7 @@ param(
     [string]$ImageTag = "latest",
     [switch]$SkipBuild,
     [switch]$SkipTeardown,
+    [switch]$SkipPullBackoffCheck,
     [switch]$Verbose
 )
 
@@ -239,6 +247,29 @@ function Invoke-ValidatePrerequisites {
     }
 
     Write-Pass "All prerequisites satisfied"
+}
+
+function Invoke-AssertNoImagePullBackoff {
+    Write-Step "1b" "Pre-flight Image Pull Health Check"
+
+    if ($SkipPullBackoffCheck) {
+        Write-Skip "Pre-flight ImagePullBackOff check skipped (-SkipPullBackoffCheck)"
+        return
+    }
+
+    $assertScript = Join-Path (Split-Path -Parent $scriptRoot) "01-Infrastructure\Assert-NoImagePullBackoff.ps1"
+
+    if (-not (Test-Path $assertScript)) {
+        throw "Assert-NoImagePullBackoff.ps1 not found at expected path: $assertScript"
+    }
+
+    & $assertScript -Contexts @($ClusterContext) -Namespaces @($Namespace) -TimeoutSeconds 60 -IntervalSeconds 5
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pre-flight check failed: ImagePullBackOff pods detected in '$ClusterContext/$Namespace'. Resolve the pull issues (see Assert-NoImagePullBackoff output above) then re-run the UAT."
+    }
+
+    Write-Pass "Pre-flight: zero ImagePullBackOff pods in '$ClusterContext/$Namespace'"
 }
 
 function Invoke-Provision {
@@ -673,6 +704,7 @@ try {
     switch ($Mode) {
         "Full" {
             Invoke-ValidatePrerequisites
+            Invoke-AssertNoImagePullBackoff
             Invoke-Provision
             Invoke-BuildImage
             Invoke-Deploy
@@ -687,6 +719,7 @@ try {
 
         "ProvisionOnly" {
             Invoke-ValidatePrerequisites
+            Invoke-AssertNoImagePullBackoff
             Invoke-Provision
             $overallSuccess = $true
         }

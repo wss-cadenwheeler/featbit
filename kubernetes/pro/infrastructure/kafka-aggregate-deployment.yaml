@@ -57,6 +57,8 @@ spec:
           volumeMounts:
             - name: kafka-aggregate
               mountPath: /bitnami/kafka
+      imagePullSecrets:
+        - name: registry-credentials
       containers:
         - name: kafka-aggregate
           image: bitnamilegacy/kafka:3.8
