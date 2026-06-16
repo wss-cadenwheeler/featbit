@@ -9,10 +9,14 @@
     on subsequent runs, so you can re-run after a reboot or interruption and
     pick up where you left off.
 
+    Use -InstallK6 to install Grafana k6 as an optional prerequisite.
+    It is optional; required for full coverage of cp09-pod-heartbeats scenario.
+
     Phases (in order):
       1. ensure-pwsh        — verify PowerShell 7+ is active
       2. system-prereqs     — enable Hyper-V, install WSL, install Git  [admin]
       3. dev-tools          — Docker Desktop, Minikube, kubectl, K9s (optional)
+      3b. install-k6        — optional Grafana k6 install for cp09-pod-heartbeats
       4. repo-setup         — clone repo, checkout control-plane, configure deployment.env
       4b. collect-creds     — prompt for registry credentials early (so you can walk away)
       5. build-images       — build FeatBit images and push to localhost:5000  (~10-15 min)
@@ -22,6 +26,10 @@
       8. proxy-second-run   — second run of Setup-FeatBitProxy.ps1            [admin]
       9. port-forwards      — instructions + launch Start-PortForwards.ps1
      10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
+
+.PARAMETER InstallK6
+    Installs Grafana k6 as an optional prerequisite; required for full
+    coverage of cp09-pod-heartbeats scenario.
 
 .PARAMETER Reset
     Clears the saved progress state and starts from the beginning.
@@ -40,6 +48,10 @@
     Run (or resume) the wizard.
 
 .EXAMPLE
+    .\Quickstart-HyperV.ps1 -InstallK6
+    Run (or resume) the wizard and install k6 for full cp09-pod-heartbeats coverage.
+
+.EXAMPLE
     .\Quickstart-HyperV.ps1 -Reset
     Wipe saved progress and start over.
 
@@ -49,6 +61,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
+    [switch]$InstallK6,
     [switch]$Reset,
     [switch]$SkipOptional,
     [switch]$SkipRepoSetup
@@ -118,6 +131,10 @@ function Complete-Phase([PSCustomObject]$State, [string]$Phase) {
     Save-State $State
 }
 
+$k6Helper = Join-Path $script:SiblingDir "Install-K6Prerequisite.ps1"
+if (-not (Test-Path $k6Helper)) { throw "Install-K6Prerequisite.ps1 not found at $k6Helper" }
+. $k6Helper
+
 # ── Elevation helpers ─────────────────────────────────────────────────────────
 
 function Test-Administrator {
@@ -132,6 +149,7 @@ function Request-Elevation {
         Write-Warn "This phase requires administrator privileges: $Reason"
         Write-Info "Re-launching as administrator..."
         $fwdArgs = [System.Collections.Generic.List[string]]@("-NoExit", "-File", "`"$PSCommandPath`"")
+        if ($InstallK6)    { $fwdArgs.Add("-InstallK6") }
         if ($Reset)         { $fwdArgs.Add("-Reset") }
         if ($SkipOptional)  { $fwdArgs.Add("-SkipOptional") }
         if ($SkipRepoSetup) { $fwdArgs.Add("-SkipRepoSetup") }
@@ -702,6 +720,7 @@ $allPhases = @(
     @{ Key = "ensure-pwsh";       Fn = { Invoke-EnsurePwsh } }
     @{ Key = "system-prereqs";    Fn = { Invoke-SystemPrereqs $state } }
     @{ Key = "dev-tools";         Fn = { Invoke-DevTools $state } }
+    @{ Key = "install-k6";        Fn = { Invoke-InstallK6 $state -HostPlatform Windows } }
     @{ Key = "repo-setup";        Fn = { Invoke-RepoSetup $state } }
     @{ Key = "collect-creds";     Fn = { Invoke-CollectCreds $state } }
     @{ Key = "build-images";      Fn = { Invoke-BuildImages $state } }
@@ -717,6 +736,11 @@ $allComplete = $true
 foreach ($phase in $allPhases) {
     # 'collect-creds' holds in-memory credentials only and must always re-run;
     # all other phases honor the saved completion state for resumability.
+    # Runtime skip — does not write to state, so the phase re-enables
+    # automatically on a future run that omits the flag.
+    if ($phase.Key -eq "install-k6" -and -not $InstallK6) {
+        continue
+    }
     if ($phase.Key -ne "collect-creds" -and (Test-PhaseComplete $state $phase.Key)) {
         Write-Host "  ✓ $($phase.Key) — already complete" -ForegroundColor DarkGreen
         continue
