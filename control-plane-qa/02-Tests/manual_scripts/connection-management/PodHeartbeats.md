@@ -1,4 +1,4 @@
-# CP-XX Pod Heart Beat Test
+# CP-09 Pod Heartbeats Test
 
  
 
@@ -8,7 +8,9 @@
  
 
 ## Description
-A brief overview of the test case objective and what feature it validates.
+Validates the `cp09-pod-heartbeats` lifecycle: evaluation-server pod heartbeats
+are recorded in Redis, real WebSocket clients stay connected through k6, and
+client connections migrate after a west pod failover.
 
  
 
@@ -18,13 +20,14 @@ A brief overview of the test case objective and what feature it validates.
 - [ ] East and West Clusters Running in Advanced mode with port forwards and host entries
 - [ ] `playground` Organization Exists
 - [ ] `control-plane-test` Project Exists
+- [ ] Optional k6 is installed for full WebSocket coverage (`Quickstart-*.ps1 -InstallK6` or `benchmark/install-k6.md`)
 
  
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
-2. **Action:** Connect 10 clients to featbit.west.local
-3. **Action:** Connect 20 clients to featbit.east.local
+2. **Action:** Start real WebSocket clients with `benchmark\k6-scripts\cp09\cp09-connections.js` (`WEST_CLIENTS=10`, `EAST_CLIENTS=20`, valid `SERVER_SECRET`)
+3. **Action:** Keep the k6 run active while the pod heartbeat and failover checks execute
 4. **Action:** Verify that the clients created in steps 2 and 3 are showing up in redis
 5. **Action:** Verify that the pod heartbeat is being recorded in redis
 6. **Action:** Take down the west pod
@@ -34,7 +37,7 @@ A brief overview of the test case objective and what feature it validates.
 10. **Action:** Verify that the clients that were connected to the west pod are now connected to the east pod
 11. **Note:** The connections to the east pod will have a different heartbeat and connection id
 12. **Action** Bring the west pod back up
-13. **Action** Create 10 clients that connect to the new instance of the west pod
+13. **Action** Confirm k6 can open 10 west clients against the new instance of the west pod
 
  
 
@@ -42,6 +45,7 @@ A brief overview of the test case objective and what feature it validates.
 - When the pods are up we see the heart beat for the pod updated. The timestamp should be changed each time a new heartbeat comes in
 - When a pod is taken down all of the connections should be purged and move over to the other pod
 - When a pod comes back up we should see the heartbeat restored with a new pod id
+- k6 emits `CP09_EVENT` lines for WebSocket opens, closes, reconnects, messages, and errors during the run
 
  
 
@@ -50,4 +54,4 @@ A brief overview of the test case objective and what feature it validates.
  
 
 ---
-**Notes/Comments:**
+**Notes/Comments:** WebSocket assertions are gated on k6 being installed; install via `Quickstart-*.ps1 -InstallK6` or `benchmark/install-k6.md`.

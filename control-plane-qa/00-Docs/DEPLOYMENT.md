@@ -77,6 +77,22 @@ Run `Install-Prerequisites.ps1` to automatically check for and install any missi
 .\Install-Prerequisites.ps1
 ```
 
+#### Optional: k6 for CP-09 WebSocket coverage
+
+Grafana k6 is optional. It is required only for full coverage of the
+`cp09-pod-heartbeats` scenario, where automation opens real evaluation-server
+WebSocket clients and asserts connection migration after pod failover.
+
+Auto-install k6 with `pwsh -File ...\Quickstart-*.ps1 -InstallK6`; choose
+the matching Quickstart wizard:
+
+- `pwsh -File .\01-Infrastructure\Quickstart-WSL.ps1 -InstallK6` — Windows WSL2 wizard
+- `pwsh -File .\01-Infrastructure\windows-wsl\Quickstart-WSL.ps1 -InstallK6` — in-WSL2 Linux wizard
+- `pwsh -File .\01-Infrastructure\windows-hyperv\Quickstart-HyperV.ps1 -InstallK6` — Windows Hyper-V wizard
+- `pwsh -File .\01-Infrastructure\ubuntu\Quickstart-Ubuntu.ps1 -InstallK6` — native Ubuntu wizard
+
+For manual installation, see [`benchmark\install-k6.md`](../../benchmark/install-k6.md).
+
 ---
 
 ## Architecture
@@ -471,12 +487,13 @@ As of the registry-trust permanent fix, `Deploy-FeatBitClusters.ps1` automatical
 
 **Purpose:** Validates WebSocket connectivity to the evaluation servers on both west and east clusters (via port forwards).
 
-````powershell
+```powershell
 # Test with default server key
 .\extras\Test-EvalWebSocket.ps1
 
 # Test with a specific environment server SDK key
 .\extras\Test-EvalWebSocket.ps1 -ServerKey <your-sdk-key>
+```
 
 ### extras\Configure-FeatBitIngress.ps1
 
@@ -497,7 +514,7 @@ As of the registry-trust permanent fix, `Deploy-FeatBitClusters.ps1` automatical
 
 # Use existing nginx installation
 .\Setup-FeatBitProxy.ps1 -SkipNginxInstall -NginxPath "C:\custom\nginx"
-````
+```
 
 ## Image Management
 
