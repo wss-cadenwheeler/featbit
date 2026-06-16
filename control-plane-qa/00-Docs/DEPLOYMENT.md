@@ -14,6 +14,8 @@ The standard deployment workflow:
 4. **`Initialize-MongoDBReplicaSet.ps1`** — initialise the replica set (in-cluster MongoDB only)
 5. **`Setup-FeatBitProxy.ps1`** — optional nginx reverse proxy for DNS-based access
 
+> **Registry TLS trust:** As of the registry-trust permanent fix, `Deploy-FeatBitClusters.ps1` handles corporate registry TLS trust automatically when configured via `TRUST_CERTIFICATES` in `deployment.env`. No separate manual trust step is required during a normal deployment.
+
 ---
 
 ## Prerequisites
@@ -321,6 +323,7 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 - `-CustomImageRegistry` — Private registry hostname for infrastructure images
 - `-FeatBitImageRegistry` — Registry hosting FeatBit application images (defaults to `host.minikube.internal:5000`)
 - `-MinikubeBaseImage` — Full custom kicbase image reference, including registry/path/tag
+- `-InsecureCustomRegistry` — Bypass TLS verification for the `CUSTOM_IMAGE_REGISTRY` by passing `--insecure-registry` to `minikube start`. Default: `false`.
 
 All parameters can also be set in `deployment.env` (see `deployment.env.example`).
 
@@ -404,19 +407,64 @@ Keep the window open while using FeatBit. Port mappings are printed on startup.
 
 ### Trust-MinikubeCertificates.ps1
 
-**Purpose:** Downloads and installs corporate CA certificates into existing Minikube clusters at runtime. Useful when clusters were created from the stock kicbase (not a custom base image with certs pre-baked).
+As of the registry-trust permanent fix, `Deploy-FeatBitClusters.ps1` automatically invokes this script when both `CUSTOM_IMAGE_REGISTRY` and `TRUST_CERTIFICATES` are set in `deployment.env`. Manual invocation is supported for ad-hoc cert refreshes or for environments that haven't run the deploy script yet.
 
-Requires `TRUST_CERTIFICATES` to be set in `deployment.env`.
+**What the script does:** Downloads each PEM certificate listed in `TRUST_CERTIFICATES`, copies it into every target cluster's OS CA store (`/usr/local/share/ca-certificates/<name>.crt`), runs `update-ca-certificates`, then writes Docker daemon trust under `/etc/docker/certs.d/<registry-host>/ca.crt` and restarts the Docker daemon. After restarting, the script polls (up to 60 s) until the daemon is responsive to avoid race conditions with downstream `kubectl apply` operations.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-Clusters` | `west,east` | Minikube profile names to update |
+| `-RegistryHosts` | from `CUSTOM_IMAGE_REGISTRY` | Registry hostnames for which Docker daemon trust is written. Pass an explicit list to override; pass an empty array to suppress Docker trust entirely. |
+| `-DeploymentEnvFile` | auto-resolved | Full path to `deployment.env`. When omitted, the script searches the script directory then the repository root. |
+| `-DryRun` | `false` | Print all actions that would be taken without executing any remote commands. |
+
+**Examples:**
 
 ```powershell
-# Trust certs in default west and east clusters
+# Default: reads TRUST_CERTIFICATES and CUSTOM_IMAGE_REGISTRY from deployment.env
 .\Trust-MinikubeCertificates.ps1
 
-# Trust certs and configure Docker daemon for a registry
-.\Trust-MinikubeCertificates.ps1 -RegistryHosts myregistry.example.com
+# Override the registry host explicitly (ignores CUSTOM_IMAGE_REGISTRY in deployment.env)
+.\Trust-MinikubeCertificates.ps1 -RegistryHosts "myregistry.example.com"
 
-# Trust certs in specific clusters
-.\Trust-MinikubeCertificates.ps1 -Clusters @("dev", "test")
+# Preview all actions without making any changes
+.\Trust-MinikubeCertificates.ps1 -DryRun
+```
+
+### Assert-NoImagePullBackoff.ps1
+
+**Purpose:** Polls `kubectl` across the specified contexts and namespaces until all pods are free of image-pull failure states — or until the timeout is exceeded. Fails fast on any of the following waiting reasons: `ImagePullBackOff`, `ErrImagePull`, `Init:ImagePullBackOff`, `Init:ErrImagePull`, `RegistryUnavailable`, `ImageInspectError`. Pods in `Succeeded` / `Completed` phase are skipped.
+
+**When it runs automatically:**
+
+- At the end of `Deploy-FeatBitClusters.ps1`, after a 45-second stabilisation wait following the final FeatBit application rollout.
+- At the start of the UAT pipeline (`Run-UATTests.ps1`) before any scenario executes, to catch pull failures from a previous partial deploy.
+- After the deploy-clusters phase in the platform Quickstart wizards (Ubuntu and Windows).
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-Contexts` | `west,east` | kubectl context names to check |
+| `-Namespaces` | `featbit` | Kubernetes namespaces to inspect within each context |
+| `-TimeoutSeconds` | `90` | Total seconds to keep polling before declaring failure |
+| `-IntervalSeconds` | `5` | Seconds to sleep between successive poll iterations |
+| `-Quiet` | `false` | Suppress per-poll progress lines; print only the final pass/fail summary |
+
+**Exit codes:** `0` — all pods healthy. `1` — pull-backoff detected OR cluster unreachable.
+
+> **Important:** This script uses `exit 0` / `exit 1` and is intended to be invoked as a top-level orchestration step. Do **not** dot-source it — the `exit` calls will terminate your calling session.
+
+**Examples:**
+
+```powershell
+# Default: poll west and east, featbit namespace, 90-second timeout
+.\Assert-NoImagePullBackoff.ps1
+
+# Check only the west cluster with a custom timeout (e.g. after a targeted redeploy)
+.\Assert-NoImagePullBackoff.ps1 -Contexts @("west") -TimeoutSeconds 120
 ```
 
 ### extras\Test-EvalWebSocket.ps1
@@ -519,7 +567,9 @@ kubectl --context east logs <pod-name> -n featbit
 
 ### Image Pull Errors
 
-Verify images in local registry:
+For pods stuck in `ImagePullBackOff` due to a TLS certificate problem (kubelet reports `x509: certificate signed by unknown authority`), see [**Image Pull Errors — TLS Certificate Issues**](#image-pull-errors--tls-certificate-issues) below.
+
+For all other pull failures (image not found, wrong tag, authentication), verify images in the local registry:
 
 ```powershell
 Invoke-RestMethod http://localhost:5000/v2/_catalog
@@ -530,6 +580,44 @@ Test registry accessibility from Minikube:
 ```powershell
 minikube -p west ssh -- "curl -I http://host.minikube.internal:5000/v2/"
 minikube -p east ssh -- "curl -I http://host.minikube.internal:5000/v2/"
+```
+
+### Image Pull Errors — TLS Certificate Issues
+
+**Symptom:** Pods stuck in `ImagePullBackOff` and `kubectl describe pod <name> -n featbit` shows a kubelet event such as:
+
+```
+Failed to pull image "myregistry.example.com/...": ... tls: failed to verify certificate: x509: certificate signed by unknown authority
+```
+
+**Root cause:** Minikube's Docker daemon does not consult the host OS CA trust store. Trust must be written explicitly to `/etc/docker/certs.d/<registry-host>/ca.crt` inside each Minikube node. Registries signed by a well-known public CA work out of the box; registries signed by a private or corporate CA require explicit trust installation via `Trust-MinikubeCertificates.ps1`.
+
+**Fix 1 — Recommended:** Populate `TRUST_CERTIFICATES` in `deployment.env` and re-run `Deploy-FeatBitClusters.ps1`. The trust is installed automatically during cluster bring-up when both `CUSTOM_IMAGE_REGISTRY` and `TRUST_CERTIFICATES` are set. Each entry in `TRUST_CERTIFICATES` uses the format:
+
+```
+name|https://certs.example.com/ca.pem|/usr/local/share/ca-certificates/my-corp-ca.crt
+```
+
+Multiple entries are separated by semicolons. Example:
+
+```
+TRUST_CERTIFICATES=my-corp-ca|https://certs.example.com/root-ca.pem|/usr/local/share/ca-certificates/my-corp-ca.crt
+```
+
+To refresh trust in already-running clusters without a full redeploy:
+
+```powershell
+.\Trust-MinikubeCertificates.ps1
+```
+
+**Fix 2 — Fallback:** If installing a CA certificate is not feasible, set `INSECURE_CUSTOM_REGISTRY=true` in `deployment.env` (or pass `-InsecureCustomRegistry $true` on the command line). This passes `--insecure-registry` to `minikube start`, which disables TLS verification for the custom registry entirely.
+
+> ⚠ **Security implication:** Disabling TLS verification means the Minikube nodes will pull images from `CUSTOM_IMAGE_REGISTRY` without verifying the server certificate. Use this only as a temporary workaround on isolated dev/test infrastructure, not on production-adjacent environments.
+
+**How to verify the fix:** Run the image-pull assertion script. It exits `0` when all pods are healthy and `1` when pull-backoff is still detected:
+
+```powershell
+.\Assert-NoImagePullBackoff.ps1
 ```
 
 ### Port Forward Issues

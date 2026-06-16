@@ -9,6 +9,8 @@ spec:
     runAsUser: 1001
     runAsGroup: 1001
     fsGroup: 1001
+  imagePullSecrets:
+    - name: registry-credentials
   initContainers:
     - name: volume-permissions
       image: bitnamilegacy/kafka:3.8

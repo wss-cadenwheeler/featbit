@@ -5,6 +5,8 @@ metadata:
     app: redis
   name: redis
 spec:
+  imagePullSecrets:
+    - name: registry-credentials
   containers:
     - env:
         - name: ALLOW_EMPTY_PASSWORD

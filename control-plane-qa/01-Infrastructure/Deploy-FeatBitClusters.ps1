@@ -99,6 +99,10 @@ param(
     [string]$InfraImageMapFile = "",
     [PSCredential]$CustomRegistryCredential,
     [string]$CustomRegistrySecretName = "registry-credentials",
+    # When set to $true, Minikube starts with --insecure-registry=$CustomImageRegistry,
+    # which disables TLS verification for that host. Use only when a CA cannot be
+    # installed via TRUST_CERTIFICATES. Default keeps proper TLS verification on.
+    [bool]$InsecureCustomRegistry = $false,
     [string]$MinikubeBaseImage = "",
     [string]$MongoImage = "",
     [string]$PostgresImage = "",
@@ -293,6 +297,7 @@ function Invoke-KubectlApplyFile {
         [string]$Namespace,
         [string]$Registry,
         [hashtable]$ImageMap,
+        [string]$PullSecretName = "registry-credentials",
         # Optional: canonical->localRegistry rewrites built by Sync-InfraImagesToLocalRegistry.
         # Applied AFTER the remote-registry rewrite so local cache wins.
         [hashtable]$InfraLocalImageMap = @{}
@@ -307,6 +312,14 @@ function Invoke-KubectlApplyFile {
             $escapedDefault = [regex]::Escape($defaultImage)
             $content = $content -replace "(\bimage:\s+)${escapedDefault}\b", "`${1}${customImage}"
         }
+    }
+
+    # Swap the default pull-secret name on imagePullSecrets entries so users who
+    # set CUSTOM_REGISTRY_SECRET_NAME to a non-default value still get their pods
+    # to authenticate to the registry. The literal "registry-credentials" is the
+    # baked-in default in every manifest under kubernetes/pro/infrastructure/.
+    if ($PullSecretName -and $PullSecretName -ne "registry-credentials") {
+        $content = $content -replace "(\bname:\s+)registry-credentials\b", "`${1}${PullSecretName}"
     }
 
     # Rewrite infra image references to the local cache (overrides remote registry).
@@ -762,6 +775,33 @@ if (-not (Test-Path $kubernetesProPath)) {
 
 Write-Step "Pre-flight Checks"
 
+# Collect any interactive input now, before long-running cluster work begins.
+# A credential prompt buried 5+ minutes into the deploy ruined "kick it off and
+# walk away" UX — anything that needs the user's keyboard belongs up here.
+if ($CustomImageRegistry -and -not $CustomRegistryCredential -and -not $InsecureCustomRegistry) {
+    Write-Info "Registry '$CustomImageRegistry' is configured but no credentials were supplied"
+    Write-Info "via deployment.env (CUSTOM_REGISTRY_USERNAME / CUSTOM_REGISTRY_PASSWORD) or"
+    Write-Info "the -CustomRegistryCredential parameter."
+    Write-Info ""
+    Write-Info "Prompting now so you don't have to babysit the terminal during deploy."
+    Write-Info "If your registry does not require authentication, press Enter at both prompts to skip."
+    $CustomRegistryCredential = Get-Credential -Message "Registry credentials for $CustomImageRegistry (Enter to skip)"
+    if (-not $CustomRegistryCredential -or [string]::IsNullOrWhiteSpace($CustomRegistryCredential.UserName)) {
+        Write-Warning "No credentials provided — image pull secrets will not be created."
+        Write-Warning "If '$CustomImageRegistry' requires authentication, pods will fail with 'unauthorized'."
+        $CustomRegistryCredential = $null
+    }
+    else {
+        Write-Success "Registry credentials captured for $($CustomRegistryCredential.UserName)@$CustomImageRegistry"
+    }
+}
+elseif ($CustomImageRegistry -and $CustomRegistryCredential) {
+    Write-Info "Registry credentials supplied via deployment.env / -CustomRegistryCredential."
+}
+elseif ($CustomImageRegistry -and $InsecureCustomRegistry) {
+    Write-Info "INSECURE_CUSTOM_REGISTRY=true — credentials will not be prompted."
+}
+
 Write-Step "Deployment Configuration Summary"
 
 $hostComponentsForDisplay = @($hostComponentSet)
@@ -923,6 +963,10 @@ if ($RecreateClusters -and -not $SkipClusterCreation) {
     if ($FeatBitImageRegistry -and $FeatBitImageRegistry -ne "host.minikube.internal:5000") {
         $westStartArguments += "--insecure-registry=$FeatBitImageRegistry"
     }
+    if ($InsecureCustomRegistry -and $CustomImageRegistry) {
+        Write-Warning "INSECURE_CUSTOM_REGISTRY=true — TLS verification will be DISABLED for '$CustomImageRegistry' in the west cluster. Configure TRUST_CERTIFICATES instead for proper TLS trust."
+        $westStartArguments += "--insecure-registry=$CustomImageRegistry"
+    }
     if ($MinikubeBaseImage) {
         $westStartArguments += "--base-image=$MinikubeBaseImage"
     }
@@ -944,6 +988,10 @@ if ($RecreateClusters -and -not $SkipClusterCreation) {
     )
     if ($FeatBitImageRegistry -and $FeatBitImageRegistry -ne "host.minikube.internal:5000") {
         $eastStartArguments += "--insecure-registry=$FeatBitImageRegistry"
+    }
+    if ($InsecureCustomRegistry -and $CustomImageRegistry) {
+        Write-Warning "INSECURE_CUSTOM_REGISTRY=true — TLS verification will be DISABLED for '$CustomImageRegistry' in the east cluster. Configure TRUST_CERTIFICATES instead for proper TLS trust."
+        $eastStartArguments += "--insecure-registry=$CustomImageRegistry"
     }
     if ($MinikubeBaseImage) {
         $eastStartArguments += "--base-image=$MinikubeBaseImage"
@@ -1010,6 +1058,37 @@ Write-Step "Waiting for API Servers"
 Wait-ApiServerReady -ClusterContext "west"
 Wait-ApiServerReady -ClusterContext "east"
 
+Write-Step "Installing Registry TLS Trust"
+if ($CustomImageRegistry) {
+    $trustScript = Join-Path $PSScriptRoot "Trust-MinikubeCertificates.ps1"
+    if (-not (Test-Path $trustScript)) {
+        Write-Warning "Trust-MinikubeCertificates.ps1 not found at $trustScript — skipping TLS trust installation."
+        Write-Warning "If '$CustomImageRegistry' uses a private CA, pods will fail with x509 errors."
+    }
+    elseif ($InsecureCustomRegistry) {
+        Write-Info "INSECURE_CUSTOM_REGISTRY=true — skipping CA trust install; --insecure-registry was passed to minikube start instead."
+    }
+    else {
+        Write-Info "Installing CA trust for '$CustomImageRegistry' into west/east Docker daemons..."
+        try {
+            & $trustScript -Clusters @("west", "east") -RegistryHosts @($CustomImageRegistry)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Trust-MinikubeCertificates.ps1 exited with code $LASTEXITCODE"
+            }
+            Write-Success "Registry TLS trust installed in both clusters"
+        }
+        catch {
+            Write-Error "Failed to install registry TLS trust: $_"
+            Write-Info "If '$CustomImageRegistry' is signed by a private CA, configure TRUST_CERTIFICATES in deployment.env."
+            Write-Info "Alternatively, set INSECURE_CUSTOM_REGISTRY=true to bypass TLS verification for that host."
+            exit 1
+        }
+    }
+}
+else {
+    Write-Info "No CUSTOM_IMAGE_REGISTRY configured — skipping registry TLS trust step."
+}
+
 Write-Step "Creating Namespaces"
 
 Write-Info "Creating featbit namespace in west cluster..."
@@ -1031,14 +1110,10 @@ else {
 }
 
 Write-Step "Creating Registry Image Pull Secrets"
-if ($CustomImageRegistry -and -not $CustomRegistryCredential) {
-    Write-Info "Enter registry credentials for $CustomImageRegistry when prompted."
-    $CustomRegistryCredential = Get-Credential -Message "Registry credentials ($CustomImageRegistry)"
-    if (-not $CustomRegistryCredential) {
-        Write-Warning "No credentials provided — skipping image pull secret creation."
-        Write-Warning "Pods pulling from $CustomImageRegistry may fail with 'unauthorized'."
-    }
-}
+# Credentials are collected during the Pre-flight Checks step at the top of
+# this script so the user can walk away once the deploy starts. By the time we
+# reach this step, $CustomRegistryCredential is either populated or explicitly
+# null (user declined). No interactive prompt belongs here.
 if ($CustomImageRegistry -and $CustomRegistryCredential) {
     Ensure-CustomRegistryImagePullSecret -ClusterContext "west" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
     Ensure-CustomRegistryImagePullSecret -ClusterContext "east" -Namespace "featbit" -Registry $CustomImageRegistry -Credential $CustomRegistryCredential -SecretName $CustomRegistrySecretName
@@ -1111,6 +1186,35 @@ else {
 
 Write-Step "Deploying Infrastructure"
 
+# Stale-pod cleanup: prior runs may have deployed infra components that are no
+# longer part of $clusterInfraComponentSet (for example, switching from Advanced
+# back to Basic mode leaves orphaned in-cluster pods that ImagePullBackOff
+# forever because their owning workloads are never reconciled by this script).
+# Delete those orphans before re-applying so the cluster converges to the
+# intended state without manual cleanup.
+$infraSelectorByComponent = @{
+    "redis"      = "app=redis"
+    "kafka"      = "app in (kafka,kafka-aggregate,kafka-mirrormaker-local,kafka-mirrormaker-remote,kafka-ui)"
+    "clickhouse" = "app=clickhouse-server"
+    "mongodb"    = "app in (mongodb,mongodb-west,mongodb-east)"
+}
+$allInfraComponents = @("redis", "kafka", "clickhouse", "mongodb")
+# Wrap the Where-Object pipeline in @() so $staleComponents is always a real
+# array — Where-Object returns $null when nothing matches, and $null.Count
+# throws "The property 'Count' cannot be found on this object."
+$staleComponents = @($allInfraComponents | Where-Object { -not $clusterInfraComponentSet.Contains($_) })
+if ($staleComponents.Count -gt 0) {
+    Write-Info "Cleaning up stale in-cluster infra not selected for this run: $($staleComponents -join ', ')"
+    foreach ($clusterContext in @("west", "east")) {
+        foreach ($componentName in $staleComponents) {
+            $selector = $infraSelectorByComponent[$componentName]
+            if (-not $selector) { continue }
+            kubectl --context $clusterContext -n featbit delete deploy,statefulset,pod,svc,configmap,pvc -l $selector --ignore-not-found --timeout=60s 2>&1 | Out-Null
+        }
+    }
+    Write-Success "Stale infra cleanup complete"
+}
+
 if ($clusterInfraComponentSet.Count -eq 0) {
     Write-Info "No infrastructure components selected for in-cluster deployment."
 }
@@ -1134,6 +1238,7 @@ else {
                 Get-ChildItem ".\infrastructure\$filePattern" | ForEach-Object {
                     Invoke-KubectlApplyFile -Context $clusterContext -FilePath $_.FullName `
                         -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+                        -PullSecretName $CustomRegistrySecretName `
                         -InfraLocalImageMap $script:infraLocalImageMap
                 }
             }
@@ -1205,6 +1310,7 @@ $imagePullSecretPatch = @{
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-init-configMap.yaml") `
         -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -PullSecretName $CustomRegistrySecretName `
         -InfraLocalImageMap $script:infraLocalImageMap
     Write-Success "MongoDB ConfigMap deployed"
 
@@ -1212,6 +1318,7 @@ $imagePullSecretPatch = @{
     Invoke-KubectlApplyFile -Context "west" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-west-statefulset.yaml") `
         -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -PullSecretName $CustomRegistrySecretName `
         -InfraLocalImageMap $script:infraLocalImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB west StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
@@ -1226,6 +1333,7 @@ $imagePullSecretPatch = @{
     Invoke-KubectlApplyFile -Context "east" `
         -FilePath (Join-Path $kubernetesProPath "infrastructure\mongodb-east-statefulset.yaml") `
         -Namespace "featbit" -Registry $CustomImageRegistry -ImageMap $infraImageMap `
+        -PullSecretName $CustomRegistrySecretName `
         -InfraLocalImageMap $script:infraLocalImageMap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "MongoDB east StatefulSet apply returned non-zero; continuing with image and pull-secret reconciliation."
@@ -1352,14 +1460,16 @@ Write-Info "Using FeatBit image registry: $appImageRegistry"
 Write-Info "Deploying FeatBit applications to west cluster..."
 Get-ChildItem (Join-Path $kubernetesProPath "application") -Filter "*.yaml" | Sort-Object Name | ForEach-Object {
     Invoke-KubectlApplyFile -Context "west" -FilePath $_.FullName `
-        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap
+        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap `
+        -PullSecretName $CustomRegistrySecretName
 }
 Write-Success "West applications deployed"
 
 Write-Info "Deploying FeatBit applications to east cluster..."
 Get-ChildItem (Join-Path $kubernetesProPath "application") -Filter "*.yaml" | Sort-Object Name | ForEach-Object {
     Invoke-KubectlApplyFile -Context "east" -FilePath $_.FullName `
-        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap
+        -Namespace "featbit" -Registry $appImageRegistry -ImageMap $appImageMap `
+        -PullSecretName $CustomRegistrySecretName
 }
 Write-Success "East applications deployed"
 
@@ -1582,6 +1692,24 @@ Write-Success "Cross-cluster Redis configured (west→east: ${CrossClusterRedisH
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
 Start-Sleep -Seconds 45
+
+Write-Step "Pull-Backoff Verification"
+$assertScript = Join-Path $PSScriptRoot "Assert-NoImagePullBackoff.ps1"
+if (-not (Test-Path $assertScript)) {
+    Write-Warning "Assert-NoImagePullBackoff.ps1 not found at $assertScript — skipping verification."
+}
+else {
+    Write-Info "Verifying no pods are stuck in ImagePullBackOff/ErrImagePull across west and east..."
+    & $assertScript -Contexts @("west", "east") -Namespaces @("featbit") -TimeoutSeconds 120 -IntervalSeconds 5
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Pull-backoff verification failed. See Assert-NoImagePullBackoff output above for offending pods."
+        Write-Info "Common causes:"
+        Write-Info "  • TLS trust not installed for CUSTOM_IMAGE_REGISTRY (configure TRUST_CERTIFICATES or set INSECURE_CUSTOM_REGISTRY=true)."
+        Write-Info "  • Image pull credentials missing (set CUSTOM_REGISTRY_USERNAME and CUSTOM_REGISTRY_PASSWORD in deployment.env)."
+        Write-Info "  • Image paths in kubernetes\infra-image-map.local.json do not match your registry layout."
+        exit 1
+    }
+}
 
 Write-Step "Deployment Status"
 

@@ -82,6 +82,7 @@ $keyMap = @{
     "EAST_CPUS"                    = "EastCpus"
     "EAST_MEMORY"                  = "EastMemory"
     "HOST_INFRA_COMPONENTS"        = "HostInfraComponents"
+    "INSECURE_CUSTOM_REGISTRY"     = "InsecureCustomRegistry"
 }
 
 $params = @{}
@@ -98,6 +99,9 @@ foreach ($envKey in $raw.Keys) {
             }
             "HostInfraComponents" {
                 $params[$paramName] = $value -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            }
+            "InsecureCustomRegistry" {
+                $params[$paramName] = $value -match '^(true|1|yes|on)$'
             }
             default {
                 $params[$paramName] = $value

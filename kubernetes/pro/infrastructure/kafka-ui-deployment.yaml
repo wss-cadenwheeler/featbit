@@ -27,6 +27,8 @@ spec:
       labels:
         app: kafka-ui
     spec:
+      imagePullSecrets:
+        - name: registry-credentials
       containers:
         - name: kafka-ui
           image: provectuslabs/kafka-ui:latest
