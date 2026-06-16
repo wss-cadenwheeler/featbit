@@ -13,23 +13,31 @@ Validates the evaluation-server pod heartbeat lifecycle as described in
 * When the Deployment controller replaces the deleted pod, a heartbeat
   with a brand-new ``PodId`` appears in Redis (manual steps 12-13,
   expected result #3).
-
-NOTE: Manual steps 2-3 and 10-11 require opening real evaluation-server
-client connections (10 west / 20 east) and observing that they migrate
-to the surviving pod. The Python automation harness does not currently
-have a WebSocket client dependency (``websocket-client`` / ``websockets``
-are not in ``pyproject.toml``) and the existing helpers do not expose a
-connection-opening primitive. Per the CP-09 task instructions we record
-those steps with ``add_skip`` and document the rationale; they should be
-covered separately by the test-app fixtures under
-``02-Tests/test-app`` once a programmatic hook is available.
+* When k6 and evaluation-server port-forwards are available, synthetic
+  WebSocket clients connect through the nginx active/active load
+  balancer (``featbit-eval.local:80``) and the scenario observes real
+  client migration: when west dies, nginx routes reconnects to east,
+  causing west Redis ``featbit:connection:*`` keys to drain and east
+  keys to absorb the load. When west recovers, fresh clients land on
+  west again via the LB's round-robin upstream. Otherwise only those
+  WebSocket assertions are skipped.
 """
 
 import json
+import shutil
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from core.api_client import (
+    ApiClient,
+    EnvSecrets,
+    get_env_secrets,
+    resolve_project_id_for_env,
+)
 from core.auth import resolve_authorization_header, resolve_request_context
+from core.k6_runner import K6Event, K6Runner
+from core.port_forwarder import PortForwarder
 from core.scenario_base import BaseScenario, ScenarioDefinition
 
 # Redis key written by RedisCacheService.UpsertPodHeartbeat() in
@@ -56,6 +64,27 @@ HEARTBEAT_RESAMPLE_MAX_WAIT_SECONDS = (
 # Evaluation-server deployment metadata in the Minikube clusters.
 EVAL_SERVER_LABEL_SELECTOR = "app=evaluation-server"
 FEATBIT_NAMESPACE = "featbit"
+CONNECTION_KEY_PATTERN = "featbit:connection:*"
+
+# Number of replacement clients to push through the LB in Phase 5.
+REPLACEMENT_WEST_CLIENTS = 10
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+CP09_K6_SCRIPT = REPO_ROOT / "benchmark" / "k6-scripts" / "cp09" / "cp09-connections.js"
+
+WS_ASSERTION_IDS = (
+    "open-west-client-connections",
+    "open-east-client-connections",
+    "client-connections-recorded-in-redis",
+    "west-clients-migrated-to-east",
+    "open-replacement-west-clients",
+)
+
+K6_MISSING_SKIP_MESSAGE = (
+    "k6 not installed; install via benchmark/install-k6.md or rerun Quickstart with -InstallK6"
+)
+ENV_SECRETS_SKIP_MESSAGE = "Env secrets unavailable; see resolve-env-secrets failure"
+WS_DISABLED_SKIP_MESSAGE = "WebSocket assertions disabled via --ws-disabled"
 
 
 class CP09Scenario(BaseScenario):
@@ -75,6 +104,15 @@ class CP09Scenario(BaseScenario):
         """Execute CP-09 scenario."""
         try:
             self.setup_artifacts()
+            self._primary_runner: Optional[K6Runner] = None
+            self._port_forwarder: Optional[PortForwarder] = None
+            self._env_secrets: Optional[EnvSecrets] = None
+            self._redis_connection_baseline: Optional[int] = None
+            self._redis_west_baseline: Optional[int] = None
+            self._redis_east_baseline: Optional[int] = None
+            self._redis_west_pre_failover: Optional[int] = None
+            self._redis_east_pre_failover: Optional[int] = None
+            self._websocket_assertions_skipped = False
             definition = self.definition()
 
             # --- Phase 1: Authentication and Authorization ---
@@ -122,6 +160,8 @@ class CP09Scenario(BaseScenario):
             )
             heartbeat_timeout = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS
             poll_interval = max(self.config.poll_interval_ms or 1000, 1000) / 1000.0
+            west_clients = self._configured_west_clients()
+            east_clients = self._configured_east_clients()
 
             # --- Phase 2: Baseline heartbeat presence (manual steps 4-5) ---
             self._notify_step("baseline-heartbeats", "running")
@@ -164,36 +204,7 @@ class CP09Scenario(BaseScenario):
             self._notify_step("baseline-heartbeats", "ok")
 
             # --- Phase 3: Synthetic client connections (manual steps 2-3) ---
-            # Skipped: no WebSocket primitive available in this harness.
-            self._notify_step("client-connections", "skipped")
-            self.assertions.add_skip(
-                "open-west-client-connections",
-                (
-                    "No WebSocket client dependency in pyproject.toml; "
-                    "opening 10 west streaming clients is not implemented. "
-                    "Cover via test-app fixture in 02-Tests/test-app."
-                ),
-            )
-            self.assertions.add_skip(
-                "open-east-client-connections",
-                (
-                    "No WebSocket client dependency in pyproject.toml; "
-                    "opening 20 east streaming clients is not implemented. "
-                    "Cover via test-app fixture in 02-Tests/test-app."
-                ),
-            )
-            self.assertions.add_skip(
-                "client-connections-recorded-in-redis",
-                (
-                    "Step 4 of manual script: verifying featbit:connection:* "
-                    "keys requires the synthetic clients from steps 2-3, "
-                    "which are skipped above."
-                ),
-            )
-            self.add_timeline_event(
-                "client-connections-skipped",
-                reason="no websocket dependency in pyproject.toml",
-            )
+            self._run_websocket_phase3(west_clients, east_clients, auth_header, ctx, definition)
 
             # --- Phase 4: West pod failover (manual steps 6-10) ---
             self._notify_step("west-pod-failover", "running")
@@ -256,6 +267,7 @@ class CP09Scenario(BaseScenario):
             )
 
             # Delete west evaluation-server pods (manual step 6).
+            t_failover = time.time()
             delete_result = self._run_kubectl(
                 [
                     "--context",
@@ -338,15 +350,8 @@ class CP09Scenario(BaseScenario):
                 east_during,
             )
 
-            # Manual step 10-11: client migration. Skipped — depends on
-            # phase 3 having opened real clients.
-            self.assertions.add_skip(
-                "west-clients-migrated-to-east",
-                (
-                    "Depends on phase 3 (synthetic client connections), "
-                    "which is skipped. Cover via test-app fixture."
-                ),
-            )
+            if self._primary_runner is not None:
+                self._assert_west_clients_migrated_to_east(west_clients, t_failover)
 
             self._notify_step("west-pod-failover", "ok")
 
@@ -422,12 +427,13 @@ class CP09Scenario(BaseScenario):
                 )
                 self._notify_step("west-pod-recovery", "failed")
 
-            # Step 13: opening 10 new west clients — skipped (depends on
-            # phase 3 client-opening primitive).
-            self.assertions.add_skip(
-                "open-replacement-west-clients",
-                "Depends on WebSocket client primitive; see phase 3 note.",
-            )
+            if self._primary_runner is not None and wait_result.returncode == 0 and new_pod_id:
+                self._assert_replacement_west_clients()
+            elif not self._has_assertion("open-replacement-west-clients"):
+                self.assertions.add_skip(
+                    "open-replacement-west-clients",
+                    "Skipped because west pod recovery was not confirmed.",
+                )
 
             # --- Phase 6: Cleanup ---
             # No manual teardown — the Deployment controller has already
@@ -444,7 +450,755 @@ class CP09Scenario(BaseScenario):
             return False
 
         finally:
+            if getattr(self, "_primary_runner", None) is not None:
+                self._primary_runner.stop(timeout=10.0)
+            if getattr(self, "_port_forwarder", None) is not None:
+                self._port_forwarder.stop_all()
+            self._ensure_websocket_assertions_recorded()
             self.write_artifacts()
+
+    # ------------------------------------------------------------------
+    # WebSocket client helpers
+    # ------------------------------------------------------------------
+
+    def _run_websocket_phase3(
+        self,
+        west_clients: int,
+        east_clients: int,
+        auth_header: str,
+        ctx: object,
+        definition: ScenarioDefinition,
+    ) -> None:
+        """Start k6 WebSocket clients and assert initial connection state.
+
+        In LB mode (the default), all VUs connect through the nginx
+        active/active load balancer at ``ws_lb_host:ws_lb_port``. nginx
+        round-robins across the two evaluation-server upstreams (west
+        127.0.0.1:5100, east 127.0.0.1:5101), so per-cluster distribution
+        is verified server-side via the ``featbit:connection:*`` Redis
+        scan rather than from each VU's perspective.
+        """
+        self._notify_step("client-connections", "running")
+
+        if self.config.ws_disabled:
+            self._skip_websocket_assertions(WS_DISABLED_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="ws-disabled")
+            self._notify_step("client-connections", "skipped", "ws-disabled")
+            return
+
+        if not K6Runner.is_available():
+            self._skip_websocket_assertions(K6_MISSING_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="k6-missing")
+            self._notify_step("client-connections", "skipped", "k6 missing")
+            return
+
+        self._resolve_env_secrets(auth_header, ctx, definition)
+        if self._env_secrets is None:
+            self._skip_websocket_assertions(ENV_SECRETS_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="env-secrets-unavailable")
+            self._notify_step("client-connections", "skipped", "env secrets")
+            return
+
+        try:
+            self._port_forwarder = PortForwarder(
+                artifacts_dir=self._artifact_dir(),
+                kubectl_binary=shutil.which("kubectl") or "kubectl",
+            )
+            self._port_forwarder.add(
+                context="west",
+                namespace=FEATBIT_NAMESPACE,
+                service="evaluation-server",
+                local_port=5100,
+                remote_port=5100,
+            )
+            self._port_forwarder.add(
+                context="east",
+                namespace=FEATBIT_NAMESPACE,
+                service="evaluation-server",
+                local_port=5101,
+                remote_port=5100,
+            )
+            self._port_forwarder.start_all(ready_timeout=10.0)
+            self.add_timeline_event(
+                "port-forwards-ready",
+                west_local_port=5100,
+                east_local_port=5101,
+                log_paths=[str(path) for path in self._port_forwarder.log_paths],
+            )
+        except Exception as exc:
+            log_path = self._port_forward_log_path()
+            message = (
+                "Could not establish port-forward to evaluation-server "
+                f"(west:5100, east:5101) — see {log_path}"
+            )
+            self._skip_websocket_assertions(message)
+            self.add_timeline_event(
+                "client-connections-skipped",
+                reason="port-forward-failed",
+                error=str(exc),
+                log_path=str(log_path),
+            )
+            self._notify_step("client-connections", "skipped", "port-forward failed")
+            return
+
+        west_baseline = self._count_redis_connection_keys("west") or 0
+        east_baseline = self._count_redis_connection_keys("east") or 0
+        self._redis_connection_baseline = west_baseline + east_baseline
+        self._redis_west_baseline = west_baseline
+        self._redis_east_baseline = east_baseline
+        self.add_timeline_event(
+            "redis-connection-baseline",
+            key_pattern=CONNECTION_KEY_PATTERN,
+            west_key_count=west_baseline,
+            east_key_count=east_baseline,
+            total=self._redis_connection_baseline,
+        )
+
+        total_clients = west_clients + east_clients
+        self._primary_runner = K6Runner(
+            script_path=CP09_K6_SCRIPT,
+            env=self._build_k6_env(
+                west_clients=west_clients,
+                east_clients=east_clients,
+                run_duration="30m",
+            ),
+            artifacts_dir=self._artifact_dir() / "k6-phase3",
+        )
+
+        try:
+            self._primary_runner.start()
+        except Exception as exc:
+            self._primary_runner = None
+            message = f"Could not start k6 WebSocket client: {exc}"
+            self.assertions.add_fail("open-west-client-connections", message)
+            self.assertions.add_fail("open-east-client-connections", message)
+            self.assertions.add_fail("client-connections-recorded-in-redis", message)
+            self.assertions.add_skip(
+                "west-clients-migrated-to-east",
+                "Skipped because the primary k6 WebSocket runner did not start.",
+            )
+            self.assertions.add_skip(
+                "open-replacement-west-clients",
+                "Skipped because the primary k6 WebSocket runner did not start.",
+            )
+            self.add_timeline_event(
+                "client-connections-failed",
+                reason="k6-start-failed",
+                error=str(exc),
+            )
+            self._notify_step("client-connections", "failed", "k6 start failed")
+            return
+
+        t_start = time.time()
+        self.add_timeline_event(
+            "k6-client-connections-started",
+            total_clients=total_clients,
+            west_clients_requested=west_clients,
+            east_clients_requested=east_clients,
+            sdk_type=self._configured_sdk_type(),
+            use_load_balancer=self._configured_use_load_balancer(),
+            lb_host=self._configured_lb_host(),
+            lb_port=self._configured_lb_port(),
+            script_path=str(CP09_K6_SCRIPT),
+        )
+
+        self._wait_for_k6_opens(expected_count=total_clients, since=t_start, timeout=30.0)
+        self._assert_cluster_received_connections(
+            assertion_name="open-west-client-connections",
+            context="west",
+            baseline=west_baseline,
+            total_clients=total_clients,
+        )
+        self._assert_cluster_received_connections(
+            assertion_name="open-east-client-connections",
+            context="east",
+            baseline=east_baseline,
+            total_clients=total_clients,
+        )
+        self._assert_client_connections_recorded_in_redis(total_clients)
+
+        # Capture the post-stabilization per-cluster distribution. This is the
+        # authoritative "pre-failover" baseline for `_assert_west_clients_migrated_to_east`:
+        # all 30 VUs have established their initial connections via nginx round-robin
+        # and Redis has settled. Reading these counts BEFORE phase 4 deletes the west
+        # pods is the only way to know how many connections will need to migrate.
+        west_post_connect = self._count_redis_connection_keys("west")
+        east_post_connect = self._count_redis_connection_keys("east")
+        self._redis_west_pre_failover = west_post_connect if west_post_connect is not None else 0
+        self._redis_east_pre_failover = east_post_connect if east_post_connect is not None else 0
+        self.add_timeline_event(
+            "redis-post-connect-distribution",
+            west=self._redis_west_pre_failover,
+            east=self._redis_east_pre_failover,
+            total_clients=total_clients,
+        )
+        self._notify_step("client-connections", "ok")
+
+    def _wait_for_k6_opens(self, *, expected_count: int, since: float, timeout: float) -> int:
+        """Wait for the primary runner to emit `expected_count` open events.
+
+        Returns the observed count for diagnostic timeline events. Does not
+        record an assertion — the per-cluster Redis assertions below are
+        the authoritative checks.
+        """
+        runner = self._primary_runner
+        if runner is None or expected_count <= 0:
+            return 0
+
+        observed = runner.wait_for_count(
+            lambda event: event.event == "open",
+            count=expected_count,
+            timeout=timeout,
+            since=since,
+        )
+        self.add_timeline_event(
+            "k6-client-connections-observed",
+            expected=expected_count,
+            observed=observed,
+        )
+        return observed
+
+    def _assert_cluster_received_connections(
+        self,
+        *,
+        assertion_name: str,
+        context: str,
+        baseline: int,
+        total_clients: int,
+    ) -> None:
+        """Assert that `context` Redis received at least one new connection.
+
+        With nginx round-robin and a healthy upstream, distribution across
+        the two clusters should be roughly 50/50. We use a forgiving
+        threshold of "at least one connection above baseline" so the
+        scenario does not false-fail on scheduling jitter or the small
+        per-VU upgrade race. The total-count assertion enforces the
+        aggregate.
+        """
+        observed = self._wait_for_redis_growth(
+            context=context,
+            baseline=baseline,
+            min_growth=1,
+            timeout=30.0,
+            poll_interval=1.0,
+        )
+        if observed is None:
+            self.assertions.add_fail(
+                assertion_name,
+                f"Could not count {CONNECTION_KEY_PATTERN} keys in {context} Redis.",
+            )
+            return
+
+        growth = observed - baseline
+        if growth >= 1:
+            self.assertions.add_pass(
+                assertion_name,
+                (
+                    f"{context} Redis grew from {baseline} to {observed} "
+                    f"{CONNECTION_KEY_PATTERN} key(s) after {total_clients} clients "
+                    "connected through the LB."
+                ),
+            )
+            return
+
+        self.assertions.add_fail(
+            assertion_name,
+            (
+                f"Expected at least one new {CONNECTION_KEY_PATTERN} key on {context} "
+                f"after {total_clients} LB-routed clients; observed {observed} "
+                f"(baseline {baseline}). nginx LB may have failed to route to {context}."
+            ),
+        )
+
+    def _assert_client_connections_recorded_in_redis(self, expected_count: int) -> None:
+        """Assert the aggregate (west+east) Redis connection count grew."""
+        baseline = self._redis_connection_baseline or 0
+        target_count = baseline + expected_count
+        observed = self._wait_for_redis_total(
+            target_count=target_count,
+            timeout=30.0,
+            poll_interval=1.0,
+        )
+        if observed is None:
+            self.assertions.add_fail(
+                "client-connections-recorded-in-redis",
+                f"Could not count {CONNECTION_KEY_PATTERN} keys across west+east Redis.",
+            )
+            return
+
+        if observed >= target_count:
+            self.assertions.add_pass(
+                "client-connections-recorded-in-redis",
+                (
+                    f"west+east Redis contains {observed} {CONNECTION_KEY_PATTERN} key(s), "
+                    f"up from baseline {baseline} (target {target_count})."
+                ),
+            )
+            return
+
+        self.assertions.add_fail(
+            "client-connections-recorded-in-redis",
+            (
+                f"Expected at least {target_count} {CONNECTION_KEY_PATTERN} key(s) "
+                f"across west+east Redis (baseline {baseline} + {expected_count} clients); "
+                f"observed {observed}."
+            ),
+        )
+
+    def _wait_for_redis_total(
+        self,
+        *,
+        target_count: int,
+        timeout: float,
+        poll_interval: float,
+    ) -> Optional[int]:
+        """Poll west+east Redis until the aggregate count reaches target."""
+        deadline = time.monotonic() + timeout
+        observed: Optional[int] = None
+
+        while True:
+            observed = self._count_total_redis_connection_keys()
+            if observed is not None and observed >= target_count:
+                return observed
+
+            if time.monotonic() >= deadline:
+                return observed
+
+            time.sleep(min(poll_interval, max(deadline - time.monotonic(), 0.0)))
+
+    def _wait_for_redis_growth(
+        self,
+        *,
+        context: str,
+        baseline: int,
+        min_growth: int,
+        timeout: float,
+        poll_interval: float,
+    ) -> Optional[int]:
+        """Poll a single cluster's Redis until it grows by at least `min_growth`."""
+        deadline = time.monotonic() + timeout
+        observed: Optional[int] = None
+
+        while True:
+            observed = self._count_redis_connection_keys(context)
+            if observed is not None and observed - baseline >= min_growth:
+                return observed
+
+            if time.monotonic() >= deadline:
+                return observed
+
+            time.sleep(min(poll_interval, max(deadline - time.monotonic(), 0.0)))
+
+    def _wait_for_redis_decline(
+        self,
+        *,
+        context: str,
+        target: int,
+        timeout: float,
+        poll_interval: float,
+    ) -> Optional[int]:
+        """Poll a single cluster's Redis until count drops to <= target."""
+        deadline = time.monotonic() + timeout
+        observed: Optional[int] = None
+
+        while True:
+            observed = self._count_redis_connection_keys(context)
+            if observed is not None and observed <= target:
+                return observed
+
+            if time.monotonic() >= deadline:
+                return observed
+
+            time.sleep(min(poll_interval, max(deadline - time.monotonic(), 0.0)))
+
+    def _count_total_redis_connection_keys(self) -> Optional[int]:
+        """Return west+east aggregate, or None if either cluster scan failed."""
+        west = self._count_redis_connection_keys("west")
+        east = self._count_redis_connection_keys("east")
+        if west is None or east is None:
+            return None
+        return west + east
+
+    def _assert_west_clients_migrated_to_east(self, west_clients: int, t_failover: float) -> None:
+        """Assert that clients reconnect through the LB to east after west dies.
+
+        The nginx upstream marks west down after the first failed
+        connection attempt (default ``max_fails=1`` / ``fail_timeout=10s``).
+        New connections — including VU reconnects from VUs that were on
+        west — route to east. We assert:
+
+        1. west Redis ``featbit:connection:*`` count drops back to its
+           pre-test baseline (all west-side connections closed).
+        2. east Redis count grew to at least the pre-failover total
+           (clients absorbed by east via the LB).
+
+        We also surface the k6-side close/reconnect counts as
+        diagnostic timeline events.
+        """
+        runner = self._primary_runner
+        if runner is None:
+            return
+
+        west_baseline = self._redis_west_baseline or 0
+        # Use the post-stable-connect distribution captured at the end of
+        # phase 3 as the authoritative "pre-failover" snapshot. Reading
+        # Redis here would be too late: by the time this method runs the
+        # purge-poll has already completed and west clients have migrated.
+        west_pre_failover = self._redis_west_pre_failover
+        east_pre_failover = self._redis_east_pre_failover
+        if west_pre_failover is None:
+            west_pre_failover = self._count_redis_connection_keys("west") or 0
+        if east_pre_failover is None:
+            east_pre_failover = self._count_redis_connection_keys("east") or 0
+        west_now = self._count_redis_connection_keys("west")
+        east_now = self._count_redis_connection_keys("east")
+        self.add_timeline_event(
+            "redis-pre-failover-snapshot",
+            west_pre_failover=west_pre_failover,
+            east_pre_failover=east_pre_failover,
+            west_now=west_now,
+            east_now=east_now,
+        )
+
+        observed_west = self._wait_for_redis_decline(
+            context="west",
+            target=west_baseline,
+            timeout=120.0,
+            poll_interval=2.0,
+        )
+        # Expect east to absorb roughly the clients that were on west.
+        # If nginx distributed unevenly (e.g. some west pods slow to be
+        # marked Ready) we may have started with very few west clients —
+        # require at least 70% of the actual west clients (not the
+        # configured ``west_clients`` count) to migrate, with a floor of
+        # 1 so the assertion can never trivially pass.
+        min_east_growth = max(1, int(west_pre_failover * 0.7)) if west_pre_failover > 0 else 1
+        observed_east = self._wait_for_redis_growth(
+            context="east",
+            baseline=east_pre_failover,
+            min_growth=min_east_growth,
+            timeout=60.0,
+            poll_interval=2.0,
+        )
+
+        closes = runner.count_events(
+            lambda event: event.event == "close",
+            since=t_failover,
+        )
+        reconnects = runner.count_events(
+            lambda event: event.event == "reconnect",
+            since=t_failover,
+        )
+        errors = runner.count_events(
+            lambda event: event.event == "error",
+            since=t_failover,
+        )
+        self.add_timeline_event(
+            "k6-failover-counters",
+            since=t_failover,
+            closes=closes,
+            reconnects=reconnects,
+            errors=errors,
+            west_redis_after=observed_west,
+            east_redis_after=observed_east,
+            west_pre_failover=west_pre_failover,
+            east_pre_failover=east_pre_failover,
+            min_east_growth_required=min_east_growth,
+        )
+
+        west_drained = observed_west is not None and observed_west <= west_baseline
+        # If no west clients existed pre-failover there is nothing to
+        # migrate — treat as a vacuous pass rather than a failure, but
+        # surface a diagnostic warning so the operator can investigate
+        # the LB distribution.
+        if west_pre_failover == 0:
+            self.assertions.add_pass(
+                "west-clients-migrated-to-east",
+                (
+                    f"No west clients to migrate (pre-failover west=0, east={east_pre_failover}); "
+                    f"nginx routed all {east_pre_failover} VUs to east. "
+                    f"Observed post-failover west={observed_west}, east={observed_east}, "
+                    f"k6 closes={closes} reconnects={reconnects} errors={errors}."
+                ),
+            )
+            return
+
+        east_absorbed = (
+            observed_east is not None
+            and (observed_east - east_pre_failover) >= min_east_growth
+        )
+
+        if west_drained and east_absorbed:
+            self.assertions.add_pass(
+                "west-clients-migrated-to-east",
+                (
+                    f"West Redis returned to baseline ({observed_west}/{west_baseline}); "
+                    f"east absorbed {observed_east - east_pre_failover} new connection(s) "
+                    f"via the LB (pre-failover west={west_pre_failover} east={east_pre_failover}; "
+                    f"closes={closes}, reconnects={reconnects}, errors={errors})."
+                ),
+            )
+            return
+
+        self.assertions.add_fail(
+            "west-clients-migrated-to-east",
+            (
+                "Expected west Redis to drain to baseline and east to absorb migrated "
+                f"clients via the nginx LB; observed west={observed_west} "
+                f"(baseline {west_baseline}, pre-failover {west_pre_failover}), "
+                f"east={observed_east} (pre-failover {east_pre_failover}, "
+                f"min growth {min_east_growth}). "
+                f"k6 reported closes={closes}, reconnects={reconnects}, errors={errors}."
+            ),
+        )
+
+    def _assert_replacement_west_clients(self) -> None:
+        """Spawn fresh LB-routed clients and assert west re-enters rotation.
+
+        Once west is healthy and nginx's ``fail_timeout`` has elapsed,
+        the upstream is re-added to round-robin. Pushing fresh clients
+        through the LB should land at least one of them on west,
+        observable via the west Redis scan.
+        """
+        if self._env_secrets is None:
+            return
+
+        west_baseline_post_recovery = self._count_redis_connection_keys("west")
+        if west_baseline_post_recovery is None:
+            west_baseline_post_recovery = self._redis_west_baseline or 0
+        self.add_timeline_event(
+            "redis-pre-replacement-snapshot",
+            west=west_baseline_post_recovery,
+        )
+
+        replacement = K6Runner(
+            script_path=CP09_K6_SCRIPT,
+            env=self._build_k6_env(
+                west_clients=REPLACEMENT_WEST_CLIENTS,
+                east_clients=0,
+                run_duration="60s",
+            ),
+            artifacts_dir=self._artifact_dir() / "k6-phase5",
+        )
+        try:
+            replacement.start()
+            # Wait for k6 to actually open the connections — gives nginx
+            # time to distribute and the eval-server time to write Redis.
+            opens = replacement.wait_for_count(
+                lambda event: event.event == "open",
+                count=REPLACEMENT_WEST_CLIENTS,
+                timeout=20.0,
+            )
+            observed_west = self._wait_for_redis_growth(
+                context="west",
+                baseline=west_baseline_post_recovery,
+                min_growth=1,
+                timeout=30.0,
+                poll_interval=1.0,
+            )
+            self.add_timeline_event(
+                "replacement-clients-result",
+                k6_opens=opens,
+                west_redis_after=observed_west,
+                west_baseline=west_baseline_post_recovery,
+            )
+            if observed_west is not None and observed_west > west_baseline_post_recovery:
+                self.assertions.add_pass(
+                    "open-replacement-west-clients",
+                    (
+                        f"West Redis grew from {west_baseline_post_recovery} "
+                        f"to {observed_west} after {REPLACEMENT_WEST_CLIENTS} fresh "
+                        f"LB-routed clients (k6 opens={opens})."
+                    ),
+                )
+            else:
+                self.assertions.add_fail(
+                    "open-replacement-west-clients",
+                    (
+                        f"Expected west Redis to grow above {west_baseline_post_recovery} "
+                        f"after {REPLACEMENT_WEST_CLIENTS} LB-routed clients; "
+                        f"observed {observed_west}. nginx may not yet have re-added "
+                        "the recovered west backend to its round-robin rotation."
+                    ),
+                )
+        except Exception as exc:
+            self.assertions.add_fail(
+                "open-replacement-west-clients",
+                f"Could not start replacement west k6 runner: {exc}",
+            )
+        finally:
+            replacement.stop(timeout=5.0)
+
+    def _count_redis_connection_keys(self, context: str) -> Optional[int]:
+        pod = self._discover_redis_pod(context, FEATBIT_NAMESPACE)
+        if not pod:
+            self.add_timeline_event(
+                "redis-pod-not-found",
+                context=context,
+                namespace=FEATBIT_NAMESPACE,
+                key_pattern=CONNECTION_KEY_PATTERN,
+            )
+            return None
+
+        result = self._run_kubectl(
+            [
+                "--context",
+                context,
+                "-n",
+                FEATBIT_NAMESPACE,
+                "exec",
+                pod,
+                "--",
+                "redis-cli",
+                "--scan",
+                "--pattern",
+                CONNECTION_KEY_PATTERN,
+            ],
+            timeout=30,
+        )
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+        if result.returncode != 0:
+            self.add_timeline_event(
+                "redis-connection-scan-failed",
+                context=context,
+                key_pattern=CONNECTION_KEY_PATTERN,
+                stderr=error[:300],
+            )
+            return None
+
+        keys = [line.strip() for line in output.splitlines() if line.strip()]
+        self.add_timeline_event(
+            "redis-connection-scan",
+            context=context,
+            key_pattern=CONNECTION_KEY_PATTERN,
+            matched_key_count=len(keys),
+            sampled_keys=keys[:5],
+        )
+        return len(keys)
+
+    def _build_k6_env(
+        self,
+        *,
+        west_clients: int,
+        east_clients: int,
+        run_duration: str,
+        sdk_type: Optional[str] = None,
+    ) -> dict[str, str]:
+        if self._env_secrets is None:
+            raise RuntimeError("Environment secrets are unavailable.")
+
+        return {
+            "WEST_CLIENTS": str(west_clients),
+            "EAST_CLIENTS": str(east_clients),
+            "SDK_TYPE": sdk_type or self._configured_sdk_type(),
+            "SERVER_SECRET": self._env_secrets.server,
+            "CLIENT_SECRET": self._env_secrets.client,
+            # Load balancer settings (default mode).
+            "USE_LOAD_BALANCER": "true" if self._configured_use_load_balancer() else "false",
+            "STREAMING_HOST": self._configured_lb_host(),
+            "STREAMING_PORT": str(self._configured_lb_port()),
+            # Legacy per-cluster targets — only consulted when USE_LOAD_BALANCER=false.
+            "WEST_PORT": "5100",
+            "EAST_PORT": "5101",
+            "HOST": "localhost",
+            "RUN_DURATION": run_duration,
+        }
+
+    def _resolve_env_secrets(
+        self,
+        auth_header: str,
+        ctx: object,
+        definition: ScenarioDefinition,
+    ) -> None:
+        self._notify_step("resolve-env-secrets", "starting")
+        try:
+            workspace_id = getattr(ctx, "workspace_id", None)
+            organization_id = getattr(ctx, "organization_id", None)
+            if not workspace_id:
+                raise ValueError("Workspace ID was not resolved from the auth context.")
+
+            api_client = ApiClient(
+                self.get_api_base_url(definition.source_region),
+                self.config.skip_certificate_check,
+                self.config.api_version,
+            )
+            project_id = resolve_project_id_for_env(
+                api_client,
+                workspace_id=workspace_id,
+                env_id=self.config.env_id,
+                authorization_header=auth_header,
+                organization_id=organization_id,
+            )
+            self._env_secrets = get_env_secrets(
+                api_client,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                env_id=self.config.env_id,
+                authorization_header=auth_header,
+                organization_id=organization_id,
+            )
+            self.assertions.add_pass("resolve-env-secrets")
+            self.add_timeline_event(
+                "env-secrets-resolved",
+                project_id=project_id,
+                secret_count=len(self._env_secrets.raw),
+            )
+            self._notify_step("resolve-env-secrets", "ok")
+        except Exception as exc:
+            self.assertions.add_fail("resolve-env-secrets", f"Could not fetch env secrets: {exc}")
+            self._env_secrets = None
+            self._notify_step("resolve-env-secrets", "failed", str(exc)[:80])
+
+    def _skip_websocket_assertions(self, message: str) -> None:
+        for assertion_id in WS_ASSERTION_IDS:
+            if not self._has_assertion(assertion_id):
+                self.assertions.add_skip(assertion_id, message)
+        self._websocket_assertions_skipped = True
+
+    def _ensure_websocket_assertions_recorded(self) -> None:
+        for assertion_id in WS_ASSERTION_IDS:
+            if not self._has_assertion(assertion_id):
+                self.assertions.add_skip(
+                    assertion_id,
+                    "Skipped because CP-09 exited before this WebSocket phase.",
+                )
+
+    def _has_assertion(self, assertion_id: str) -> bool:
+        return any(assertion.name == assertion_id for assertion in self.assertions.assertions)
+
+    def _configured_west_clients(self) -> int:
+        return max(0, int(self.config.ws_west_clients))
+
+    def _configured_east_clients(self) -> int:
+        return max(0, int(self.config.ws_east_clients))
+
+    def _configured_sdk_type(self) -> str:
+        value = (self.config.ws_sdk_type or "server").lower()
+        return value if value in ("server", "client") else "server"
+
+    def _configured_use_load_balancer(self) -> bool:
+        return bool(getattr(self.config, "ws_use_load_balancer", True))
+
+    def _configured_lb_host(self) -> str:
+        return getattr(self.config, "ws_lb_host", "featbit-eval.local") or "featbit-eval.local"
+
+    def _configured_lb_port(self) -> int:
+        return int(getattr(self.config, "ws_lb_port", 80) or 80)
+
+    def _artifact_dir(self) -> Path:
+        if self.artifact_dir is None:
+            raise RuntimeError("Artifact directory has not been initialized.")
+        return self.artifact_dir
+
+    def _port_forward_log_path(self) -> Path:
+        if self._port_forwarder and self._port_forwarder.log_paths:
+            return self._port_forwarder.log_paths[0]
+        return self._artifact_dir() / "port-forward-west-5100.log"
+
+    @staticmethod
+    def _is_k6_event(event: K6Event, *, cluster: str, event_name: str) -> bool:
+        return event.cluster == cluster and event.event == event_name
 
     # ------------------------------------------------------------------
     # Heartbeat helpers

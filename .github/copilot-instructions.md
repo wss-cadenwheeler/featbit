@@ -2,6 +2,10 @@
 
 FeatBit is an open-source feature flag management platform. It is a polyglot monorepo with .NET APIs, an Angular UI, Python analytics, and Kubernetes-based multi-cluster deployment tooling.
 
+## Workflow
+
+Before you start any work, state how you would verify it. After you finish, run the verification and report the results.
+
 ## Architecture
 
 ```

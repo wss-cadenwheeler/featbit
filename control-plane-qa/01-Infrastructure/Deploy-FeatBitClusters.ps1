@@ -1667,6 +1667,16 @@ foreach ($clusterContext in @("west", "east")) {
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
     }
+
+    # Scale evaluation-server to 3 replicas so cp09 can exercise intra-cluster
+    # failover (kill one pod, observe clients re-roll to surviving pods in
+    # the same cluster via the host nginx LB) in addition to cross-cluster
+    # failover. Five port slots per cluster are reserved in nginx.conf to
+    # support scale-up beyond 3 without nginx config changes.
+    kubectl --context $clusterContext -n featbit scale deployment evaluation-server --replicas=3 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to scale evaluation-server to 3 replicas in $clusterContext"
+    }
 }
 Write-Success "Kafka MQ provider configured for all app deployments (producer=$kafkaProducerServers, api-server/eval-server consumer=$kafkaConsumerServers, control-plane consumer=$controlPlaneKafkaConsumerServers)"
 

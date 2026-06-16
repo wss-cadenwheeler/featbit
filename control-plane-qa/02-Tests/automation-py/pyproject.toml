@@ -34,7 +34,7 @@ mypy = ">=1.0.0"
 automation = "cli.main:cli"
 
 [tool.pytest.ini_options]
-testpaths = ["scenarios"]
+testpaths = ["scenarios", "tests"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = "-v --strict-markers"
 markers = [

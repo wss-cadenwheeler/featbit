@@ -170,6 +170,13 @@ class ScenarioConfig:
     segment_ids_by_key: Optional[Dict[str, str]] = None
     convergence_timeout_seconds: Optional[int] = None
     convergence_poll_interval_seconds: Optional[int] = None
+    ws_west_clients: int = 10
+    ws_east_clients: int = 20
+    ws_sdk_type: str = "server"
+    ws_disabled: bool = False
+    ws_use_load_balancer: bool = True
+    ws_lb_host: str = "featbit-eval.local"
+    ws_lb_port: int = 80
 
 
 class ScenariosummaryJson(BaseModel):

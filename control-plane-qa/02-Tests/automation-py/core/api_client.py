@@ -1,6 +1,7 @@
 """HTTP API client wrapper with error handling, cert skip, and retry logic."""
 
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import requests
@@ -152,6 +153,15 @@ class ApiClientError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class EnvSecrets:
+    """Server and client SDK secrets for an environment."""
+
+    server: str
+    client: str
+    raw: list[dict]
+
+
 def extract_data(response: Dict[str, Any]) -> Any:
     """Extract 'data' field from API response, handling case variations.
 
@@ -169,3 +179,132 @@ def extract_data(response: Dict[str, Any]) -> Any:
         if "Data" in response:
             return response["Data"]
     return response
+
+
+def get_env_secrets(
+    api_client: "ApiClient",
+    *,
+    workspace_id: str,
+    project_id: str,
+    env_id: str,
+    authorization_header: str,
+    organization_id: Optional[str] = None,
+) -> EnvSecrets:
+    """Fetch an environment and extract its server and client SDK secret values.
+
+    Raises:
+        ValueError: If either the server or client secret is missing.
+    """
+    endpoint = f"/api/v{api_client.api_version}/projects/{project_id}/envs/{env_id}"
+    response = api_client.get(
+        endpoint,
+        headers=_workspace_headers(
+            workspace_id=workspace_id,
+            authorization_header=authorization_header,
+            organization_id=organization_id,
+        ),
+    )
+    env = extract_data(response) or {}
+    secrets = _case_insensitive_get(env, "secrets") or []
+
+    if not isinstance(secrets, list):
+        raise ValueError(f"Environment {env_id} response did not contain a Secrets list.")
+
+    server_secret = _first_secret_value(secrets, "server")
+    client_secret = _first_secret_value(secrets, "client")
+
+    missing = []
+    if server_secret is None:
+        missing.append("server")
+    if client_secret is None:
+        missing.append("client")
+    if missing:
+        raise ValueError(
+            f"Environment {env_id} is missing {', '.join(missing)} SDK secret(s)."
+        )
+
+    return EnvSecrets(server=server_secret, client=client_secret, raw=secrets)
+
+
+def resolve_project_id_for_env(
+    api_client: "ApiClient",
+    *,
+    workspace_id: str,
+    env_id: str,
+    authorization_header: str,
+    organization_id: Optional[str] = None,
+) -> str:
+    """Find the project that contains the given env in the current workspace."""
+    endpoint = f"/api/v{api_client.api_version}/projects"
+    response = api_client.get(
+        endpoint,
+        headers=_workspace_headers(
+            workspace_id=workspace_id,
+            authorization_header=authorization_header,
+            organization_id=organization_id,
+        ),
+    )
+    projects = extract_data(response) or []
+    if isinstance(projects, dict):
+        projects = [projects]
+
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+
+        environments = _case_insensitive_get(project, "environments") or []
+        if not isinstance(environments, list):
+            continue
+
+        for env in environments:
+            if not isinstance(env, dict):
+                continue
+            if str(_case_insensitive_get(env, "id")) == env_id:
+                project_id = _case_insensitive_get(project, "id")
+                if project_id:
+                    return str(project_id)
+
+    raise ValueError(f"Could not find project containing environment {env_id}.")
+
+
+def _workspace_headers(
+    *,
+    workspace_id: str,
+    authorization_header: str,
+    organization_id: Optional[str] = None,
+) -> Dict[str, str]:
+    headers = {
+        "Authorization": authorization_header,
+        "Content-Type": "application/json",
+        "Workspace": workspace_id,
+    }
+    if organization_id:
+        headers["Organization"] = organization_id
+
+    return headers
+
+
+def _first_secret_value(secrets: list[dict], secret_type: str) -> Optional[str]:
+    for secret in secrets:
+        if not isinstance(secret, dict):
+            continue
+        current_type = _case_insensitive_get(secret, "type")
+        if isinstance(current_type, str) and current_type.lower() == secret_type:
+            value = _case_insensitive_get(secret, "value")
+            return str(value) if value is not None else None
+
+    return None
+
+
+def _case_insensitive_get(data: Dict[str, Any], key: str) -> Any:
+    if not isinstance(data, dict):
+        return None
+    if key in data:
+        return data[key]
+
+    wanted = key.lower()
+    for current_key, value in data.items():
+        if isinstance(current_key, str) and current_key.lower() == wanted:
+            return value
+
+    return None

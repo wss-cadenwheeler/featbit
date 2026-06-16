@@ -136,8 +136,13 @@ $jobs = @(
     @{Name="east-ui"; Context="east"; Namespace="featbit"; Service="ui"; LocalPort="8082"; RemotePort="8081"}
     @{Name="west-api"; Context="west"; Namespace="featbit"; Service="api-server"; LocalPort="15000"; RemotePort="5000"}
     @{Name="east-api"; Context="east"; Namespace="featbit"; Service="api-server"; LocalPort="15001"; RemotePort="5000"}
-    @{Name="west-eval"; Context="west"; Namespace="featbit"; Service="evaluation-server"; LocalPort="5100"; RemotePort="5100"}
-    @{Name="east-eval"; Context="east"; Namespace="featbit"; Service="evaluation-server"; LocalPort="5101"; RemotePort="5100"}
+    # NOTE: west-eval and east-eval port-forwards are no longer static here.
+    # cp09 needs intra-cluster failover testing, which requires per-pod
+    # port-forwards through host nginx round-robin. The eval coordinator
+    # runspaces below own the slot pool (5100,5102,5104,5106,5108 for west
+    # and 5101,5103,5105,5107,5109 for east) and dynamically map running
+    # eval-server pods to free slots. nginx.conf upstream featbit_eval lists
+    # all 10 slots; pods that aren't currently mapped show as "down" — fine.
     @{Name="west-control-plane"; Context="west"; Namespace="featbit"; Service="control-plane"; LocalPort="5200"; RemotePort="5200"}
     @{Name="east-control-plane"; Context="east"; Namespace="featbit"; Service="control-plane"; LocalPort="5201"; RemotePort="5200"}
     @{Name="kafka"; Context="west"; Namespace="featbit"; Service="kafka"; LocalPort="29092"; RemotePort="29092"}
@@ -231,6 +236,145 @@ foreach ($job in $jobs) {
     Write-Log "Started background job for $($job.Name)"
 }
 
+# ── Evaluation-server slot-pool coordinators (per cluster) ─────────────────
+# cp09 needs intra-cluster failover proof, which requires per-pod port-forwards
+# through host nginx so each WS connection lands on a specific pod (not the
+# Service round-robin behind a single port-forward). Each coordinator runspace
+# owns a fixed slot pool for its cluster, polls running eval-server pods
+# every 3s, claims a free slot for each unclaimed pod (after kubectl wait
+# --for=condition=ready), spawns kubectl port-forward pod/<name> <slot>:5100,
+# and frees slots when a pod or its forward dies. nginx.conf lists all 10
+# slots; unmapped slots show as "down" upstreams which nginx tolerates.
+#
+# West slots: 5100, 5102, 5104 (active) + 5106, 5108 (spare for scale-up).
+# East slots: 5101, 5103, 5105 (active) + 5107, 5109 (spare for scale-up).
+$evalSlotsWest = @(5100, 5102, 5104, 5106, 5108)
+$evalSlotsEast = @(5101, 5103, 5105, 5107, 5109)
+
+$evalCoordinatorScript = {
+    param($ScriptRoot, $LogFile, [int[]]$Slots, $Context, $Namespace)
+
+    function Write-Log {
+        param([string]$Message, [string]$Level = "INFO")
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $logMessage = "[$timestamp] [$Level] [eval-coord-$Context] $Message"
+        Add-Content -Path $LogFile -Value $logMessage -ErrorAction SilentlyContinue
+    }
+
+    # slot port -> @{Pod=...; Process=...; StartedAt=...}
+    $forwards = @{}
+
+    Write-Log "Coordinator starting; managing slots: $($Slots -join ', ')"
+
+    while ($true) {
+        try {
+            # Discover running eval-server pods on this cluster.
+            $podsJson = kubectl --context $Context -n $Namespace get pods -l app=evaluation-server -o json 2>$null
+            if (-not $podsJson) {
+                Write-Log "kubectl get pods returned no output; sleeping" -Level "WARN"
+                Start-Sleep -Seconds 3
+                continue
+            }
+
+            $podObjs = ($podsJson | ConvertFrom-Json).items
+            $runningPods = @($podObjs | Where-Object {
+                $_.status.phase -eq 'Running' -and
+                ($_.status.containerStatuses | Where-Object { -not $_.ready } | Measure-Object).Count -eq 0
+            } | ForEach-Object { $_.metadata.name })
+
+            # Reap forwards whose process died OR whose pod disappeared.
+            foreach ($slotPort in @($forwards.Keys)) {
+                $f = $forwards[$slotPort]
+                $podGone = ($runningPods -notcontains $f.Pod)
+                $procDead = ($null -eq $f.Process) -or $f.Process.HasExited
+                if ($podGone -or $procDead) {
+                    $reason = if ($podGone) { "pod $($f.Pod) gone" } else { "port-forward process exited" }
+                    Write-Log "Freeing slot $slotPort ($reason)"
+                    if ($f.Process -and -not $f.Process.HasExited) {
+                        try { Stop-Process -Id $f.Process.Id -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                    $forwards.Remove($slotPort)
+                }
+            }
+
+            # Assign any unclaimed running pod to a free slot.
+            $claimedPods = @($forwards.Values | ForEach-Object { $_.Pod })
+            foreach ($pod in $runningPods) {
+                if ($claimedPods -contains $pod) { continue }
+
+                $freeSlot = $Slots | Where-Object { -not $forwards.ContainsKey($_) } | Select-Object -First 1
+                if (-not $freeSlot) {
+                    Write-Log "No free slot for pod $pod (all $($Slots.Count) slots busy)" -Level "WARN"
+                    break
+                }
+
+                # Wait for the pod to be Ready (covers the case where Phase=Running
+                # but readinessProbe hasn't passed yet — eliminates the port-forward
+                # bound to terminating/half-up pod flap).
+                $waitOutput = kubectl --context $Context -n $Namespace wait --for=condition=ready "pod/$pod" --timeout=30s 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Log "kubectl wait pod/$pod failed: $waitOutput; skipping this cycle" -Level "WARN"
+                    continue
+                }
+
+                $slotLog = Join-Path $ScriptRoot "$Context-eval-slot-$freeSlot.log"
+                $slotErr = Join-Path $ScriptRoot "$Context-eval-slot-$freeSlot.err"
+
+                try {
+                    $proc = Start-Process kubectl `
+                        -ArgumentList @(
+                            "--context", $Context,
+                            "port-forward",
+                            "-n", $Namespace,
+                            "pod/$pod",
+                            "${freeSlot}:5100"
+                        ) `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput $slotLog `
+                        -RedirectStandardError $slotErr
+
+                    $forwards[$freeSlot] = @{
+                        Pod       = $pod
+                        Process   = $proc
+                        StartedAt = Get-Date
+                    }
+                    $claimedPods += $pod
+                    Write-Log "Slot $freeSlot -> pod $pod (PID $($proc.Id))"
+                } catch {
+                    Write-Log "Failed to spawn port-forward for pod $pod on slot ${freeSlot}: $($_.Exception.Message)" -Level "ERROR"
+                }
+            }
+        } catch {
+            Write-Log "Coordinator loop error: $($_.Exception.Message)" -Level "ERROR"
+        }
+
+        Start-Sleep -Seconds 3
+    }
+}
+
+$evalCoordinators = @()
+foreach ($evalCtx in @(
+    @{Context = "west"; Slots = $evalSlotsWest},
+    @{Context = "east"; Slots = $evalSlotsEast}
+)) {
+    $ps = [PowerShell]::Create()
+    $ps.AddScript($evalCoordinatorScript).
+        AddArgument($PSScriptRoot).
+        AddArgument($logFile).
+        AddArgument($evalCtx.Slots).
+        AddArgument($evalCtx.Context).
+        AddArgument("featbit") | Out-Null
+
+    $handle = $ps.BeginInvoke()
+    $evalCoordinators += @{
+        PowerShell = $ps
+        Handle     = $handle
+        Name       = "eval-coordinator-$($evalCtx.Context)"
+    }
+    Write-Log "Started eval-coordinator for $($evalCtx.Context) (slots: $($evalCtx.Slots -join ','))"
+}
+
 Write-Host "✓ All port forwards started" -ForegroundColor Green
 Write-Host ""
 Write-Host "Port Mappings:" -ForegroundColor Cyan
@@ -239,8 +383,8 @@ Write-Host "    localhost:8081 → West UI" -ForegroundColor Gray
 Write-Host "    localhost:8082 → East UI" -ForegroundColor Gray
 Write-Host "    localhost:15000 → West API" -ForegroundColor Gray
 Write-Host "    localhost:15001 → East API" -ForegroundColor Gray
-Write-Host "    localhost:5100 → West Evaluation" -ForegroundColor Gray
-Write-Host "    localhost:5101 → East Evaluation" -ForegroundColor Gray
+Write-Host "    localhost:5100,5102,5104 → West Evaluation (per-pod slots; 5106/5108 spare)" -ForegroundColor Gray
+Write-Host "    localhost:5101,5103,5105 → East Evaluation (per-pod slots; 5107/5109 spare)" -ForegroundColor Gray
 Write-Host "    localhost:5200 → West Control Plane" -ForegroundColor Gray
 Write-Host "    localhost:5201 → East Control Plane" -ForegroundColor Gray
 Write-Host ""
@@ -290,6 +434,20 @@ try {
     foreach ($job in $runspaceJobs) {
         $job.PowerShell.Stop()
         $job.PowerShell.Dispose()
+    }
+    foreach ($coord in $evalCoordinators) {
+        $coord.PowerShell.Stop()
+        $coord.PowerShell.Dispose()
+    }
+    # The eval coordinators' child kubectl port-forward processes are not
+    # owned by any runspace; sweep up any orphans started by this script.
+    Get-Process kubectl -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+            $cmd -match 'port-forward.*pod/evaluation-server'
+        } catch { $false }
+    } | ForEach-Object {
+        try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
     }
     Write-Log "Port Forward Manager Stopped"
 }

@@ -100,6 +100,10 @@ StyleCopReport.xml
 *.svclog
 *.scc
 
+# kubectl port-forward slot stderr logs from 01-Infrastructure/Start-PortForwards.ps1
+01-Infrastructure/*-eval-slot-*.err
+01-Infrastructure/*-eval-slot-*.log
+
 # Chutzpah Test files
 _Chutzpah*
 
