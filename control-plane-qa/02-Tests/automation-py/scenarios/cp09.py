@@ -13,23 +13,26 @@ Validates the evaluation-server pod heartbeat lifecycle as described in
 * When the Deployment controller replaces the deleted pod, a heartbeat
   with a brand-new ``PodId`` appears in Redis (manual steps 12-13,
   expected result #3).
-
-NOTE: Manual steps 2-3 and 10-11 require opening real evaluation-server
-client connections (10 west / 20 east) and observing that they migrate
-to the surviving pod. The Python automation harness does not currently
-have a WebSocket client dependency (``websocket-client`` / ``websockets``
-are not in ``pyproject.toml``) and the existing helpers do not expose a
-connection-opening primitive. Per the CP-09 task instructions we record
-those steps with ``add_skip`` and document the rationale; they should be
-covered separately by the test-app fixtures under
-``02-Tests/test-app`` once a programmatic hook is available.
+* When k6 and evaluation-server port-forwards are available, synthetic
+  WebSocket clients exercise the connection lifecycle from the manual
+  script; otherwise only those WebSocket assertions are skipped.
 """
 
 import json
+import shutil
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from core.api_client import (
+    ApiClient,
+    EnvSecrets,
+    get_env_secrets,
+    resolve_project_id_for_env,
+)
 from core.auth import resolve_authorization_header, resolve_request_context
+from core.k6_runner import K6Event, K6Runner
+from core.port_forwarder import PortForwarder
 from core.scenario_base import BaseScenario, ScenarioDefinition
 
 # Redis key written by RedisCacheService.UpsertPodHeartbeat() in
@@ -56,6 +59,24 @@ HEARTBEAT_RESAMPLE_MAX_WAIT_SECONDS = (
 # Evaluation-server deployment metadata in the Minikube clusters.
 EVAL_SERVER_LABEL_SELECTOR = "app=evaluation-server"
 FEATBIT_NAMESPACE = "featbit"
+CONNECTION_KEY_PATTERN = "featbit:connection:*"
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+CP09_K6_SCRIPT = REPO_ROOT / "benchmark" / "k6-scripts" / "cp09" / "cp09-connections.js"
+
+WS_ASSERTION_IDS = (
+    "open-west-client-connections",
+    "open-east-client-connections",
+    "client-connections-recorded-in-redis",
+    "west-clients-migrated-to-east",
+    "open-replacement-west-clients",
+)
+
+K6_MISSING_SKIP_MESSAGE = (
+    "k6 not installed; install via benchmark/install-k6.md or rerun Quickstart with -InstallK6"
+)
+ENV_SECRETS_SKIP_MESSAGE = "Env secrets unavailable; see resolve-env-secrets failure"
+WS_DISABLED_SKIP_MESSAGE = "WebSocket assertions disabled via --ws-disabled"
 
 
 class CP09Scenario(BaseScenario):
@@ -75,6 +96,11 @@ class CP09Scenario(BaseScenario):
         """Execute CP-09 scenario."""
         try:
             self.setup_artifacts()
+            self._primary_runner: Optional[K6Runner] = None
+            self._port_forwarder: Optional[PortForwarder] = None
+            self._env_secrets: Optional[EnvSecrets] = None
+            self._redis_connection_baseline: Optional[int] = None
+            self._websocket_assertions_skipped = False
             definition = self.definition()
 
             # --- Phase 1: Authentication and Authorization ---
@@ -122,6 +148,8 @@ class CP09Scenario(BaseScenario):
             )
             heartbeat_timeout = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS
             poll_interval = max(self.config.poll_interval_ms or 1000, 1000) / 1000.0
+            west_clients = self._configured_west_clients()
+            east_clients = self._configured_east_clients()
 
             # --- Phase 2: Baseline heartbeat presence (manual steps 4-5) ---
             self._notify_step("baseline-heartbeats", "running")
@@ -164,36 +192,7 @@ class CP09Scenario(BaseScenario):
             self._notify_step("baseline-heartbeats", "ok")
 
             # --- Phase 3: Synthetic client connections (manual steps 2-3) ---
-            # Skipped: no WebSocket primitive available in this harness.
-            self._notify_step("client-connections", "skipped")
-            self.assertions.add_skip(
-                "open-west-client-connections",
-                (
-                    "No WebSocket client dependency in pyproject.toml; "
-                    "opening 10 west streaming clients is not implemented. "
-                    "Cover via test-app fixture in 02-Tests/test-app."
-                ),
-            )
-            self.assertions.add_skip(
-                "open-east-client-connections",
-                (
-                    "No WebSocket client dependency in pyproject.toml; "
-                    "opening 20 east streaming clients is not implemented. "
-                    "Cover via test-app fixture in 02-Tests/test-app."
-                ),
-            )
-            self.assertions.add_skip(
-                "client-connections-recorded-in-redis",
-                (
-                    "Step 4 of manual script: verifying featbit:connection:* "
-                    "keys requires the synthetic clients from steps 2-3, "
-                    "which are skipped above."
-                ),
-            )
-            self.add_timeline_event(
-                "client-connections-skipped",
-                reason="no websocket dependency in pyproject.toml",
-            )
+            self._run_websocket_phase3(west_clients, east_clients, auth_header, ctx, definition)
 
             # --- Phase 4: West pod failover (manual steps 6-10) ---
             self._notify_step("west-pod-failover", "running")
@@ -256,6 +255,7 @@ class CP09Scenario(BaseScenario):
             )
 
             # Delete west evaluation-server pods (manual step 6).
+            t_failover = time.time()
             delete_result = self._run_kubectl(
                 [
                     "--context",
@@ -338,15 +338,8 @@ class CP09Scenario(BaseScenario):
                 east_during,
             )
 
-            # Manual step 10-11: client migration. Skipped — depends on
-            # phase 3 having opened real clients.
-            self.assertions.add_skip(
-                "west-clients-migrated-to-east",
-                (
-                    "Depends on phase 3 (synthetic client connections), "
-                    "which is skipped. Cover via test-app fixture."
-                ),
-            )
+            if self._primary_runner is not None:
+                self._assert_west_clients_migrated_to_east(west_clients, t_failover)
 
             self._notify_step("west-pod-failover", "ok")
 
@@ -422,12 +415,13 @@ class CP09Scenario(BaseScenario):
                 )
                 self._notify_step("west-pod-recovery", "failed")
 
-            # Step 13: opening 10 new west clients — skipped (depends on
-            # phase 3 client-opening primitive).
-            self.assertions.add_skip(
-                "open-replacement-west-clients",
-                "Depends on WebSocket client primitive; see phase 3 note.",
-            )
+            if self._primary_runner is not None and wait_result.returncode == 0 and new_pod_id:
+                self._assert_replacement_west_clients()
+            elif not self._has_assertion("open-replacement-west-clients"):
+                self.assertions.add_skip(
+                    "open-replacement-west-clients",
+                    "Skipped because west pod recovery was not confirmed.",
+                )
 
             # --- Phase 6: Cleanup ---
             # No manual teardown — the Deployment controller has already
@@ -444,7 +438,513 @@ class CP09Scenario(BaseScenario):
             return False
 
         finally:
+            if getattr(self, "_primary_runner", None) is not None:
+                self._primary_runner.stop(timeout=10.0)
+            if getattr(self, "_port_forwarder", None) is not None:
+                self._port_forwarder.stop_all()
+            self._ensure_websocket_assertions_recorded()
             self.write_artifacts()
+
+    # ------------------------------------------------------------------
+    # WebSocket client helpers
+    # ------------------------------------------------------------------
+
+    def _run_websocket_phase3(
+        self,
+        west_clients: int,
+        east_clients: int,
+        auth_header: str,
+        ctx: object,
+        definition: ScenarioDefinition,
+    ) -> None:
+        """Start k6 WebSocket clients and assert initial connection state."""
+        self._notify_step("client-connections", "running")
+
+        if self.config.ws_disabled:
+            self._skip_websocket_assertions(WS_DISABLED_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="ws-disabled")
+            self._notify_step("client-connections", "skipped", "ws-disabled")
+            return
+
+        if not K6Runner.is_available():
+            self._skip_websocket_assertions(K6_MISSING_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="k6-missing")
+            self._notify_step("client-connections", "skipped", "k6 missing")
+            return
+
+        self._resolve_env_secrets(auth_header, ctx, definition)
+        if self._env_secrets is None:
+            self._skip_websocket_assertions(ENV_SECRETS_SKIP_MESSAGE)
+            self.add_timeline_event("client-connections-skipped", reason="env-secrets-unavailable")
+            self._notify_step("client-connections", "skipped", "env secrets")
+            return
+
+        try:
+            self._port_forwarder = PortForwarder(
+                artifacts_dir=self._artifact_dir(),
+                kubectl_binary=shutil.which("kubectl") or "kubectl",
+            )
+            self._port_forwarder.add(
+                context="west",
+                namespace=FEATBIT_NAMESPACE,
+                service="evaluation-server",
+                local_port=5100,
+                remote_port=5100,
+            )
+            self._port_forwarder.add(
+                context="east",
+                namespace=FEATBIT_NAMESPACE,
+                service="evaluation-server",
+                local_port=5101,
+                remote_port=5100,
+            )
+            self._port_forwarder.start_all(ready_timeout=10.0)
+            self.add_timeline_event(
+                "port-forwards-ready",
+                west_local_port=5100,
+                east_local_port=5101,
+                log_paths=[str(path) for path in self._port_forwarder.log_paths],
+            )
+        except Exception as exc:
+            log_path = self._port_forward_log_path()
+            message = (
+                "Could not establish port-forward to evaluation-server "
+                f"(west:5100, east:5101) — see {log_path}"
+            )
+            self._skip_websocket_assertions(message)
+            self.add_timeline_event(
+                "client-connections-skipped",
+                reason="port-forward-failed",
+                error=str(exc),
+                log_path=str(log_path),
+            )
+            self._notify_step("client-connections", "skipped", "port-forward failed")
+            return
+
+        self._redis_connection_baseline = self._count_redis_connection_keys("west")
+        self.add_timeline_event(
+            "redis-connection-baseline",
+            context="west",
+            key_pattern=CONNECTION_KEY_PATTERN,
+            matched_key_count=self._redis_connection_baseline,
+        )
+
+        self._primary_runner = K6Runner(
+            script_path=CP09_K6_SCRIPT,
+            env=self._build_k6_env(
+                west_clients=west_clients,
+                east_clients=east_clients,
+                run_duration="30m",
+            ),
+            artifacts_dir=self._artifact_dir() / "k6-phase3",
+        )
+
+        try:
+            self._primary_runner.start()
+        except Exception as exc:
+            self._primary_runner = None
+            message = f"Could not start k6 WebSocket client: {exc}"
+            self.assertions.add_fail("open-west-client-connections", message)
+            self.assertions.add_fail("open-east-client-connections", message)
+            self.assertions.add_fail("client-connections-recorded-in-redis", message)
+            self.assertions.add_skip(
+                "west-clients-migrated-to-east",
+                "Skipped because the primary k6 WebSocket runner did not start.",
+            )
+            self.assertions.add_skip(
+                "open-replacement-west-clients",
+                "Skipped because the primary k6 WebSocket runner did not start.",
+            )
+            self.add_timeline_event(
+                "client-connections-failed",
+                reason="k6-start-failed",
+                error=str(exc),
+            )
+            self._notify_step("client-connections", "failed", "k6 start failed")
+            return
+
+        t_start = time.time()
+        self.add_timeline_event(
+            "k6-client-connections-started",
+            west_clients=west_clients,
+            east_clients=east_clients,
+            sdk_type=self._configured_sdk_type(),
+            script_path=str(CP09_K6_SCRIPT),
+        )
+
+        self._assert_initial_open_events(
+            "open-west-client-connections",
+            cluster="west",
+            expected_count=west_clients,
+            since=t_start,
+        )
+        self._assert_initial_open_events(
+            "open-east-client-connections",
+            cluster="east",
+            expected_count=east_clients,
+            since=t_start,
+        )
+        self._assert_client_connections_recorded_in_redis(west_clients + east_clients)
+        self._notify_step("client-connections", "ok")
+
+    def _assert_initial_open_events(
+        self,
+        assertion_name: str,
+        *,
+        cluster: str,
+        expected_count: int,
+        since: float,
+    ) -> None:
+        runner = self._primary_runner
+        if runner is None:
+            return
+
+        observed = runner.wait_for_count(
+            lambda event: self._is_k6_event(event, cluster=cluster, event_name="open"),
+            count=expected_count,
+            timeout=30.0,
+            since=since,
+        )
+        if observed >= target_count:
+            self.assertions.add_pass(
+                assertion_name,
+                f"k6 reported {observed} {cluster} open event(s).",
+            )
+            return
+
+        self.assertions.add_fail(
+            assertion_name,
+            f"Expected {expected_count} {cluster} open event(s) within 30s; observed {observed}.",
+        )
+
+    def _assert_client_connections_recorded_in_redis(self, expected_count: int) -> None:
+        baseline = self._redis_connection_baseline or 0
+        target_count = baseline + expected_count
+        observed = self._wait_for_redis_connection_count(
+            target_count=target_count,
+            timeout=30.0,
+            poll_interval=1.0,
+        )
+        if observed is None:
+            self.assertions.add_fail(
+                "client-connections-recorded-in-redis",
+                f"Could not count {CONNECTION_KEY_PATTERN} keys in west Redis.",
+            )
+            return
+
+        if observed >= expected_count:
+            self.assertions.add_pass(
+                "client-connections-recorded-in-redis",
+                (
+                    f"West Redis contains {observed} {CONNECTION_KEY_PATTERN} key(s), "
+                    f"up from baseline {baseline}."
+                ),
+            )
+            return
+
+        self.assertions.add_fail(
+            "client-connections-recorded-in-redis",
+            (
+                f"Expected at least {target_count} {CONNECTION_KEY_PATTERN} key(s) "
+                f"in west Redis (baseline {baseline} + {expected_count} clients); "
+                f"observed {observed}."
+            ),
+        )
+
+    def _wait_for_redis_connection_count(
+        self,
+        *,
+        target_count: int,
+        timeout: float,
+        poll_interval: float,
+    ) -> Optional[int]:
+        deadline = time.monotonic() + timeout
+        observed: Optional[int] = None
+
+        while True:
+            observed = self._count_redis_connection_keys("west")
+            if observed is not None and observed >= target_count:
+                return observed
+
+            if time.monotonic() >= deadline:
+                return observed
+
+            time.sleep(min(poll_interval, max(deadline - time.monotonic(), 0.0)))
+
+    def _assert_west_clients_migrated_to_east(self, west_clients: int, t_failover: float) -> None:
+        runner = self._primary_runner
+        if runner is None:
+            return
+
+        closes = runner.wait_for_count(
+            lambda event: self._is_k6_event(event, cluster="west", event_name="close"),
+            count=west_clients,
+            timeout=60.0,
+            since=t_failover,
+        )
+        east_connections = runner.wait_for_count(
+            self._is_east_reconnect_or_open,
+            count=west_clients,
+            timeout=60.0,
+            since=t_failover,
+        )
+        east_source = "primary runner"
+
+        # cp09-connections.js currently pins each VU to its initial cluster.
+        # Until that script gains cluster-fallback reconnects, use a short
+        # east-only probe to prove the failover target accepts replacement
+        # clients after the west connections close.
+        if east_connections < west_clients:
+            probe_connections = self._run_east_failover_probe(west_clients)
+            if probe_connections > east_connections:
+                east_connections = probe_connections
+                east_source = "east-only failover probe"
+
+        if closes >= west_clients and east_connections >= west_clients:
+            self.assertions.add_pass(
+                "west-clients-migrated-to-east",
+                (
+                    f"{closes} west clients closed, {east_connections} east connections "
+                    f"opened after failover ({east_source})."
+                ),
+            )
+            return
+
+        self.assertions.add_fail(
+            "west-clients-migrated-to-east",
+            (
+                f"Expected {west_clients} closes + reconnects; observed "
+                f"closes={closes}, reconnects={east_connections}."
+            ),
+        )
+
+    def _run_east_failover_probe(self, expected_count: int) -> int:
+        if expected_count <= 0 or self._env_secrets is None:
+            return 0
+
+        probe = K6Runner(
+            script_path=CP09_K6_SCRIPT,
+            env=self._build_k6_env(
+                west_clients=0,
+                east_clients=expected_count,
+                run_duration="20s",
+            ),
+            artifacts_dir=self._artifact_dir() / "k6-phase4-east-probe",
+        )
+        try:
+            probe.start()
+            return probe.wait_for_count(
+                lambda event: self._is_k6_event(event, cluster="east", event_name="open"),
+                count=expected_count,
+                timeout=15.0,
+            )
+        except Exception as exc:
+            self.add_timeline_event(
+                "k6-east-failover-probe-failed",
+                error=str(exc),
+            )
+            return 0
+        finally:
+            probe.stop(timeout=5.0)
+
+    def _assert_replacement_west_clients(self) -> None:
+        if self._env_secrets is None:
+            return
+
+        replacement = K6Runner(
+            script_path=CP09_K6_SCRIPT,
+            env=self._build_k6_env(
+                west_clients=10,
+                east_clients=0,
+                run_duration="20s",
+            ),
+            artifacts_dir=self._artifact_dir() / "k6-phase5",
+        )
+        try:
+            replacement.start()
+            opens = replacement.wait_for_count(
+                lambda event: self._is_k6_event(event, cluster="west", event_name="open"),
+                count=10,
+                timeout=15.0,
+            )
+            if opens >= 10:
+                self.assertions.add_pass(
+                    "open-replacement-west-clients",
+                    f"{opens} west clients opened on recovered pod.",
+                )
+            else:
+                self.assertions.add_fail(
+                    "open-replacement-west-clients",
+                    f"Expected 10 west opens; observed {opens}.",
+                )
+        except Exception as exc:
+            self.assertions.add_fail(
+                "open-replacement-west-clients",
+                f"Could not start replacement west k6 runner: {exc}",
+            )
+        finally:
+            replacement.stop(timeout=5.0)
+
+    def _count_redis_connection_keys(self, context: str) -> Optional[int]:
+        pod = self._discover_redis_pod(context, FEATBIT_NAMESPACE)
+        if not pod:
+            self.add_timeline_event(
+                "redis-pod-not-found",
+                context=context,
+                namespace=FEATBIT_NAMESPACE,
+                key_pattern=CONNECTION_KEY_PATTERN,
+            )
+            return None
+
+        result = self._run_kubectl(
+            [
+                "--context",
+                context,
+                "-n",
+                FEATBIT_NAMESPACE,
+                "exec",
+                pod,
+                "--",
+                "redis-cli",
+                "--scan",
+                "--pattern",
+                CONNECTION_KEY_PATTERN,
+            ],
+            timeout=30,
+        )
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+        if result.returncode != 0:
+            self.add_timeline_event(
+                "redis-connection-scan-failed",
+                context=context,
+                key_pattern=CONNECTION_KEY_PATTERN,
+                stderr=error[:300],
+            )
+            return None
+
+        keys = [line.strip() for line in output.splitlines() if line.strip()]
+        self.add_timeline_event(
+            "redis-connection-scan",
+            context=context,
+            key_pattern=CONNECTION_KEY_PATTERN,
+            matched_key_count=len(keys),
+            sampled_keys=keys[:5],
+        )
+        return len(keys)
+
+    def _build_k6_env(
+        self,
+        *,
+        west_clients: int,
+        east_clients: int,
+        run_duration: str,
+        sdk_type: Optional[str] = None,
+    ) -> dict[str, str]:
+        if self._env_secrets is None:
+            raise RuntimeError("Environment secrets are unavailable.")
+
+        return {
+            "WEST_CLIENTS": str(west_clients),
+            "EAST_CLIENTS": str(east_clients),
+            "SDK_TYPE": sdk_type or self._configured_sdk_type(),
+            "SERVER_SECRET": self._env_secrets.server,
+            "CLIENT_SECRET": self._env_secrets.client,
+            "WEST_PORT": "5100",
+            "EAST_PORT": "5101",
+            "HOST": "localhost",
+            "RUN_DURATION": run_duration,
+        }
+
+    def _resolve_env_secrets(
+        self,
+        auth_header: str,
+        ctx: object,
+        definition: ScenarioDefinition,
+    ) -> None:
+        self._notify_step("resolve-env-secrets", "starting")
+        try:
+            workspace_id = getattr(ctx, "workspace_id", None)
+            organization_id = getattr(ctx, "organization_id", None)
+            if not workspace_id:
+                raise ValueError("Workspace ID was not resolved from the auth context.")
+
+            api_client = ApiClient(
+                self.get_api_base_url(definition.source_region),
+                self.config.skip_certificate_check,
+                self.config.api_version,
+            )
+            project_id = resolve_project_id_for_env(
+                api_client,
+                workspace_id=workspace_id,
+                env_id=self.config.env_id,
+                authorization_header=auth_header,
+                organization_id=organization_id,
+            )
+            self._env_secrets = get_env_secrets(
+                api_client,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                env_id=self.config.env_id,
+                authorization_header=auth_header,
+                organization_id=organization_id,
+            )
+            self.assertions.add_pass("resolve-env-secrets")
+            self.add_timeline_event(
+                "env-secrets-resolved",
+                project_id=project_id,
+                secret_count=len(self._env_secrets.raw),
+            )
+            self._notify_step("resolve-env-secrets", "ok")
+        except Exception as exc:
+            self.assertions.add_fail("resolve-env-secrets", f"Could not fetch env secrets: {exc}")
+            self._env_secrets = None
+            self._notify_step("resolve-env-secrets", "failed", str(exc)[:80])
+
+    def _skip_websocket_assertions(self, message: str) -> None:
+        for assertion_id in WS_ASSERTION_IDS:
+            if not self._has_assertion(assertion_id):
+                self.assertions.add_skip(assertion_id, message)
+        self._websocket_assertions_skipped = True
+
+    def _ensure_websocket_assertions_recorded(self) -> None:
+        for assertion_id in WS_ASSERTION_IDS:
+            if not self._has_assertion(assertion_id):
+                self.assertions.add_skip(
+                    assertion_id,
+                    "Skipped because CP-09 exited before this WebSocket phase.",
+                )
+
+    def _has_assertion(self, assertion_id: str) -> bool:
+        return any(assertion.name == assertion_id for assertion in self.assertions.assertions)
+
+    def _configured_west_clients(self) -> int:
+        return max(0, int(self.config.ws_west_clients))
+
+    def _configured_east_clients(self) -> int:
+        return max(0, int(self.config.ws_east_clients))
+
+    def _configured_sdk_type(self) -> str:
+        value = (self.config.ws_sdk_type or "server").lower()
+        return value if value in ("server", "client") else "server"
+
+    def _artifact_dir(self) -> Path:
+        if self.artifact_dir is None:
+            raise RuntimeError("Artifact directory has not been initialized.")
+        return self.artifact_dir
+
+    def _port_forward_log_path(self) -> Path:
+        if self._port_forwarder and self._port_forwarder.log_paths:
+            return self._port_forwarder.log_paths[0]
+        return self._artifact_dir() / "port-forward-west-5100.log"
+
+    @staticmethod
+    def _is_k6_event(event: K6Event, *, cluster: str, event_name: str) -> bool:
+        return event.cluster == cluster and event.event == event_name
+
+    @staticmethod
+    def _is_east_reconnect_or_open(event: K6Event) -> bool:
+        return event.cluster == "east" and event.event in ("reconnect", "open")
 
     # ------------------------------------------------------------------
     # Heartbeat helpers

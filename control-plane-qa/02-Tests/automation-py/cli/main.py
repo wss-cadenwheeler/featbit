@@ -321,7 +321,7 @@ def seed(
 ) -> None:
     """Seed control-plane QA data: create org/project/env/flags."""
     click.echo("Seeding control-plane QA data...")
-    
+
     try:
         result = seed_module.seed(
             west_api_base_url=west_api_base_url,
@@ -340,7 +340,7 @@ def seed(
         click.echo(f"  Organization: {result['organization_id']}")
         click.echo(f"  Project: {result['project_id']}")
         click.echo(f"  Environment: {result['environment_id']}")
-        
+
         # Output in key=value format for shell capture
         click.echo(f"\nEnvironment: {result['environment_id']} ({result['env_id_guid']})")
     except Exception as e:
@@ -424,6 +424,28 @@ def seed(
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
 @click.option("--app-log-check", default=lambda: get_env("APP_LOG_CHECK_COMMAND", ""))
+@click.option(
+    "--ws-west-clients",
+    type=int,
+    default=10,
+    show_default=True,
+    help="CP-09 west WebSocket client count",
+)
+@click.option(
+    "--ws-east-clients",
+    type=int,
+    default=20,
+    show_default=True,
+    help="CP-09 east WebSocket client count",
+)
+@click.option(
+    "--ws-sdk-type",
+    type=click.Choice(["server", "client"], case_sensitive=False),
+    default="server",
+    show_default=True,
+    help="CP-09 WebSocket SDK type",
+)
+@click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 def scenario(
     scenario: str,
@@ -450,6 +472,10 @@ def scenario(
     redis_west_check: str,
     redis_east_check: str,
     app_log_check: str,
+    ws_west_clients: int,
+    ws_east_clients: int,
+    ws_sdk_type: str,
+    ws_disabled: bool,
     artifacts_root: str,
 ) -> None:
     """Run a single scenario."""
@@ -481,6 +507,10 @@ def scenario(
         redis_east_check_command=redis_east_check or None,
         app_log_check_command=app_log_check or None,
         artifacts_root=artifacts_root,
+        ws_west_clients=ws_west_clients,
+        ws_east_clients=ws_east_clients,
+        ws_sdk_type=ws_sdk_type.lower(),
+        ws_disabled=ws_disabled,
     )
 
     if scenario.startswith("cp01"):
@@ -512,7 +542,7 @@ def scenario(
     else:
         click.echo(f"✗ FAIL: {scenario}")
         click.echo("")
-        
+
         failed = scenario_obj.assertions.get_failed()
         passed_count = scenario_obj.assertions.get_passed_count()
         failed_count = scenario_obj.assertions.get_failed_count()
@@ -520,7 +550,7 @@ def scenario(
 
         click.echo(f"Results: {passed_count} passed | {failed_count} FAILED | {skipped_count} skipped")
         click.echo("")
-        
+
         if failed:
             click.echo("Failed Assertions:")
             for assertion in failed:
@@ -528,12 +558,12 @@ def scenario(
                 if assertion.details:
                     click.echo(f"    └─ {assertion.details}")
             click.echo("")
-        
+
         click.echo(f"Artifacts Directory: {scenario_obj.artifact_dir}")
         click.echo(f"  timeline.json ........... detailed event log")
         click.echo(f"  assertions.json ........ all assertion details")
         click.echo(f"  summary.json ........... overall result summary")
-        
+
         raise SystemExit(1)
 
 
@@ -658,6 +688,28 @@ class _null_context:
 )
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
+@click.option(
+    "--ws-west-clients",
+    type=int,
+    default=10,
+    show_default=True,
+    help="CP-09 west WebSocket client count",
+)
+@click.option(
+    "--ws-east-clients",
+    type=int,
+    default=20,
+    show_default=True,
+    help="CP-09 east WebSocket client count",
+)
+@click.option(
+    "--ws-sdk-type",
+    type=click.Choice(["server", "client"], case_sensitive=False),
+    default="server",
+    show_default=True,
+    help="CP-09 WebSocket SDK type",
+)
+@click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 @click.option(
     "--chaos-mesh-manifest",
@@ -690,6 +742,10 @@ def suite(
     skip_cert_check: bool,
     redis_west_check: str,
     redis_east_check: str,
+    ws_west_clients: int,
+    ws_east_clients: int,
+    ws_sdk_type: str,
+    ws_disabled: bool,
     artifacts_root: str,
     chaos_mesh_manifest: str,
     no_dashboard: bool,
@@ -859,6 +915,10 @@ def suite(
                 redis_east_check_command=redis_east_check or None,
                 artifacts_root=artifacts_root,
                 flag_ids_by_key=seeded_flag_ids_by_key,
+                ws_west_clients=ws_west_clients,
+                ws_east_clients=ws_east_clients,
+                ws_sdk_type=ws_sdk_type.lower(),
+                ws_disabled=ws_disabled,
             )
 
             if scenario_name.startswith("cp01"):
