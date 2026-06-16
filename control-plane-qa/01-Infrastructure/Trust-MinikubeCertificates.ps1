@@ -21,6 +21,13 @@
     Use -DryRun to preview all actions without executing any remote commands or
     downloading any files.
 
+    Certificate sources (evaluated in order):
+      1. TRUST_CERTIFICATES in deployment.env  — semicolon-separated "name|url|target" entries.
+      2. -WindowsCertStoreSubjects             — subject substring patterns exported directly from
+                                                the Windows LocalMachine\Root and CA stores.
+                                                Useful when the CA is trusted on the host but not
+                                                accessible at a downloadable URL.
+
 .PARAMETER Clusters
     Minikube profile names to update. Defaults to @("west", "east").
 
@@ -41,7 +48,14 @@
     clusters they would be installed, and which Docker hosts would be trusted —
     without executing any minikube or Invoke-WebRequest commands.
 
+.PARAMETER WindowsCertStoreSubjects
+    Subject substrings to match against the Windows LocalMachine cert stores (Root + CA).
+    All unique matching certs are exported as PEM and installed in the clusters.
+    Useful when the CA is trusted on the host but not accessible at a downloadable URL.
+    Example: @("My Corp CA", "Corporate Root CA 2024")
+
 .EXAMPLE
+    # Trust certs listed in deployment.env
     .\Trust-MinikubeCertificates.ps1
 
     Uses defaults from deployment.env: TRUST_CERTIFICATES for the certificate list and
@@ -63,12 +77,17 @@
     .\Trust-MinikubeCertificates.ps1 -Clusters @("dev", "test") -DeploymentEnvFile "C:\projects\myenv\deployment.env"
 
     Updates the dev and test clusters using an explicit deployment.env path.
+
+.EXAMPLE
+    # Export corporate CAs directly from the Windows cert store
+    .\Trust-MinikubeCertificates.ps1 -WindowsCertStoreSubjects @("My Corp CA") -RegistryHosts registry.example.com
 #>
 [CmdletBinding()]
 param(
-    [string[]] $Clusters          = @("west", "east"),
-    [string[]] $RegistryHosts     = @(),
-    [string]   $DeploymentEnvFile = "",
+    [string[]] $Clusters                 = @("west", "east"),
+    [string[]] $RegistryHosts            = @(),
+    [string]   $DeploymentEnvFile        = "",
+    [string[]] $WindowsCertStoreSubjects = @(),
     [switch]   $DryRun
 )
 
@@ -114,21 +133,31 @@ if (-not $PSBoundParameters.ContainsKey('RegistryHosts')) {
 }
 
 # ─── Load TRUST_CERTIFICATES ─────────────────────────────────────────────────
+#
+# Certificate sources (both may be combined):
+#   1. TRUST_CERTIFICATES in deployment.env  — semicolon-separated "name|url|target" entries.
+#   2. -WindowsCertStoreSubjects             — subject substrings matched against the Windows
+#                                             LocalMachine\Root and CA stores, exported as PEM.
 
 $trustCertificatesRaw = Get-DeploymentEnvValue -EnvFilePath $resolvedEnvFile -Key "TRUST_CERTIFICATES"
 
-if (-not $trustCertificatesRaw -and $RegistryHosts.Count -eq 0) {
-    Write-Host "TRUST_CERTIFICATES is not configured and no registry hosts are specified — nothing to do." -ForegroundColor DarkGray
+if (-not $trustCertificatesRaw -and $WindowsCertStoreSubjects.Count -eq 0 -and $RegistryHosts.Count -eq 0) {
+    Write-Host "TRUST_CERTIFICATES is not configured, no -WindowsCertStoreSubjects supplied, and no registry hosts are specified — nothing to do." -ForegroundColor DarkGray
     return
 }
 
-if (-not $trustCertificatesRaw -and $RegistryHosts.Count -gt 0) {
-    throw "TRUST_CERTIFICATES is empty but -RegistryHosts was supplied. Configure TRUST_CERTIFICATES in deployment.env."
+if (-not $trustCertificatesRaw -and $WindowsCertStoreSubjects.Count -eq 0 -and $RegistryHosts.Count -gt 0) {
+    throw "No certificate sources configured but -RegistryHosts was supplied. Set TRUST_CERTIFICATES in deployment.env or pass -WindowsCertStoreSubjects."
 }
 
-$certificates = $trustCertificatesRaw -split ";" | Where-Object { $_ } | ForEach-Object {
-    $parts = $_ -split "\|"
-    @{ Name = $parts[0].Trim(); Url = $parts[1].Trim(); Target = $parts[2].Trim() }
+# Typed list so both sources (TRUST_CERTIFICATES and Windows cert store) can .Add().
+$certificates = [System.Collections.Generic.List[hashtable]]::new()
+
+if ($trustCertificatesRaw) {
+    foreach ($entry in ($trustCertificatesRaw -split ";" | Where-Object { $_ })) {
+        $parts = $entry -split "\|"
+        $certificates.Add(@{ Name = $parts[0].Trim(); Url = $parts[1].Trim(); Target = $parts[2].Trim() })
+    }
 }
 
 # ─── Dry run: preview all actions and return ─────────────────────────────────
@@ -136,9 +165,21 @@ $certificates = $trustCertificatesRaw -split ";" | Where-Object { $_ } | ForEach
 if ($DryRun) {
     Write-Host "`n[DRY RUN] Trust-MinikubeCertificates — no changes will be made." -ForegroundColor Cyan
     Write-Host "`nClusters : $($Clusters -join ', ')" -ForegroundColor Cyan
-    Write-Host "`nCertificates that would be downloaded and installed:" -ForegroundColor Cyan
-    foreach ($cert in $certificates) {
-        Write-Host "  [$($cert.Name)]  url=$($cert.Url)  target=$($cert.Target)" -ForegroundColor Cyan
+    Write-Host "`nCertificates from TRUST_CERTIFICATES that would be downloaded and installed:" -ForegroundColor Cyan
+    if ($certificates.Count -eq 0) {
+        Write-Host "  (none)" -ForegroundColor DarkGray
+    } else {
+        foreach ($cert in $certificates) {
+            Write-Host "  [$($cert.Name)]  url=$($cert.Url)  target=$($cert.Target)" -ForegroundColor Cyan
+        }
+    }
+    Write-Host "`nWindows cert store subjects that would be exported and installed:" -ForegroundColor Cyan
+    if ($WindowsCertStoreSubjects.Count -eq 0) {
+        Write-Host "  (none)" -ForegroundColor DarkGray
+    } else {
+        foreach ($subject in $WindowsCertStoreSubjects) {
+            Write-Host "  $subject" -ForegroundColor Cyan
+        }
     }
     if ($RegistryHosts.Count -gt 0) {
         Write-Host "`nDocker daemon trust would be written for:" -ForegroundColor Cyan
@@ -158,8 +199,42 @@ if (-not (Test-Path $tempDir)) {
     New-Item -ItemType Directory -Path $tempDir | Out-Null
 }
 
+# Source 2: Windows LocalMachine cert store export (no URL required)
+if ($WindowsCertStoreSubjects.Count -gt 0) {
+    $seen = @{}
+    $allStoreCerts = @(Get-ChildItem Cert:\LocalMachine\Root) + @(Get-ChildItem Cert:\LocalMachine\CA)
+    foreach ($subject in $WindowsCertStoreSubjects) {
+        foreach ($cert in ($allStoreCerts | Where-Object { $_.Subject -match [regex]::Escape($subject) })) {
+            if ($seen.ContainsKey($cert.Thumbprint)) { continue }
+            $seen[$cert.Thumbprint] = $true
+            $safeName = "wincert-$($cert.Thumbprint.Substring(0,8).ToLower())"
+            $localPath = Join-Path $tempDir "$safeName.crt"
+            $pem = "-----BEGIN CERTIFICATE-----`r`n" +
+                   [Convert]::ToBase64String($cert.RawData, [System.Base64FormattingOptions]::InsertLineBreaks) +
+                   "`r`n-----END CERTIFICATE-----"
+            [System.IO.File]::WriteAllText($localPath, $pem, [System.Text.Encoding]::ASCII)
+            $certificates.Add(@{
+                Name      = $safeName
+                Url       = ""         # already on disk — skip download
+                Target    = "/usr/local/share/ca-certificates/$safeName.crt"
+                LocalPath = $localPath
+            })
+            Write-Host "  Exported from Windows store: $($cert.Subject)"
+        }
+    }
+}
+
+if ($certificates.Count -eq 0) {
+    Write-Warning "No certificates to install. Set TRUST_CERTIFICATES in deployment.env or pass -WindowsCertStoreSubjects."
+    exit 0
+}
+
 try {
     foreach ($certificate in $certificates) {
+        if ($certificate.LocalPath) {
+            # Already exported from the Windows cert store — no download needed.
+            continue
+        }
         $localPath = Join-Path $tempDir "$($certificate.Name).crt"
         Write-Host "Downloading $($certificate.Url)..."
         try {

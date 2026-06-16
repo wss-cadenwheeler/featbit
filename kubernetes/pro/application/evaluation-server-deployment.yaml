@@ -25,7 +25,7 @@ spec:
               value: kafka:9092
             - name: Kafka__Consumer__bootstrap.servers
               value: kafka-aggregate:9092
-            - name: ControlPlane__UseControlPlane
+            - name: ControlPlane__Enabled
               value: "true"
             - name: MongoDb__ConnectionString
               value: mongodb://admin:password@mongodb:27017
@@ -34,10 +34,10 @@ spec:
             - name: Redis__ConnectionString
               value: redis:6379
           image: featbit/featbit-evaluation-server:latest
-          # NOTE: The Kafka and ControlPlane__UseControlPlane settings below are overridden at
+          # NOTE: The Kafka and ControlPlane__Enabled settings below are overridden at
           # deploy time by Deploy-FeatBitClusters.ps1 based on the deployment mode:
-          #   Advanced — Consumer points to kafka-aggregate:9092; ControlPlane__UseControlPlane=true
-          #   Basic    — Consumer points to kafka:9092; ControlPlane__UseControlPlane=true
+          #   Advanced — Consumer points to kafka-aggregate:9092; ControlPlane__Enabled=true
+          #   Basic    — Consumer points to kafka:9092; ControlPlane__Enabled=true
           name: evaluation-server
           ports:
             - containerPort: 5100

@@ -67,19 +67,19 @@ Describe "Trust-MinikubeCertificates - default invocation" {
 
     # ── A-2: empty TRUST_CERTIFICATES but RegistryHosts supplied ─────────────
 
-    Context "with empty TRUST_CERTIFICATES but RegistryHosts explicitly supplied" {
+    Context "with no cert sources but RegistryHosts explicitly supplied" {
 
         BeforeAll {
             $envFile = Join-Path $TestDrive "deployment.env"
             Set-Content -Path $envFile -Value "CUSTOM_IMAGE_REGISTRY="
         }
 
-        It "throws with a message matching *TRUST_CERTIFICATES is empty but -RegistryHosts*" {
+        It "throws with a message matching *No certificate sources configured but -RegistryHosts*" {
             {
                 . $script:SutPath `
                     -DeploymentEnvFile $envFile `
                     -RegistryHosts @("myregistry.example.com")
-            } | Should -Throw "*TRUST_CERTIFICATES is empty but -RegistryHosts*"
+            } | Should -Throw "*No certificate sources configured but -RegistryHosts*"
         }
     }
 }

@@ -109,17 +109,29 @@ public class CompositeRedisCacheService(
         }
     }
 
-    public Task UpsertPodHeartbeat(HealthMessage healthMessage) =>
-        BroadcastAsync(s => s.UpsertPodHeartbeat(healthMessage), nameof(UpsertPodHeartbeat));
+    // Heartbeats live ONLY in the local DC's Redis (cacheServices.First()).
+    // - UpsertPodHeartbeat writes to the local instance only (this method).
+    // - GetAllHealthMessages reads from the local instance only.
+    // - DeletePodConnection still broadcasts, because it also clears the pod's
+    //   connection keys, and those were broadcast on connect by
+    //   UpsertConnectionMadeAsync.
+    // Each DC's control plane MUST be configured with its own Redis as
+    // Redis:Instances[0] for this contract to hold.
+    public Task UpsertPodHeartbeat(HealthMessage healthMessage)
+    {
+        var local = cacheServices.First();
+        return ExecuteSafelyAsync(
+            local,
+            s => s.UpsertPodHeartbeat(healthMessage),
+            nameof(UpsertPodHeartbeat));
+    }
 
     public Task DeletePodConnection(Guid podId) =>
         BroadcastAsync(s => s.DeletePodConnection(podId), nameof(DeletePodConnection));
 
     public Task<List<HealthMessage>> GetAllHealthMessages()
     {
-        // Heartbeats are local to the DC of the pod that produced them, so we only
-        // read from the first (local) instance rather than aggregating across DCs.
-        var first = cacheServices.First();
-        return first.GetAllHealthMessages();
+        var local = cacheServices.First();
+        return local.GetAllHealthMessages();
     }
 }
