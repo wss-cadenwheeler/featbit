@@ -446,6 +446,25 @@ def seed(
     help="CP-09 WebSocket SDK type",
 )
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
+@click.option(
+    "--ws-lb-host",
+    default="featbit-eval.local",
+    show_default=True,
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+)
+@click.option(
+    "--ws-lb-port",
+    type=int,
+    default=80,
+    show_default=True,
+    help="CP-09 WebSocket load balancer port",
+)
+@click.option(
+    "--ws-use-load-balancer/--ws-no-load-balancer",
+    default=True,
+    show_default=True,
+    help="Route CP-09 WebSocket clients through the nginx LB (default) or pin VUs per cluster",
+)
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 def scenario(
     scenario: str,
@@ -476,6 +495,9 @@ def scenario(
     ws_east_clients: int,
     ws_sdk_type: str,
     ws_disabled: bool,
+    ws_lb_host: str,
+    ws_lb_port: int,
+    ws_use_load_balancer: bool,
     artifacts_root: str,
 ) -> None:
     """Run a single scenario."""
@@ -511,6 +533,9 @@ def scenario(
         ws_east_clients=ws_east_clients,
         ws_sdk_type=ws_sdk_type.lower(),
         ws_disabled=ws_disabled,
+        ws_lb_host=ws_lb_host,
+        ws_lb_port=ws_lb_port,
+        ws_use_load_balancer=ws_use_load_balancer,
     )
 
     if scenario.startswith("cp01"):
@@ -710,6 +735,25 @@ class _null_context:
     help="CP-09 WebSocket SDK type",
 )
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
+@click.option(
+    "--ws-lb-host",
+    default="featbit-eval.local",
+    show_default=True,
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+)
+@click.option(
+    "--ws-lb-port",
+    type=int,
+    default=80,
+    show_default=True,
+    help="CP-09 WebSocket load balancer port",
+)
+@click.option(
+    "--ws-use-load-balancer/--ws-no-load-balancer",
+    default=True,
+    show_default=True,
+    help="Route CP-09 WebSocket clients through the nginx LB (default) or pin VUs per cluster",
+)
 @click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
 @click.option(
     "--chaos-mesh-manifest",
@@ -746,6 +790,9 @@ def suite(
     ws_east_clients: int,
     ws_sdk_type: str,
     ws_disabled: bool,
+    ws_lb_host: str,
+    ws_lb_port: int,
+    ws_use_load_balancer: bool,
     artifacts_root: str,
     chaos_mesh_manifest: str,
     no_dashboard: bool,
@@ -919,6 +966,9 @@ def suite(
                 ws_east_clients=ws_east_clients,
                 ws_sdk_type=ws_sdk_type.lower(),
                 ws_disabled=ws_disabled,
+                ws_lb_host=ws_lb_host,
+                ws_lb_port=ws_lb_port,
+                ws_use_load_balancer=ws_use_load_balancer,
             )
 
             if scenario_name.startswith("cp01"):

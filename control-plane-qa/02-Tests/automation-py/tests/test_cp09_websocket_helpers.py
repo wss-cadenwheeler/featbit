@@ -105,22 +105,33 @@ def test_replacement_west_clients_honors_configured_sdk_type(tmp_path, monkeypat
         def stop(self, timeout=10.0):
             return 0
 
+    # west Redis: baseline poll returns 0, growth-poll returns 5.
+    observed_west = iter([0, 5])
+    monkeypatch.setattr(
+        scenario,
+        "_count_redis_connection_keys",
+        lambda context: next(observed_west) if context == "west" else 0,
+    )
     monkeypatch.setattr(cp09, "K6Runner", FakeK6Runner)
+    monkeypatch.setattr(cp09.time, "sleep", lambda _seconds: None)
 
     scenario._assert_replacement_west_clients()
 
     assert captured_env["SDK_TYPE"] == "client"
+    assert captured_env["USE_LOAD_BALANCER"] == "true"
+    assert captured_env["STREAMING_HOST"] == "featbit-eval.local"
 
 
 def test_connection_redis_assertion_polls_until_new_connection_count_met(monkeypatch):
     scenario = CP09Scenario(_config())
     scenario._redis_connection_baseline = 5
-    observed_counts = iter([5, 35])
+    # Aggregate (west+east) Redis count: first poll returns 5, second 35.
+    observed_totals = iter([5, 35])
 
     monkeypatch.setattr(
         scenario,
-        "_count_redis_connection_keys",
-        lambda context: next(observed_counts),
+        "_count_total_redis_connection_keys",
+        lambda: next(observed_totals),
     )
     monkeypatch.setattr(cp09.time, "sleep", lambda _seconds: None)
 

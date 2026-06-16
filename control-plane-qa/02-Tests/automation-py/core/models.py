@@ -174,6 +174,9 @@ class ScenarioConfig:
     ws_east_clients: int = 20
     ws_sdk_type: str = "server"
     ws_disabled: bool = False
+    ws_use_load_balancer: bool = True
+    ws_lb_host: str = "featbit-eval.local"
+    ws_lb_port: int = 80
 
 
 class ScenariosummaryJson(BaseModel):

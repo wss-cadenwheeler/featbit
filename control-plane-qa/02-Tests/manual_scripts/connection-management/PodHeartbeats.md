@@ -26,9 +26,9 @@ client connections migrate after a west pod failover.
 
 ## Test Steps
 1. **Action:** Connect to redis instances using a gui (Redis Insights, Another Redis Desktop Manager Etc.)
-2. **Action:** Start real WebSocket clients with `benchmark\k6-scripts\cp09\cp09-connections.js` (`WEST_CLIENTS=10`, `EAST_CLIENTS=20`, valid `SERVER_SECRET`)
+2. **Action:** Start real WebSocket clients with `benchmark\k6-scripts\cp09\cp09-connections.js` (`WEST_CLIENTS=10`, `EAST_CLIENTS=20`, valid `SERVER_SECRET`). The script defaults to the nginx active/active load balancer at `featbit-eval.local:80` so clients distribute across both clusters and reconnects naturally fail over to the surviving cluster when one pod dies.
 3. **Action:** Keep the k6 run active while the pod heartbeat and failover checks execute
-4. **Action:** Verify that the clients created in steps 2 and 3 are showing up in redis
+4. **Action:** Verify that the clients created in steps 2 and 3 are showing up in both west and east Redis (`featbit:connection:*`); roughly half on each cluster under round-robin
 5. **Action:** Verify that the pod heartbeat is being recorded in redis
 6. **Action:** Take down the west pod
 7. **Action:** Wait at least 91 seconds or the length of the pod timeout that has been set
@@ -37,7 +37,7 @@ client connections migrate after a west pod failover.
 10. **Action:** Verify that the clients that were connected to the west pod are now connected to the east pod
 11. **Note:** The connections to the east pod will have a different heartbeat and connection id
 12. **Action** Bring the west pod back up
-13. **Action** Confirm k6 can open 10 west clients against the new instance of the west pod
+13. **Action** Confirm k6 can open 10 west clients against the new instance of the west pod (with the LB-mode default, push fresh clients through `featbit-eval.local:80` and observe west `featbit:connection:*` keys reappearing as nginx re-adds the recovered upstream to round-robin)
 
  
 
