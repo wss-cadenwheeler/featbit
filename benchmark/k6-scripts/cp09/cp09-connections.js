@@ -1,18 +1,41 @@
 /*
  * Long-running WebSocket load and lifecycle observer for cp09-pod-heartbeats.
  *
- * Environment variables:
+ * The default mode targets the nginx active/active load balancer at
+ * featbit-eval.local:80 (defined in control-plane-qa/01-Infrastructure/nginx.conf,
+ * upstream featbit_eval round-robins across 127.0.0.1:5100 and 127.0.0.1:5101).
+ * When the west pod dies, the nginx upstream health check (default 1 fail /
+ * fail_timeout=10s) marks it down and routes new connections — including
+ * VU reconnects — to east, giving us true client migration. When west recovers
+ * fail_timeout elapses, nginx re-adds it to rotation, so fresh clients land
+ * on west again.
+ *
+ * Environment variables — load balancer mode (default):
+ * - USE_LOAD_BALANCER: "true"|"false", default "true". When true, all VUs
+ *   connect through the shared LB and reconnects route through it too.
+ * - STREAMING_HOST: string, default "featbit-eval.local".
+ * - STREAMING_PORT: int, default 80.
+ * - WEST_CLIENTS + EAST_CLIENTS: int, default 10 + 20. In LB mode their SUM
+ *   determines the VU count; per-cluster placement is delegated to nginx
+ *   round-robin and verified server-side via Redis.
+ *
+ * Environment variables — legacy per-cluster mode (USE_LOAD_BALANCER=false):
  * - WEST_CLIENTS: int, default 10; VUs 1..WEST_CLIENTS connect to west.
  * - EAST_CLIENTS: int, default 20; remaining VUs connect to east.
+ * - HOST: string, default "localhost".
+ * - WEST_PORT: int, default 5100.
+ * - EAST_PORT: int, default 5101.
+ *
+ * Shared environment variables:
  * - SDK_TYPE: "server" or "client", default "server".
  * - SERVER_SECRET: string, required when SDK_TYPE=server.
  * - CLIENT_SECRET: string, required when SDK_TYPE=client.
- * - WEST_PORT: int, default 5100.
- * - EAST_PORT: int, default 5101.
- * - HOST: string, default "localhost".
  * - EVENT_LOG_PREFIX: string, default "CP09_EVENT". k6 cannot append to an
  *   arbitrary status file, so lifecycle events are emitted to stdout as:
- *   <prefix> {"ts":...,"vu":...,"cluster":"west|east","event":"...",...}
+ *   <prefix> {"ts":...,"vu":...,"cluster":"lb|west|east","event":"...",...}
+ *   In LB mode cluster is always "lb" because the VU does not know which
+ *   nginx backend the connection landed on — use Redis-side scans
+ *   (`featbit:connection:*` keyed per cluster) to verify distribution.
  * - RUN_DURATION: k6 duration string, default "5m". k6 exits after this duration
  *   unless the process receives SIGTERM first.
  *
@@ -31,6 +54,9 @@ const EAST_CLIENTS = parseIntegerEnv('EAST_CLIENTS', 20);
 const SDK_TYPE = (__ENV.SDK_TYPE || 'server').toLowerCase();
 const SERVER_SECRET = __ENV.SERVER_SECRET || '';
 const CLIENT_SECRET = __ENV.CLIENT_SECRET || '';
+const USE_LOAD_BALANCER = parseBooleanEnv('USE_LOAD_BALANCER', true);
+const STREAMING_HOST = __ENV.STREAMING_HOST || 'featbit-eval.local';
+const STREAMING_PORT = parseIntegerEnv('STREAMING_PORT', 80);
 const WEST_PORT = parseIntegerEnv('WEST_PORT', 5100);
 const EAST_PORT = parseIntegerEnv('EAST_PORT', 5101);
 const HOST = __ENV.HOST || 'localhost';
@@ -89,8 +115,10 @@ const PONG_MESSAGE = JSON.stringify({
 
 export default function () {
   const vu = __VU;
-  const cluster = vu <= WEST_CLIENTS ? 'west' : 'east';
-  const port = cluster === 'west' ? WEST_PORT : EAST_PORT;
+  // In LB mode every VU reports cluster="lb" because nginx round-robin
+  // decides which backend each connection lands on. Use Redis-side scans
+  // (`featbit:connection:*`) to verify per-cluster distribution.
+  const cluster = USE_LOAD_BALANCER ? 'lb' : (vu <= WEST_CLIENTS ? 'west' : 'east');
   const runStartedAt = Date.now();
   let activeForVu = 0;
   let reconnectAttempts = 0;
@@ -113,7 +141,7 @@ export default function () {
   }
 
   function connect(reconnectAttempt) {
-    const url = buildStreamingUrl(port);
+    const url = buildStreamingUrl(cluster);
     let opened = false;
 
     const response = ws.connect(url, {}, function (socket) {
@@ -217,8 +245,12 @@ export default function () {
   connect(0);
 }
 
-function buildStreamingUrl(port) {
+function buildStreamingUrl(cluster) {
   const token = encodeURIComponent(generateConnectionToken(CONNECTION_SECRET));
+  if (USE_LOAD_BALANCER) {
+    return `ws://${STREAMING_HOST}:${STREAMING_PORT}/streaming?type=${SDK_TYPE}&version=2&token=${token}`;
+  }
+  const port = cluster === 'west' ? WEST_PORT : EAST_PORT;
   return `ws://${HOST}:${port}/streaming?type=${SDK_TYPE}&version=2&token=${token}`;
 }
 
@@ -324,6 +356,22 @@ function parseIntegerEnv(name, defaultValue) {
   }
 
   return parsed;
+}
+
+function parseBooleanEnv(name, defaultValue) {
+  const raw = __ENV[name];
+  if (raw === undefined || raw === '') {
+    return defaultValue;
+  }
+
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+    return false;
+  }
+  throw new Error(`${name} must be a boolean ("true"/"false"); got "${raw}"`);
 }
 
 function parseDurationMs(duration) {
