@@ -24,8 +24,9 @@ namespace Domain.Health
         public string? DcId { get; init; }
 
         /// <summary>
-        /// The highest watermark applied per resource, keyed by resource id. Nullable so
-        /// heartbeats produced before this field existed still deserialize.
+        /// The highest committed flag version (watermark) this pod has applied per
+        /// environment, keyed by environment id. Nullable so heartbeats produced before
+        /// this field existed still deserialize.
         /// </summary>
         public Dictionary<Guid, long>? AppliedWatermarks { get; init; }
     }
