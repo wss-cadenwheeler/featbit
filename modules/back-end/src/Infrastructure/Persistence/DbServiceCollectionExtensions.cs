@@ -98,6 +98,7 @@ public static class DbServiceCollectionExtensions
             services.AddTransient<IWebhookService, EntityFrameworkCoreServices.WebhookService>();
             services.AddTransient<IInsightService, EntityFrameworkCoreServices.InsightService>();
             services.AddTransient<IRefreshTokenService, EntityFrameworkCoreServices.RefreshTokenService>();
+            services.AddTransient<Application.ControlPlane.ILeaseStore, EntityFrameworkCoreServices.PostgresLeaseStore>();
         }
     }
 }
