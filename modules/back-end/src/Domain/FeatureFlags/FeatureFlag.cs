@@ -38,6 +38,19 @@ public class FeatureFlag : FullAuditedEntity
 
     public bool IsArchived { get; set; }
 
+    /// <summary>
+    /// Monotonic version of the last COMMITTED change to this flag. The committed
+    /// value is the authoritative value that may be safely served to evaluators.
+    /// </summary>
+    public long CommittedVersion { get; set; }
+
+    /// <summary>
+    /// A staged-but-not-committed change. Null when there is no pending change
+    /// (the default). When set, the committed read must continue to return the
+    /// committed value and ignore this pending change until it is promoted.
+    /// </summary>
+    public PendingFlagChange Pending { get; set; }
+
     public FeatureFlag()
     {
     }
@@ -310,5 +323,53 @@ public class FeatureFlag : FullAuditedEntity
         Revision = Guid.NewGuid();
 
         base.MarkAsUpdated(updatorId);
+    }
+
+    /// <summary>
+    /// Stage <paramref name="pendingValue"/> as a pending (not-yet-committed) change.
+    /// The committed value is left untouched, so a committed read still returns the
+    /// old value until <see cref="PromotePending"/> is called.
+    /// </summary>
+    public void SetPending(FeatureFlag pendingValue, long version)
+    {
+        Pending = new PendingFlagChange
+        {
+            Version = version,
+            Value = pendingValue
+        };
+    }
+
+    /// <summary>
+    /// Promote the staged pending change to committed: the pending value becomes the
+    /// committed value, <see cref="CommittedVersion"/> advances to the pending version,
+    /// and the pending slot is cleared. No-op when there is no pending change.
+    /// </summary>
+    public void PromotePending()
+    {
+        if (Pending == null)
+        {
+            return;
+        }
+
+        var promoted = Pending.Value;
+        var version = Pending.Version;
+
+        // adopt the committed-relevant fields from the pending value
+        Name = promoted.Name;
+        Description = promoted.Description;
+        Key = promoted.Key;
+        VariationType = promoted.VariationType;
+        Variations = promoted.Variations;
+        TargetUsers = promoted.TargetUsers;
+        Rules = promoted.Rules;
+        IsEnabled = promoted.IsEnabled;
+        DisabledVariationId = promoted.DisabledVariationId;
+        Fallthrough = promoted.Fallthrough;
+        ExptIncludeAllTargets = promoted.ExptIncludeAllTargets;
+        Tags = promoted.Tags;
+        IsArchived = promoted.IsArchived;
+
+        CommittedVersion = version;
+        Pending = null;
     }
 }

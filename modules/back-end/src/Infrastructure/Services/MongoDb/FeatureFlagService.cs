@@ -136,4 +136,50 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
 
         await Collection.UpdateManyAsync(filter, update);
     }
+
+    public async Task<FeatureFlag> GetCommittedAsync(Guid envId, string key)
+    {
+        var flag = await FindOneAsync(x => x.EnvId == envId && x.Key == key);
+        if (flag == null)
+        {
+            throw new EntityNotFoundException(nameof(FeatureFlag), $"{envId}-{key}");
+        }
+
+        // The committed read must NEVER expose a pending (staged) change. The top-level
+        // document is the committed value; drop the pending slot before returning it.
+        flag.Pending = null;
+
+        return flag;
+    }
+
+    public async Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version)
+    {
+        // ensure the flag exists (committed value is left untouched)
+        await GetAsync(envId, key);
+
+        var pending = new PendingFlagChange
+        {
+            Version = version,
+            Value = pendingValue
+        };
+
+        var filter = Builders<FeatureFlag>.Filter.And(
+            Builders<FeatureFlag>.Filter.Eq(x => x.EnvId, envId),
+            Builders<FeatureFlag>.Filter.Eq(x => x.Key, key)
+        );
+        var update = Builders<FeatureFlag>.Update.Set(x => x.Pending, pending);
+
+        await Collection.UpdateOneAsync(filter, update);
+    }
+
+    public async Task PromotePendingAsync(Guid envId, string key)
+    {
+        var flag = await GetAsync(envId, key);
+
+        // promote pending -> committed in-memory, then persist the full document so the
+        // committed value advances and the pending slot is cleared atomically.
+        flag.PromotePending();
+
+        await UpdateAsync(flag);
+    }
 }

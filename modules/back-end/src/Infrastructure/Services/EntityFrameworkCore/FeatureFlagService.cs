@@ -120,4 +120,20 @@ public class FeatureFlagService(AppDbContext dbContext)
                 .SetProperty(f => f.UpdatorId, operatorId)
             );
     }
+
+    // B3 committed-vs-pending is implemented for the Mongo path only. The Postgres/EF
+    // mapping for CommittedVersion/Pending is intentionally deferred.
+    // B4: add real Postgres mapping for CommittedVersion/Pending and implement these.
+
+    public Task<FeatureFlag> GetCommittedAsync(Guid envId, string key) =>
+        throw new NotSupportedException(
+            "Committed-vs-pending reads are not yet supported on the Postgres/EF path (B4).");
+
+    public Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version) =>
+        throw new NotSupportedException(
+            "Committed-vs-pending writes are not yet supported on the Postgres/EF path (B4).");
+
+    public Task PromotePendingAsync(Guid envId, string key) =>
+        throw new NotSupportedException(
+            "Committed-vs-pending promotion is not yet supported on the Postgres/EF path (B4).");
 }
