@@ -26,11 +26,10 @@ public class FeatureFlagConfiguration : IEntityTypeConfiguration<FeatureFlag>
         builder.Property(x => x.Rules).HasColumnType("jsonb");
         builder.Property(x => x.Fallthrough).HasColumnType("jsonb");
 
-        // B3 committed-vs-pending fields are currently Mongo-only. Ignore them on the
-        // EF/Postgres path so the existing flag read/write keeps building and working
-        // without a schema/migration change (there are no EF migrations in this repo).
-        // B4: add real Postgres mapping for CommittedVersion/Pending.
-        builder.Ignore(x => x.CommittedVersion);
-        builder.Ignore(x => x.Pending);
+        // Committed-vs-pending (parity with the Mongo path). CommittedVersion is a plain
+        // bigint column; Pending is a complex object stored as jsonb, mirroring how the
+        // other complex properties above (Variations/Rules/Fallthrough) are persisted.
+        builder.Property(x => x.CommittedVersion).IsRequired();
+        builder.Property(x => x.Pending).HasColumnType("jsonb");
     }
 }

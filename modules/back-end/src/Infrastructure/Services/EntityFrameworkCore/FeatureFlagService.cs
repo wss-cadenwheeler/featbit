@@ -121,19 +121,48 @@ public class FeatureFlagService(AppDbContext dbContext)
             );
     }
 
-    // B3 committed-vs-pending is implemented for the Mongo path only. The Postgres/EF
-    // mapping for CommittedVersion/Pending is intentionally deferred.
-    // B4: add real Postgres mapping for CommittedVersion/Pending and implement these.
+    // Committed-vs-pending, Postgres/EF parity with the Mongo FeatureFlagService.
+    // Matches the Mongo behavior exactly (including its current limitations); no
+    // concurrency/monotonicity guards here — those are tracked as #33/#34.
 
-    public Task<FeatureFlag> GetCommittedAsync(Guid envId, string key) =>
-        throw new NotSupportedException(
-            "Committed-vs-pending reads are not yet supported on the Postgres/EF path (B4).");
+    public async Task<FeatureFlag> GetCommittedAsync(Guid envId, string key)
+    {
+        // No-tracking so stripping the pending slot below is purely a read-shaping
+        // operation and never accidentally persisted on a later SaveChanges.
+        var flag = await Queryable
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.EnvId == envId && x.Key == key);
+        if (flag == null)
+        {
+            throw new EntityNotFoundException(nameof(FeatureFlag), $"{envId}-{key}");
+        }
 
-    public Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version) =>
-        throw new NotSupportedException(
-            "Committed-vs-pending writes are not yet supported on the Postgres/EF path (B4).");
+        // The committed read must NEVER expose a pending (staged) change. The top-level
+        // row is the committed value; drop the pending slot before returning it.
+        flag.Pending = null;
 
-    public Task PromotePendingAsync(Guid envId, string key) =>
-        throw new NotSupportedException(
-            "Committed-vs-pending promotion is not yet supported on the Postgres/EF path (B4).");
+        return flag;
+    }
+
+    public async Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version)
+    {
+        // load the committed row (left otherwise untouched)
+        var flag = await GetAsync(envId, key);
+
+        // write ONLY the pending data; committed fields stay as they are
+        flag.SetPending(pendingValue, version);
+
+        await UpdateAsync(flag);
+    }
+
+    public async Task PromotePendingAsync(Guid envId, string key)
+    {
+        var flag = await GetAsync(envId, key);
+
+        // promote pending -> committed, then persist the full row so the committed
+        // value advances and the pending slot is cleared.
+        flag.PromotePending();
+
+        await UpdateAsync(flag);
+    }
 }
