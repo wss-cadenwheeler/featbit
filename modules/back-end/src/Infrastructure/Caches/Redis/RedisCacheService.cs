@@ -25,6 +25,35 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.SortedSetAddAsync(index.Key, index.Member, index.Score);
     }
 
+    /// <summary>
+    /// Stages a new flag version (B1 stage/commit storage). Writes ONLY the versioned value key
+    /// <c>featbit:flag:{id}:v{ts}</c>; it does NOT move the committed pointer and does NOT touch
+    /// the env flag sorted-set index. The previously committed value therefore stays readable
+    /// until <see cref="CommitFlagAsync"/> is called.
+    /// </summary>
+    public async Task StageFlagAsync(FeatureFlag flag, long ts)
+    {
+        var staged = RedisCaches.FlagStaged(flag, ts);
+        await Redis.StringSetAsync(staged.Key, staged.Value);
+    }
+
+    /// <summary>
+    /// Commits a previously staged flag version (B1 stage/commit storage). Sets the committed
+    /// pointer <c>featbit:flag-committed:{id}</c> to <paramref name="ts"/> AND advances the env
+    /// flag sorted-set index score to <paramref name="ts"/> (mirroring <see cref="UpsertFlagAsync"/>'s
+    /// index logic), making the staged version the authoritative committed value.
+    /// </summary>
+    public async Task CommitFlagAsync(Guid envId, string flagId, long ts)
+    {
+        // flip the committed pointer to the staged version
+        var pointerKey = RedisCaches.FlagCommittedPointer(Guid.Parse(flagId));
+        await Redis.StringSetAsync(pointerKey, ts);
+
+        // advance the env flag index score (mirror UpsertFlag index logic)
+        var indexKey = RedisKeys.FlagIndex(envId);
+        await Redis.SortedSetAddAsync(indexKey, flagId, ts);
+    }
+
     public async Task DeleteFlagAsync(Guid envId, Guid flagId)
     {
         // delete cache
