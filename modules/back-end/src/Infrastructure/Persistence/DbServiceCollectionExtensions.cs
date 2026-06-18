@@ -58,6 +58,7 @@ public static class DbServiceCollectionExtensions
             services.AddTransient<IWebhookService, MongoServices.WebhookService>();
             services.AddTransient<IInsightService, MongoServices.InsightService>();
             services.AddTransient<IRefreshTokenService, MongoServices.RefreshTokenService>();
+            services.AddTransient<Application.ControlPlane.ILeaseStore, MongoServices.MongoLeaseStore>();
         }
 
         void AddEntityFrameworkCoreServices()
