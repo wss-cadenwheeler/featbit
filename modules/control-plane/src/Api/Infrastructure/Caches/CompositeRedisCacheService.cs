@@ -20,6 +20,12 @@ public class CompositeRedisCacheService(
     public Task UpsertFlagAsync(FeatureFlag flag) =>
         BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
 
+    public Task StageFlagAsync(FeatureFlag flag, long ts) =>
+        BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+
+    public Task CommitFlagAsync(Guid envId, string flagId, long ts) =>
+        BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+
     public Task DeleteFlagAsync(Guid envId, Guid flagId) =>
         BroadcastAsync(s => s.DeleteFlagAsync(envId, flagId), nameof(DeleteFlagAsync));
 

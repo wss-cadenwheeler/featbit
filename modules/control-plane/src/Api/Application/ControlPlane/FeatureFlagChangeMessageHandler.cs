@@ -2,6 +2,7 @@ using System.Text.Json;
 using Application.Caches;
 using Application.Configuration;
 using Application.FeatureFlags;
+using Application.Services;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Utils;
@@ -11,6 +12,7 @@ namespace Api.Application.ControlPlane;
 public class FeatureFlagChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IMessageProducer messageProducer,
+    IFeatureFlagService featureFlagService,
     ILogger<FeatureFlagChangeMessageHandler> logger,
     IConfiguration configuration) : IMessageHandler
 {
@@ -37,8 +39,23 @@ public class FeatureFlagChangeMessageHandler(
                     notification.Deserialize<OnFeatureFlagChanged>(ReusableJsonSerializerOptions.Web);
                 if (deserializedFlagNotification != null)
                 {
-                    await cacheService.UpsertFlagAsync(deserializedFlagNotification.Flag);
-                    await messageProducer.PublishAsync(Topics.FeatureFlagChange, deserializedFlagNotification.Flag);
+                    var flag = deserializedFlagNotification.Flag;
+
+                    if (configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit)
+                    {
+                        // GatedCommit (C2): stage the new value to every DC's Redis and record the
+                        // Mongo pending change, but do NOT publish to the evaluation-server topic yet.
+                        // The commit/publish is C3's responsibility.
+                        var ts = new DateTimeOffset(flag.UpdatedAt).ToUnixTimeMilliseconds();
+                        await cacheService.StageFlagAsync(flag, ts);
+                        await featureFlagService.SetPendingAsync(flag.EnvId, flag.Key, flag, ts);
+                    }
+                    else
+                    {
+                        // BestEffort: unchanged fire-and-forget propagation.
+                        await cacheService.UpsertFlagAsync(flag);
+                        await messageProducer.PublishAsync(Topics.FeatureFlagChange, flag);
+                    }
                 }
 
                 var webHooksMessage = new

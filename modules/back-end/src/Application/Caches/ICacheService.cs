@@ -11,6 +11,19 @@ public interface ICacheService
 {
     Task UpsertFlagAsync(FeatureFlag flag);
 
+    /// <summary>
+    /// Stages a new flag version (B1 stage/commit storage) without moving the committed
+    /// pointer or touching the env flag index, so the previously committed value stays
+    /// readable until <see cref="CommitFlagAsync"/> is called.
+    /// </summary>
+    Task StageFlagAsync(FeatureFlag flag, long ts);
+
+    /// <summary>
+    /// Commits a previously staged flag version (B1 stage/commit storage): moves the
+    /// committed pointer and advances the env flag index to <paramref name="ts"/>.
+    /// </summary>
+    Task CommitFlagAsync(Guid envId, string flagId, long ts);
+
     Task DeleteFlagAsync(Guid envId, Guid flagId);
 
     Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment);
