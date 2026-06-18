@@ -13,6 +13,10 @@ public class CompositeRedisCacheService(
     IEnumerable<ICacheService> cacheServices,
     ILogger<CompositeRedisCacheService> logger) : ICacheService
 {
+    // The public ICacheService methods keep returning Task and discard the
+    // per-instance result map so externally observable behavior is unchanged
+    // (swallow-and-continue). The map is surfaced only via the internal
+    // BroadcastAsync for a future commit coordinator.
     public Task UpsertFlagAsync(FeatureFlag flag) =>
         BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
 
@@ -80,13 +84,34 @@ public class CompositeRedisCacheService(
     public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) =>
         BroadcastAsync(s => s.DeleteConnectionMadeAsync(connectionMessage), nameof(DeleteConnectionMadeAsync));
 
-    private Task BroadcastAsync(Func<ICacheService, Task> action, string operationName)
+    /// <summary>
+    /// Broadcasts <paramref name="action"/> to every cache instance, swallowing and
+    /// logging per-instance failures so one DC's outage does not fail the others.
+    /// Returns a per-instance success map so callers (e.g. a future commit coordinator)
+    /// can observe partial failure instead of having it silently swallowed.
+    /// </summary>
+    // TODO: key by DC id once instances carry identity (C2/C3).
+    internal async Task<IReadOnlyDictionary<string, bool>> BroadcastAsync(
+        Func<ICacheService, Task> action,
+        string operationName)
     {
-        var tasks = cacheServices.Select(s => ExecuteSafelyAsync(s, action, operationName));
-        return Task.WhenAll(tasks);
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(s => ExecuteSafelyAsync(s, action, operationName))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[i.ToString()] = outcomes[i];
+        }
+
+        return results;
     }
 
-    private async Task ExecuteSafelyAsync(
+    private async Task<bool> ExecuteSafelyAsync(
         ICacheService service,
         Func<ICacheService, Task> action,
         string operationName)
@@ -94,6 +119,7 @@ public class CompositeRedisCacheService(
         try
         {
             await action(service);
+            return true;
         }
         catch (OperationCanceledException)
         {
@@ -106,6 +132,7 @@ public class CompositeRedisCacheService(
                 "Redis cache broadcast operation '{Operation}' failed for implementation {CacheService}. Continuing.",
                 operationName,
                 service.GetType().FullName);
+            return false;
         }
     }
 
