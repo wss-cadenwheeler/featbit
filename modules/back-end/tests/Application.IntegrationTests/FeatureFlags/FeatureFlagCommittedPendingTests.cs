@@ -3,7 +3,7 @@ using Infrastructure.Persistence.MongoDb;
 using Infrastructure.Services.MongoDb;
 using Microsoft.Extensions.Options;
 
-namespace Application.UnitTests.FeatureFlags;
+namespace Application.IntegrationTests.FeatureFlags;
 
 /// <summary>
 /// B3 acceptance: the authoritative committed read must return the COMMITTED flag value,
