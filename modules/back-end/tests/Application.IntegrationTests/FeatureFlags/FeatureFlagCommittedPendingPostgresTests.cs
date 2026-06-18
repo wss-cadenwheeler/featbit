@@ -1,0 +1,188 @@
+using Domain.FeatureFlags;
+using Domain.Utils;
+using Infrastructure.Persistence.EntityFrameworkCore;
+using Infrastructure.Services.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+
+namespace Application.IntegrationTests.FeatureFlags;
+
+/// <summary>
+/// B4 acceptance (Postgres/EF parity with the Mongo B3 work): the authoritative committed
+/// read must return the COMMITTED flag value, never a pending (staged-but-not-committed)
+/// change. After promotion the committed read returns the new value.
+///
+/// Integration test against a real Postgres instance (throwaway container on port 5434).
+/// Uses EnsureCreated() to materialize the EF model — including the mapped
+/// committed_version (bigint) and pending (jsonb) columns — so this also proves the
+/// FeatureFlagConfiguration mapping is valid. Skips automatically if no Postgres is reachable.
+/// </summary>
+public sealed class FeatureFlagCommittedPendingPostgresTests : IAsyncLifetime
+{
+    // The throwaway Postgres container is started on 5434 with database "featbit".
+    private const string BaseConnectionString =
+        "Host=localhost;Port=5434;Database=featbit;Username=postgres;Password=please_change_me";
+
+    // Use a UNIQUE throwaway database per test instance (mirrors the Mongo B3 test) so
+    // EnsureCreated/EnsureDeleted in different tests do not race each other. EF creates
+    // and drops this database; tests never depend on the seed "featbit" database existing.
+    private readonly string _dbName = $"featbit_b4_test_{Guid.NewGuid():N}";
+    private string _connectionString = null!;
+    private NpgsqlDataSource _dataSource = null!;
+    private AppDbContext _dbContext = null!;
+    private FeatureFlagService _sut = null!;
+    private readonly Guid _envId = Guid.NewGuid();
+
+    public async Task InitializeAsync()
+    {
+        // fail fast / readable skip if Postgres is not available. Probe the always-present
+        // "postgres" maintenance database rather than the seed "featbit" database.
+        var probeConnectionString = new NpgsqlConnectionStringBuilder(BaseConnectionString)
+        {
+            Database = "postgres"
+        }.ConnectionString;
+        await using (var probe = new NpgsqlConnection(probeConnectionString))
+        {
+            await probe.OpenAsync();
+        }
+
+        _connectionString = new NpgsqlConnectionStringBuilder(BaseConnectionString)
+        {
+            Database = _dbName
+        }.ConnectionString;
+
+        // Mirror the production data source: dynamic JSON is required for the jsonb
+        // POCO columns (Variations/Rules/Fallthrough and the new Pending), and the
+        // snake_case naming convention is required so EnsureCreated materializes the
+        // expected committed_version / pending columns.
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(_connectionString);
+        dataSourceBuilder
+            .EnableDynamicJson()
+            .ConfigureJsonOptions(ReusableJsonSerializerOptions.Web);
+        _dataSource = dataSourceBuilder.Build();
+
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseNpgsql(_dataSource)
+            .UseSnakeCaseNamingConvention()
+            .Options;
+
+        _dbContext = new AppDbContext(options);
+
+        // materializes the EF model (incl. the new committed_version/pending columns)
+        await _dbContext.Database.EnsureCreatedAsync();
+
+        _sut = new FeatureFlagService(_dbContext);
+    }
+
+    public async Task DisposeAsync()
+    {
+        if (_dbContext != null!)
+        {
+            await _dbContext.Database.EnsureDeletedAsync();
+            await _dbContext.DisposeAsync();
+        }
+
+        if (_dataSource != null!)
+        {
+            await _dataSource.DisposeAsync();
+        }
+    }
+
+    private FeatureFlag CreateFlag(string key, bool isEnabled)
+    {
+        var enabledVariationId = Guid.NewGuid().ToString();
+        var disabledVariationId = Guid.NewGuid().ToString();
+
+        var variations = new List<Variation>
+        {
+            new() { Id = enabledVariationId, Name = "true", Value = "true" },
+            new() { Id = disabledVariationId, Name = "false", Value = "false" }
+        };
+
+        return new FeatureFlag(
+            envId: _envId,
+            name: key,
+            description: string.Empty,
+            key: key,
+            isEnabled: isEnabled,
+            variationType: "boolean",
+            variations: variations,
+            disabledVariationId: disabledVariationId,
+            enabledVariationId: enabledVariationId,
+            tags: [],
+            currentUserId: Guid.NewGuid()
+        );
+    }
+
+    [Fact]
+    public async Task SetPending_Then_Promote_Committed_Read_Returns_Old_Then_New_Value()
+    {
+        // Arrange: committed flag, IsEnabled = false, CommittedVersion = 1
+        const string key = "b4-flag";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        // build the pending value: same flag but IsEnabled = true
+        var pendingValue = CreateFlag(key, isEnabled: true);
+
+        // Act 1: stage a pending change (version 2)
+        await _sut.SetPendingAsync(_envId, key, pendingValue, version: 2);
+
+        // Assert 1: committed read still returns the OLD value, with no pending leaked
+        var afterStage = await _sut.GetCommittedAsync(_envId, key);
+        Assert.False(afterStage.IsEnabled);
+        Assert.Equal(1, afterStage.CommittedVersion);
+        Assert.Null(afterStage.Pending);
+
+        // sanity: the pending change really was persisted (raw read keeps it)
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(2, raw.Pending!.Version);
+        Assert.True(raw.Pending.Value.IsEnabled);
+
+        // Act 2: promote pending -> committed
+        await _sut.PromotePendingAsync(_envId, key);
+
+        // Assert 2: committed read now returns the NEW value and advanced version
+        var afterPromote = await _sut.GetCommittedAsync(_envId, key);
+        Assert.True(afterPromote.IsEnabled);
+        Assert.Equal(2, afterPromote.CommittedVersion);
+        Assert.Null(afterPromote.Pending);
+
+        // pending slot cleared on the stored row too
+        var rawAfter = await _sut.GetAsync(_envId, key);
+        Assert.Null(rawAfter.Pending);
+    }
+
+    [Fact]
+    public async Task GetCommitted_With_No_Pending_Returns_Committed_Value()
+    {
+        const string key = "b4-no-pending";
+        var committed = CreateFlag(key, isEnabled: true);
+        committed.CommittedVersion = 5;
+        await _sut.AddOneAsync(committed);
+
+        var read = await _sut.GetCommittedAsync(_envId, key);
+
+        Assert.True(read.IsEnabled);
+        Assert.Equal(5, read.CommittedVersion);
+        Assert.Null(read.Pending);
+    }
+
+    [Fact]
+    public async Task PromotePending_Is_NoOp_When_No_Pending()
+    {
+        const string key = "b4-promote-noop";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 3;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.PromotePendingAsync(_envId, key);
+
+        var read = await _sut.GetCommittedAsync(_envId, key);
+        Assert.False(read.IsEnabled);
+        Assert.Equal(3, read.CommittedVersion);
+        Assert.Null(read.Pending);
+    }
+}
