@@ -5,7 +5,7 @@ using Infrastructure.Services.MongoDb;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 
-namespace Application.UnitTests.ControlPlane;
+namespace Application.IntegrationTests.ControlPlane;
 
 /// <summary>
 /// Integration tests for <see cref="MongoLeaseStore"/> that run against a real MongoDB instance.
