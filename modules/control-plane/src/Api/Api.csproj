@@ -20,5 +20,10 @@
         <ProjectReference Include="..\..\..\back-end\src\Infrastructure\Infrastructure.csproj"/>
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- Surface internal members (e.g. CompositeRedisCacheService.BroadcastAsync) to unit tests. -->
+        <InternalsVisibleTo Include="Api.UnitTests"/>
+    </ItemGroup>
+
 
 </Project>
