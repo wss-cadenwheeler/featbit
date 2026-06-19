@@ -188,4 +188,21 @@ public class FeatureFlagService(AppDbContext dbContext)
             .Where(f => f.Pending != null)
             .ToListAsync();
     }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetAllCommittedAsync()
+    {
+        // enumerate every flag (across all envs), mirroring how RedisPopulatingService loads all
+        // flags, then strip the pending slot so only the COMMITTED value is exposed (mirroring
+        // GetCommittedAsync). AsNoTracking so the strip is purely read-shaping and never persisted.
+        var flags = await Queryable
+            .AsNoTracking()
+            .ToListAsync();
+
+        foreach (var flag in flags)
+        {
+            flag.Pending = null;
+        }
+
+        return flags;
+    }
 }
