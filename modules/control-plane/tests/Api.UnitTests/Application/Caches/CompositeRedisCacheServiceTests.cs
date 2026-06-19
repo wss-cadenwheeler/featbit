@@ -8,12 +8,21 @@ namespace Api.UnitTests.Application.Caches;
 
 public class CompositeRedisCacheServiceTests
 {
+    private const string LocalDcId = "dc-local";
+    private const string RemoteDcId = "dc-remote";
+
     private readonly Mock<ICacheService> _local = new();
     private readonly Mock<ICacheService> _remote = new();
     private readonly Mock<ILogger<CompositeRedisCacheService>> _logger = new();
 
     private CompositeRedisCacheService CreateSut()
-        => new(new[] { _local.Object, _remote.Object }, _logger.Object);
+        => new(
+            new[]
+            {
+                new DcCacheService(LocalDcId, _local.Object),
+                new DcCacheService(RemoteDcId, _remote.Object)
+            },
+            _logger.Object);
 
     [Fact]
     public async Task UpsertPodHeartbeat_WritesToLocalInstanceOnly()
@@ -78,34 +87,39 @@ public class CompositeRedisCacheServiceTests
     }
 
     [Fact]
-    public async Task BroadcastAsync_WhenAllInstancesSucceed_ReturnsTrueForEachIndex()
+    public async Task BroadcastAsync_WhenAllInstancesSucceed_ReturnsTrueForEachDcId()
     {
         var sut = CreateSut();
 
         var result = await sut.BroadcastAsync(_ => Task.CompletedTask, "Op");
 
         Assert.Equal(2, result.Count);
-        Assert.True(result["0"]);
-        Assert.True(result["1"]);
+        Assert.True(result[LocalDcId]);
+        Assert.True(result[RemoteDcId]);
     }
 
     [Fact]
-    public async Task BroadcastAsync_WhenOneInstanceThrows_ReturnsFalseForThatIndexAndTrueForOthers()
+    public async Task BroadcastAsync_WhenOneInstanceThrows_ReturnsFalseForThatDcIdAndTrueForOthers()
     {
-        // _remote is index 1 and is configured to fail for this operation.
+        // The remote DC is configured to fail for this operation.
         var failing = new Mock<ICacheService>();
         failing.Setup(s => s.DeletePodConnection(It.IsAny<Guid>()))
                .ThrowsAsync(new InvalidOperationException("boom"));
 
         var sut = new CompositeRedisCacheService(
-            new[] { _local.Object, failing.Object }, _logger.Object);
+            new[]
+            {
+                new DcCacheService(LocalDcId, _local.Object),
+                new DcCacheService(RemoteDcId, failing.Object)
+            },
+            _logger.Object);
 
         // Should not throw out of the broadcast.
         var result = await sut.BroadcastAsync(
             s => s.DeletePodConnection(Guid.NewGuid()), nameof(ICacheService.DeletePodConnection));
 
         Assert.Equal(2, result.Count);
-        Assert.True(result["0"]);
-        Assert.False(result["1"]);
+        Assert.True(result[LocalDcId]);
+        Assert.False(result[RemoteDcId]);
     }
 }

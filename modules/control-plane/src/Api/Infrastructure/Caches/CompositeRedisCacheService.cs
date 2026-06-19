@@ -9,8 +9,14 @@ using Microsoft.Extensions.Logging;
 
 namespace Api.Infrastructure.Caches;
 
+/// <summary>
+/// Pairs a <see cref="ICacheService"/> (one DC's Redis) with the id of the DC it
+/// serves, so broadcast results can be keyed by DcId rather than ordinal index.
+/// </summary>
+public record DcCacheService(string DcId, ICacheService Service);
+
 public class CompositeRedisCacheService(
-    IEnumerable<ICacheService> cacheServices,
+    IEnumerable<DcCacheService> cacheServices,
     ILogger<CompositeRedisCacheService> logger) : ICacheService
 {
     // The public ICacheService methods keep returning Task and discard the
@@ -49,11 +55,11 @@ public class CompositeRedisCacheService(
         // Try each instance in order until one succeeds; write-through to all.
         var license = string.Empty;
         var succeeded = false;
-        foreach (var service in cacheServices)
+        foreach (var dc in cacheServices)
         {
             try
             {
-                license = await service.GetOrSetLicenseAsync(workspaceId, licenseGetter);
+                license = await dc.Service.GetOrSetLicenseAsync(workspaceId, licenseGetter);
                 succeeded = true;
                 break;
             }
@@ -65,9 +71,10 @@ public class CompositeRedisCacheService(
             {
                 logger.LogError(
                     ex,
-                    "Redis cache operation '{Operation}' failed for implementation {CacheService}. Trying next instance.",
+                    "Redis cache operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Trying next instance.",
                     nameof(GetOrSetLicenseAsync),
-                    service.GetType().FullName);
+                    dc.DcId,
+                    dc.Service.GetType().FullName);
             }
         }
 
@@ -93,17 +100,16 @@ public class CompositeRedisCacheService(
     /// <summary>
     /// Broadcasts <paramref name="action"/> to every cache instance, swallowing and
     /// logging per-instance failures so one DC's outage does not fail the others.
-    /// Returns a per-instance success map so callers (e.g. a future commit coordinator)
-    /// can observe partial failure instead of having it silently swallowed.
+    /// Returns a per-DC success map (keyed by DcId) so callers (e.g. a future commit
+    /// coordinator) can observe partial failure instead of having it silently swallowed.
     /// </summary>
-    // TODO: key by DC id once instances carry identity (C2/C3).
     internal async Task<IReadOnlyDictionary<string, bool>> BroadcastAsync(
         Func<ICacheService, Task> action,
         string operationName)
     {
         var instances = cacheServices.ToList();
         var tasks = instances
-            .Select(s => ExecuteSafelyAsync(s, action, operationName))
+            .Select(dc => ExecuteSafelyAsync(dc, action, operationName))
             .ToList();
 
         var outcomes = await Task.WhenAll(tasks);
@@ -111,20 +117,20 @@ public class CompositeRedisCacheService(
         var results = new Dictionary<string, bool>(outcomes.Length);
         for (var i = 0; i < outcomes.Length; i++)
         {
-            results[i.ToString()] = outcomes[i];
+            results[instances[i].DcId] = outcomes[i];
         }
 
         return results;
     }
 
     private async Task<bool> ExecuteSafelyAsync(
-        ICacheService service,
+        DcCacheService dc,
         Func<ICacheService, Task> action,
         string operationName)
     {
         try
         {
-            await action(service);
+            await action(dc.Service);
             return true;
         }
         catch (OperationCanceledException)
@@ -135,9 +141,10 @@ public class CompositeRedisCacheService(
         {
             logger.LogError(
                 ex,
-                "Redis cache broadcast operation '{Operation}' failed for implementation {CacheService}. Continuing.",
+                "Redis cache broadcast operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Continuing.",
                 operationName,
-                service.GetType().FullName);
+                dc.DcId,
+                dc.Service.GetType().FullName);
             return false;
         }
     }
@@ -165,6 +172,6 @@ public class CompositeRedisCacheService(
     public Task<List<HealthMessage>> GetAllHealthMessages()
     {
         var local = cacheServices.First();
-        return local.GetAllHealthMessages();
+        return local.Service.GetAllHealthMessages();
     }
 }
