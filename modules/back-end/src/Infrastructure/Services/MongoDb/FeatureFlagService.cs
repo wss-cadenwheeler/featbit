@@ -208,4 +208,18 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
         var flags = await FindManyAsync(x => x.Pending != null);
         return flags.ToList();
     }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetAllCommittedAsync()
+    {
+        // enumerate every flag (across all envs), mirroring how RedisPopulatingService loads all
+        // flags, then strip the pending slot so only the COMMITTED value is exposed (mirroring
+        // GetCommittedAsync). The top-level document is the committed value.
+        var flags = await FindManyAsync(_ => true);
+        foreach (var flag in flags)
+        {
+            flag.Pending = null;
+        }
+
+        return flags.ToList();
+    }
 }

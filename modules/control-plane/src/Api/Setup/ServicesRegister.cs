@@ -58,6 +58,10 @@ public static class ServicesRegister
         // unless ControlPlane:ConsistencyMode == GatedCommit (checked inside the worker).
         builder.Services.AddHostedService<CommitCoordinatorWorker>();
 
+        // E1 returning-DC recovery: backfills a DC's Redis with all committed flag values when its
+        // lease returns to the live set. No-ops unless ControlPlane:ConsistencyMode == GatedCommit.
+        builder.Services.AddHostedService<RecoveryWorker>();
+
         return builder;
     }
     

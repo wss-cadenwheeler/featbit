@@ -157,6 +157,41 @@ public class CompositeRedisCacheService(
         return results;
     }
 
+    /// <summary>
+    /// Recovery-facing targeted write (E1): stages <paramref name="flag"/> at version
+    /// <paramref name="ts"/> into ONE DC's Redis (the <see cref="DcCacheService"/> whose
+    /// <see cref="DcCacheService.DcId"/> matches <paramref name="dcId"/>), unlike the broadcast
+    /// <see cref="StageFlagAsync"/>. If no DC matches, logs a warning and no-ops. A failing write is
+    /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
+        TargetedAsync(dcId, s => s.StageFlagAsync(flag, ts), nameof(StageFlagToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (E1): commits <paramref name="flagId"/> at version
+    /// <paramref name="ts"/> into ONE DC's Redis (advancing that DC's committed pointer + index),
+    /// unlike the broadcast <see cref="CommitFlagAsync"/>. If no DC matches <paramref name="dcId"/>,
+    /// logs a warning and no-ops. A failing write is swallowed and logged with the same resilience
+    /// as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
+        TargetedAsync(dcId, s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagToDcAsync));
+
+    private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
+    {
+        var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);
+        if (dc == null)
+        {
+            logger.LogWarning(
+                "Targeted cache operation '{Operation}' requested for unknown DC {DcId}; no matching cache instance. No-op.",
+                operationName,
+                dcId);
+            return;
+        }
+
+        await ExecuteSafelyAsync(dc, action, operationName);
+    }
+
     private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
     {
         try

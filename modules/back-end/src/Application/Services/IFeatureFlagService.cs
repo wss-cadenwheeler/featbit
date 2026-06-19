@@ -52,4 +52,12 @@ public interface IFeatureFlagService : IService<FeatureFlag>
     /// coordinator to discover the set of pending changes it must reconcile.
     /// </summary>
     Task<IReadOnlyList<FeatureFlag>> GetPendingAsync();
+
+    /// <summary>
+    /// Enumerate the COMMITTED value of every flag (across all envs). Each returned flag has its
+    /// <c>Pending</c> slot cleared (mirroring <see cref="GetCommittedAsync"/>) so callers never see
+    /// staged data. Used by the returning-DC recovery worker to backfill a DC's Redis with the
+    /// authoritative committed state of all flags.
+    /// </summary>
+    Task<IReadOnlyList<FeatureFlag>> GetAllCommittedAsync();
 }
