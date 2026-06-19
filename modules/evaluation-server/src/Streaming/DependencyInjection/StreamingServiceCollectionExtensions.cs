@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Streaming.Connections;
 using Streaming.Consumers;
+using Streaming.Health;
 using Streaming.Messages;
 using Streaming.Services;
 
@@ -46,6 +47,9 @@ public static class StreamingServiceCollectionExtensions
 
         // connection
         services.AddSingleton<IConnectionManager, ConnectionManager>();
+
+        // applied watermark tracker (per-env, highest committed flag version this pod has applied)
+        services.AddSingleton<IAppliedWatermarkTracker, AppliedWatermarkTracker>();
 
         // message handlers
         services
