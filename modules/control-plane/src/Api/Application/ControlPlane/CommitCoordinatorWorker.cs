@@ -2,8 +2,10 @@ using System.Diagnostics.Metrics;
 using Application.Caches;
 using Application.Configuration;
 using Application.ControlPlane;
+using Application.Segments;
 using Application.Services;
 using Api.Infrastructure.Caches;
+using Domain.AuditLogs;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Microsoft.Extensions.Configuration;
@@ -15,18 +17,30 @@ namespace Api.Application.ControlPlane;
 
 /// <summary>
 /// C3b-2 commit coordinator. Under <see cref="ConsistencyMode.GatedCommit"/> this periodically
-/// reconciles pending (staged-but-not-committed) flag changes: a pending version is committed
-/// (its committed pointer/index advanced in every DC's Redis, the Mongo/EF pending promoted to
-/// committed, and the change published to the evaluation-server topic) only once EVERY currently
-/// live DC has that exact version staged in its own Redis.
+/// reconciles pending (staged-but-not-committed) flag AND segment changes: a pending version is
+/// committed (its committed pointer/index advanced in every DC's Redis, the Mongo/EF pending
+/// promoted to committed, and the change published to the evaluation-server topic) only once
+/// EVERY currently live DC has that exact version staged in its own Redis.
 ///
 /// Gate model (locked design): the control plane probes each live DC's Redis directly
-/// (<see cref="CompositeRedisCacheService.GetStagedDcsAsync"/>) — "live" = a DC with at least one
-/// unexpired lease in <see cref="ILeaseStore"/>. The pending set is enumerated via a DB scan
-/// (<see cref="IFeatureFlagService.GetPendingAsync"/>); commit granularity is per-flag.
+/// (<see cref="CompositeRedisCacheService.GetStagedDcsAsync"/> for flags,
+/// <see cref="CompositeRedisCacheService.GetStagedSegmentDcsAsync"/> for segments) — "live" = a DC
+/// with at least one unexpired lease in <see cref="ILeaseStore"/>. The pending sets are enumerated
+/// via DB scans (<see cref="IFeatureFlagService.GetPendingAsync"/> /
+/// <see cref="ISegmentService.GetPendingAsync"/>); commit granularity is per-flag / per-segment.
 ///
-/// Idempotent + crash-safe: re-running a tick is a no-op once a flag is committed — the commit
-/// broadcast and the version-guarded promote both no-op when already applied.
+/// Segments (S3 / #17): committing a segment additionally replays the affected-flags propagation
+/// that <see cref="SegmentChangeMessageHandler"/>'s BestEffort branch performs inline at handle
+/// time. Because the staged pending change does NOT carry the original change notification, the
+/// coordinator reconstructs an <see cref="OnSegmentChange"/> (Operation = Update,
+/// IsTargetingChange = true) from the committed segment so
+/// <see cref="ISegmentMessageService.GetAffectedFlagsAsync"/> recomputes the affected flags, then
+/// (if any) calls <see cref="IFeatureFlagAppService.OnSegmentUpdatedAsync"/> and finally
+/// <see cref="ISegmentMessageService.PublishSegmentChangeMessage"/> per env — exactly the
+/// BestEffort sequence, deferred to commit time.
+///
+/// Idempotent + crash-safe: re-running a tick is a no-op once a flag/segment is committed — the
+/// commit broadcast and the version-guarded promote both no-op when already applied.
 ///
 /// TODO: single-instance/leader election if the control plane runs multiple replicas. Today
 /// multiple replicas would each run this loop; the commit + version-guarded promote are idempotent
@@ -107,7 +121,7 @@ public sealed class CommitCoordinatorWorker : BackgroundService
                 if (committed > 0)
                 {
                     _logger.LogInformation(
-                        "Commit coordinator committed {CommittedCount} pending flag change(s).",
+                        "Commit coordinator committed {CommittedCount} pending flag/segment change(s).",
                         committed);
                 }
             }
@@ -123,24 +137,32 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     }
 
     /// <summary>
-    /// Performs a single coordinator tick and returns the number of flags committed. Exposed so it
-    /// can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
+    /// Performs a single coordinator tick and returns the number of flags AND segments committed.
+    /// Exposed so it can be invoked directly (e.g. by integration tests) without waiting on the
+    /// periodic timer.
     ///
     /// For each pending flag whose pending version is newer than its committed version, if every
     /// currently live DC has that version staged, the flag is committed across all DCs, its pending
     /// is promoted (version-guarded), and the change is published to the evaluation-server topic.
-    /// Otherwise the flag is left pending and retried on the next tick.
+    /// Pending segments are then reconciled the same way; committing a segment additionally replays
+    /// the affected-flags propagation (see the type summary). Anything not yet staged everywhere is
+    /// left pending and retried on the next tick.
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
         // IFeatureFlagService is a scoped (per-request) service in DI; resolve it inside a scope so
-        // the singleton BackgroundService does not capture a scoped/disposed instance.
+        // the singleton BackgroundService does not capture a scoped/disposed instance. The segment
+        // services are resolved from the SAME scope, matching the flag path.
         using var scope = _scopeFactory.CreateScope();
         var featureFlagService = scope.ServiceProvider.GetRequiredService<IFeatureFlagService>();
         var leaseStore = scope.ServiceProvider.GetRequiredService<ILeaseStore>();
 
         var pending = await featureFlagService.GetPendingAsync();
-        if (pending.Count == 0)
+        var pendingSegments = await scope.ServiceProvider
+            .GetRequiredService<ISegmentService>()
+            .GetPendingAsync();
+
+        if (pending.Count == 0 && pendingSegments.Count == 0)
         {
             return 0;
         }
@@ -239,6 +261,120 @@ public sealed class CommitCoordinatorWorker : BackgroundService
                     flag.Id,
                     version,
                     string.Join(", ", evictedDcs));
+            }
+        }
+
+        // ---- Segment loop (S3 / #17): mirrors the flag loop above. ----
+        if (pendingSegments.Count > 0)
+        {
+            // Resolve the segment-side services from the SAME per-tick scope, exactly like the flag
+            // services. These are the services SegmentChangeMessageHandler's BestEffort branch uses
+            // for the affected-flags propagation we replicate at commit time.
+            var segmentService = scope.ServiceProvider.GetRequiredService<ISegmentService>();
+            var segmentMessageService = scope.ServiceProvider.GetRequiredService<ISegmentMessageService>();
+            var featureFlagAppService = scope.ServiceProvider.GetRequiredService<IFeatureFlagAppService>();
+
+            foreach (var segment in pendingSegments)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var pendingChange = segment.Pending;
+                if (pendingChange == null)
+                {
+                    continue;
+                }
+
+                // V is the staged Redis version, which S2 sets to UpdatedAt-as-unix-ms when staging
+                // (PendingSegmentChange.Version == ToUnixTimeMilliseconds(UpdatedAt)).
+                var version = pendingChange.Version;
+
+                // Monotonicity (#34): never commit a version that is not strictly newer than what is
+                // already committed. Skips stale/duplicate pending rows.
+                if (version <= segment.CommittedVersion)
+                {
+                    continue;
+                }
+
+                var stagedMap = await composite.GetStagedSegmentDcsAsync(segment.Id, version);
+
+                // Gate: EVERY live DC must have this exact version staged. A DC missing from the map,
+                // or present-but-false, blocks the commit (we retry next tick once it catches up).
+                var allLiveStaged = liveDcs.All(dc => stagedMap.TryGetValue(dc, out var staged) && staged);
+                if (!allLiveStaged)
+                {
+                    continue;
+                }
+
+                // The env set is needed both to advance the committed pointer/index in Redis and to
+                // drive the per-env affected-flags propagation below.
+                var envIds = await segmentService.GetEnvironmentIdsAsync(segment);
+
+                // Broadcast the commit to all DCs: advance the committed pointer + index everywhere.
+                await composite.CommitSegmentAsync(envIds, segment.Id.ToString(), version);
+
+                // Version-guarded promote of the DB pending -> committed. If a racing SetPendingAsync
+                // replaced the pending version since GetPendingAsync read it, the guard makes this a
+                // no-op and we do NOT publish a stale value.
+                var promoted = await segmentService.PromotePendingAsync(segment.Id, version);
+                if (!promoted)
+                {
+                    continue;
+                }
+
+                // Replicate SegmentChangeMessageHandler's BestEffort affected-flags propagation,
+                // deferred to commit time. The staged pending change does not carry the original
+                // notification, so reconstruct one from the (now committed) segment as an Update with
+                // IsTargetingChange = true, so GetAffectedFlagsAsync recomputes the affected flags.
+                var committedSegment = await segmentService.GetCommittedAsync(segment.Id);
+                var notification = new OnSegmentChange(
+                    committedSegment,
+                    Operations.Update,
+                    // DataChange drives only the audit log (not exercised on this propagation path),
+                    // so an empty change is sufficient here.
+                    new DataChange(),
+                    operatorId: Guid.Empty,
+                    isTargetingChange: true);
+
+                foreach (var envId in envIds)
+                {
+                    var affectedFlags =
+                        await segmentMessageService.GetAffectedFlagsAsync(envId, notification);
+
+                    // update affected flags
+                    if (affectedFlags.Count > 0)
+                    {
+                        await featureFlagAppService.OnSegmentUpdatedAsync(
+                            committedSegment,
+                            notification.OperatorId,
+                            affectedFlags);
+                    }
+
+                    // publish segment change message
+                    await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags, committedSegment);
+                }
+
+                count++;
+
+                // Observability (#16): mirror the flag path — record any CONFIGURED DC that was
+                // evicted (present in the probed staged map's keys but absent from the live set).
+                // This does not change the commit decision (made on the live set by design).
+                var evictedDcs = stagedMap.Keys
+                    .Where(dc => !liveDcs.Contains(dc))
+                    .ToList();
+
+                if (evictedDcs.Count > 0)
+                {
+                    foreach (var dc in evictedDcs)
+                    {
+                        EvictedCommitCounter.Add(1, new KeyValuePair<string, object?>("dc_id", dc));
+                    }
+
+                    _logger.LogWarning(
+                        "Committed segment {SegmentId} v{Version} without DC(s) {EvictedDcs} — proceeding on live set.",
+                        segment.Id,
+                        version,
+                        string.Join(", ", evictedDcs));
+                }
             }
         }
 
