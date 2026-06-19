@@ -54,6 +54,10 @@ public static class ServicesRegister
             builder.Configuration.GetSection(PodHealthOptions.SectionName));
         builder.Services.AddHostedService<PodHealthChecker>();
 
+        // C3b-2 commit coordinator: gated-commit reconciliation of pending flag changes. No-ops
+        // unless ControlPlane:ConsistencyMode == GatedCommit (checked inside the worker).
+        builder.Services.AddHostedService<CommitCoordinatorWorker>();
+
         return builder;
     }
     

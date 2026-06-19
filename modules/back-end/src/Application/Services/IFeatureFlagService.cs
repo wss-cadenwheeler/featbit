@@ -34,11 +34,17 @@ public interface IFeatureFlagService : IService<FeatureFlag>
     Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version);
 
     /// <summary>
-    /// Promote the staged pending change to committed for the flag identified by
+    /// Optimistically promote the staged pending change to committed for the flag identified by
     /// <paramref name="envId"/>/<paramref name="key"/>, so <see cref="GetCommittedAsync"/>
-    /// returns the new value. No-op when there is no pending change.
+    /// returns the new value. The promotion happens ONLY if the stored
+    /// <see cref="PendingFlagChange.Version"/> still equals <paramref name="expectedVersion"/>;
+    /// otherwise it is a no-op. This version guard prevents a lost update when a racing
+    /// <see cref="SetPendingAsync"/> replaces the pending change between the coordinator reading it
+    /// and committing it (#33), and lets the coordinator skip stale promotions (#34).
     /// </summary>
-    Task PromotePendingAsync(Guid envId, string key);
+    /// <returns><c>true</c> if the pending change was promoted; <c>false</c> if there was no
+    /// pending change or its version no longer matched <paramref name="expectedVersion"/>.</returns>
+    Task<bool> PromotePendingAsync(Guid envId, string key, long expectedVersion);
 
     /// <summary>
     /// Enumerate every flag (across all envs) that currently has a staged-but-not-committed

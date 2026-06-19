@@ -155,15 +155,29 @@ public class FeatureFlagService(AppDbContext dbContext)
         await UpdateAsync(flag);
     }
 
-    public async Task PromotePendingAsync(Guid envId, string key)
+    public async Task<bool> PromotePendingAsync(Guid envId, string key, long expectedVersion)
     {
         var flag = await GetAsync(envId, key);
+
+        // Version guard (#33/#34): only promote if the pending change still matches the version
+        // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
+        // or already promoted (null), do nothing.
+        if (flag.Pending?.Version != expectedVersion)
+        {
+            return false;
+        }
 
         // promote pending -> committed, then persist the full row so the committed
         // value advances and the pending slot is cleared.
         flag.PromotePending();
 
+        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
+        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync committing in
+        // that window could be overwritten. The in-memory version check narrows but does not close
+        // it for the EF provider; closing it requires an optimistic-concurrency token (tracked in
+        // #33). The Mongo provider closes it via a version-filtered ReplaceOneAsync.
         await UpdateAsync(flag);
+        return true;
     }
 
     public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()

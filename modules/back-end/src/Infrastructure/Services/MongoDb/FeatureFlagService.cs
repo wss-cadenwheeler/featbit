@@ -172,15 +172,34 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
         await Collection.UpdateOneAsync(filter, update);
     }
 
-    public async Task PromotePendingAsync(Guid envId, string key)
+    public async Task<bool> PromotePendingAsync(Guid envId, string key, long expectedVersion)
     {
         var flag = await GetAsync(envId, key);
+
+        // Version guard (#33/#34): only promote if the pending change we are about to commit is
+        // still the one the caller observed. If a racing SetPendingAsync replaced it (different
+        // version) or it was already promoted (null), do nothing.
+        if (flag.Pending?.Version != expectedVersion)
+        {
+            return false;
+        }
 
         // promote pending -> committed in-memory, then persist the full document so the
         // committed value advances and the pending slot is cleared atomically.
         flag.PromotePending();
 
-        await UpdateAsync(flag);
+        // Optimistic replace filtered on Pending.Version == expectedVersion: if another writer
+        // staged a new pending version after our read, the filter no longer matches and the
+        // replace is a no-op (MatchedCount == 0), so a concurrent SetPendingAsync cannot be lost
+        // (#33).
+        var filter = Builders<FeatureFlag>.Filter.And(
+            Builders<FeatureFlag>.Filter.Eq(x => x.EnvId, envId),
+            Builders<FeatureFlag>.Filter.Eq(x => x.Key, key),
+            Builders<FeatureFlag>.Filter.Eq(x => x.Pending!.Version, expectedVersion)
+        );
+
+        var result = await Collection.ReplaceOneAsync(filter, flag);
+        return result.MatchedCount > 0;
     }
 
     public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()
