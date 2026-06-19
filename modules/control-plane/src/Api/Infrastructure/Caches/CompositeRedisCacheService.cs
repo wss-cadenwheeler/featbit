@@ -32,6 +32,15 @@ public class CompositeRedisCacheService(
     public Task CommitFlagAsync(Guid envId, string flagId, long ts) =>
         BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
 
+    // ICacheService probe: returns the LOCAL DC's result (first instance), consistent with
+    // the heartbeat/health local-first convention above. This is NOT the coordinator API —
+    // the coordinator must use GetStagedDcsAsync to see EVERY DC's staged presence.
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts)
+    {
+        var local = cacheServices.First();
+        return local.Service.HasStagedFlagAsync(id, ts);
+    }
+
     public Task DeleteFlagAsync(Guid envId, Guid flagId) =>
         BroadcastAsync(s => s.DeleteFlagAsync(envId, flagId), nameof(DeleteFlagAsync));
 
@@ -121,6 +130,52 @@ public class CompositeRedisCacheService(
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Coordinator-facing probe: returns, per <see cref="DcCacheService.DcId"/>, whether that
+    /// DC's Redis holds the staged version <c>flag:{id}:v{ts}</c>. Iterates every configured
+    /// DC (unlike the local-first <see cref="HasStagedFlagAsync"/>) with the same
+    /// swallow-and-continue resilience as <see cref="BroadcastAsync"/>: a DC whose probe throws
+    /// is reported as <c>false</c> rather than failing the whole call.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts)
+    {
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(dc => ProbeStagedSafelyAsync(dc, id, ts))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[instances[i].DcId] = outcomes[i];
+        }
+
+        return results;
+    }
+
+    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
+    {
+        try
+        {
+            return await dc.Service.HasStagedFlagAsync(id, ts);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Staged-flag probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
     }
 
     private async Task<bool> ExecuteSafelyAsync(

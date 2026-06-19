@@ -54,6 +54,15 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.SortedSetAddAsync(indexKey, flagId, ts);
     }
 
+    /// <summary>
+    /// Probes whether this Redis holds the staged version value key
+    /// <c>featbit:flag:{id}:v{ts}</c> (B1 stage/commit storage).
+    /// </summary>
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts)
+    {
+        return Redis.KeyExistsAsync(RedisCaches.FlagVersion(id, ts));
+    }
+
     public async Task DeleteFlagAsync(Guid envId, Guid flagId)
     {
         // delete cache

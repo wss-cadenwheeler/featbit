@@ -39,4 +39,11 @@ public interface IFeatureFlagService : IService<FeatureFlag>
     /// returns the new value. No-op when there is no pending change.
     /// </summary>
     Task PromotePendingAsync(Guid envId, string key);
+
+    /// <summary>
+    /// Enumerate every flag (across all envs) that currently has a staged-but-not-committed
+    /// change, i.e. <see cref="FeatureFlag.Pending"/> is not null. Used by the commit
+    /// coordinator to discover the set of pending changes it must reconcile.
+    /// </summary>
+    Task<IReadOnlyList<FeatureFlag>> GetPendingAsync();
 }
