@@ -22,6 +22,12 @@ public class NoneCacheService : ICacheService
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 
+    public Task StageSegmentAsync(Segment segment, long ts) => Task.CompletedTask;
+
+    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) => Task.CompletedTask;
+
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts) => Task.FromResult(false);
+
     public Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId) => Task.CompletedTask;
 
     public Task UpsertLicenseAsync(Workspace workspace) => Task.CompletedTask;

@@ -47,6 +47,21 @@ public class CompositeRedisCacheService(
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) =>
         BroadcastAsync(s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentAsync));
 
+    public Task StageSegmentAsync(Segment segment, long ts) =>
+        BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+
+    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) =>
+        BroadcastAsync(s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+
+    // ICacheService probe: returns the LOCAL DC's result (first instance), mirroring
+    // HasStagedFlagAsync. This is NOT the coordinator API — the coordinator must use
+    // GetStagedSegmentDcsAsync to see EVERY DC's staged presence.
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts)
+    {
+        var local = cacheServices.First();
+        return local.Service.HasStagedSegmentAsync(id, ts);
+    }
+
     public Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId) =>
         BroadcastAsync(s => s.DeleteSegmentAsync(envIds, segmentId), nameof(DeleteSegmentAsync));
 
@@ -158,6 +173,31 @@ public class CompositeRedisCacheService(
     }
 
     /// <summary>
+    /// Coordinator-facing probe (segment counterpart of <see cref="GetStagedDcsAsync"/>):
+    /// returns, per <see cref="DcCacheService.DcId"/>, whether that DC's Redis holds the staged
+    /// version <c>segment:{id}:v{ts}</c>. Iterates every configured DC (unlike the local-first
+    /// <see cref="HasStagedSegmentAsync"/>) with the same swallow-and-continue resilience: a DC
+    /// whose probe throws is reported as <c>false</c> rather than failing the whole call.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts)
+    {
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(dc => ProbeStagedSegmentSafelyAsync(dc, id, ts))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[instances[i].DcId] = outcomes[i];
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// Recovery-facing targeted write (E1): stages <paramref name="flag"/> at version
     /// <paramref name="ts"/> into ONE DC's Redis (the <see cref="DcCacheService"/> whose
     /// <see cref="DcCacheService.DcId"/> matches <paramref name="dcId"/>), unlike the broadcast
@@ -207,6 +247,27 @@ public class CompositeRedisCacheService(
             logger.LogError(
                 ex,
                 "Staged-flag probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
+    }
+
+    private async Task<bool> ProbeStagedSegmentSafelyAsync(DcCacheService dc, Guid id, long ts)
+    {
+        try
+        {
+            return await dc.Service.HasStagedSegmentAsync(id, ts);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Staged-segment probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
                 dc.DcId,
                 dc.Service.GetType().FullName);
             return false;
