@@ -182,4 +182,11 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
 
         await UpdateAsync(flag);
     }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()
+    {
+        // every flag (across all envs) that currently carries a staged change
+        var flags = await FindManyAsync(x => x.Pending != null);
+        return flags.ToList();
+    }
 }

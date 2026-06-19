@@ -24,6 +24,13 @@ public interface ICacheService
     /// </summary>
     Task CommitFlagAsync(Guid envId, string flagId, long ts);
 
+    /// <summary>
+    /// Probes whether THIS cache holds the staged version key <c>flag:{id}:v{ts}</c>
+    /// (written by <see cref="StageFlagAsync"/>). Used by the commit coordinator to
+    /// confirm a staged version is present in a given DC's Redis before committing.
+    /// </summary>
+    Task<bool> HasStagedFlagAsync(Guid id, long ts);
+
     Task DeleteFlagAsync(Guid envId, Guid flagId);
 
     Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment);

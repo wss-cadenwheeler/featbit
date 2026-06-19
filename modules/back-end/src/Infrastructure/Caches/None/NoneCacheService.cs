@@ -16,6 +16,8 @@ public class NoneCacheService : ICacheService
 
     public Task CommitFlagAsync(Guid envId, string flagId, long ts) => Task.CompletedTask;
 
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts) => Task.FromResult(false);
+
     public Task DeleteFlagAsync(Guid envId, Guid flagId) => Task.CompletedTask;
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;

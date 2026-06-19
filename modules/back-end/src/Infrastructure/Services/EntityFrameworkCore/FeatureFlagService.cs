@@ -165,4 +165,13 @@ public class FeatureFlagService(AppDbContext dbContext)
 
         await UpdateAsync(flag);
     }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()
+    {
+        // Pending is the jsonb column (B4). Postgres translates "pending IS NOT NULL"
+        // for the whole jsonb document, so this is a server-side scan across all envs.
+        return await Queryable
+            .Where(f => f.Pending != null)
+            .ToListAsync();
+    }
 }
