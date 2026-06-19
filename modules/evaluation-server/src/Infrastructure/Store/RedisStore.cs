@@ -15,25 +15,50 @@ public class RedisStore(IRedisClient redisClient) : IDbStore
 
     public async Task<IEnumerable<byte[]>> GetFlagsAsync(Guid envId, long timestamp)
     {
-        // get flag keys
+        // get flag ids from the index sorted set
         var index = RedisKeys.FlagIndex(envId);
         var ids = await Redis.SortedSetRangeByScoreAsync(index, timestamp, exclude: Exclude.Start);
-        var keys = ids.Select(id => RedisKeys.Flag(id!));
 
-        // get flags
-        var tasks = keys.Select(key => Redis.StringGetAsync(key));
-        var values = await Task.WhenAll(tasks);
-        var jsonBytes = values.Select(x => (byte[])x!);
-
-        return jsonBytes;
+        return await GetFlagsByIdsAsync(ids.Select(id => id.ToString()));
     }
 
     public async Task<IEnumerable<byte[]>> GetFlagsAsync(IEnumerable<string> ids)
     {
-        var keys = ids.Select(RedisKeys.Flag);
+        return await GetFlagsByIdsAsync(ids);
+    }
 
-        var tasks = keys.Select(key => Redis.StringGetAsync(key));
-        var values = await Task.WhenAll(tasks);
+    /// <summary>
+    /// Reads flag values honoring the committed pointer written by the back-end gated commit path.
+    /// For each id: if the committed-pointer key <c>featbit:flag-committed:{id}</c> exists, the
+    /// authoritative value is the versioned snapshot <c>featbit:flag:{id}:v{pointer}</c>; otherwise
+    /// it falls back to the legacy single-value key <c>featbit:flag:{id}</c> (the BestEffort path,
+    /// which writes the main key + index and never writes pointers). This auto-adapts to either
+    /// mode without a mode flag. Pointer GETs and value GETs are each batched via
+    /// <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/> to avoid serial round-trips.
+    /// NOTE: segments are intentionally left unchanged here; that is tracked separately as D4.
+    /// </summary>
+    private async Task<IEnumerable<byte[]>> GetFlagsByIdsAsync(IEnumerable<string> ids)
+    {
+        var idList = ids.ToList();
+
+        // batch the committed-pointer GETs
+        var pointerTasks = idList.Select(id => Redis.StringGetAsync(RedisKeys.FlagCommittedPointer(id)));
+        var pointers = await Task.WhenAll(pointerTasks);
+
+        // resolve each id to its authoritative value key: versioned snapshot if a pointer exists,
+        // otherwise the legacy main key (BestEffort fallback)
+        var valueKeys = idList.Select((id, i) =>
+        {
+            var pointer = pointers[i];
+            return pointer.HasValue
+                ? RedisKeys.FlagVersion(id, (long)pointer)
+                : RedisKeys.Flag(id);
+        });
+
+        // batch the value GETs
+        var valueTasks = valueKeys.Select(key => Redis.StringGetAsync(key));
+        var values = await Task.WhenAll(valueTasks);
+
         return values.Select(x => (byte[])x!);
     }
 
