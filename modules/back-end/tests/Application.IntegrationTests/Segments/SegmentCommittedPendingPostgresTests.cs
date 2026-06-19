@@ -1,0 +1,232 @@
+using Domain.Segments;
+using Domain.Targeting;
+using Domain.Utils;
+using Infrastructure.Persistence.EntityFrameworkCore;
+using Infrastructure.Services.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+
+namespace Application.IntegrationTests.Segments;
+
+/// <summary>
+/// S1 acceptance (Postgres/EF parity with the Mongo S1 work): the authoritative committed read
+/// must return the COMMITTED segment value, never a pending (staged-but-not-committed) change.
+/// After promotion the committed read returns the new value with an advanced CommittedVersion.
+///
+/// Integration test against a real Postgres instance (throwaway container on port 5436). Uses
+/// EnsureCreated() to materialize the EF model — including the mapped committed_version (bigint)
+/// and pending (jsonb) columns — so this also proves the SegmentConfiguration mapping is valid.
+/// Fails loudly if no Postgres is reachable.
+/// </summary>
+public sealed class SegmentCommittedPendingPostgresTests : IAsyncLifetime
+{
+    private const string BaseConnectionString =
+        "Host=localhost;Port=5436;Database=featbit;Username=postgres;Password=please_change_me";
+
+    // Use a UNIQUE throwaway database per test instance so EnsureCreated/EnsureDeleted in
+    // different tests do not race each other. EF creates and drops this database.
+    private readonly string _dbName = $"featbit_s1_test_{Guid.NewGuid():N}";
+    private string _connectionString = null!;
+    private NpgsqlDataSource _dataSource = null!;
+    private AppDbContext _dbContext = null!;
+    private SegmentService _sut = null!;
+    private readonly Guid _workspaceId = Guid.NewGuid();
+    private readonly Guid _envId = Guid.NewGuid();
+
+    public async Task InitializeAsync()
+    {
+        // fail fast if Postgres is not available. Probe the always-present "postgres" db.
+        var probeConnectionString = new NpgsqlConnectionStringBuilder(BaseConnectionString)
+        {
+            Database = "postgres"
+        }.ConnectionString;
+        await using (var probe = new NpgsqlConnection(probeConnectionString))
+        {
+            await probe.OpenAsync();
+        }
+
+        _connectionString = new NpgsqlConnectionStringBuilder(BaseConnectionString)
+        {
+            Database = _dbName
+        }.ConnectionString;
+
+        // Mirror the production data source: dynamic JSON is required for the jsonb POCO
+        // columns (Rules and the new Pending), and the snake_case naming convention is required
+        // so EnsureCreated materializes the expected committed_version / pending columns.
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(_connectionString);
+        dataSourceBuilder
+            .EnableDynamicJson()
+            .ConfigureJsonOptions(ReusableJsonSerializerOptions.Web);
+        _dataSource = dataSourceBuilder.Build();
+
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseNpgsql(_dataSource)
+            .UseSnakeCaseNamingConvention()
+            .Options;
+
+        _dbContext = new AppDbContext(options);
+
+        // materializes the EF model (incl. the new committed_version/pending columns)
+        await _dbContext.Database.EnsureCreatedAsync();
+
+        _sut = new SegmentService(_dbContext, NullLogger<SegmentService>.Instance);
+    }
+
+    public async Task DisposeAsync()
+    {
+        if (_dbContext != null!)
+        {
+            await _dbContext.Database.EnsureDeletedAsync();
+            await _dbContext.DisposeAsync();
+        }
+
+        if (_dataSource != null!)
+        {
+            await _dataSource.DisposeAsync();
+        }
+    }
+
+    private Segment CreateSegment(string key, string description)
+    {
+        return new Segment(
+            workspaceId: _workspaceId,
+            envId: _envId,
+            name: key,
+            key: key,
+            type: SegmentType.EnvironmentSpecific,
+            scopes: [],
+            included: [],
+            excluded: [],
+            rules: new List<MatchRule>(),
+            description: description
+        );
+    }
+
+    [Fact]
+    public async Task SetPending_Then_Promote_Committed_Read_Returns_Old_Then_New_Value()
+    {
+        // Arrange: committed segment, description "old", CommittedVersion = 1
+        var committed = CreateSegment("s1-segment", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        // build the pending value: same segment but description "new"
+        var pendingValue = CreateSegment("s1-segment", "new");
+
+        // Act 1: stage a pending change (version 2)
+        await _sut.SetPendingAsync(committed.Id, pendingValue, version: 2);
+
+        // Assert 1: committed read still returns the OLD value, with no pending leaked
+        var afterStage = await _sut.GetCommittedAsync(committed.Id);
+        Assert.Equal("old", afterStage.Description);
+        Assert.Equal(1, afterStage.CommittedVersion);
+        Assert.Null(afterStage.Pending);
+
+        // sanity: the pending change really was persisted (raw read keeps it)
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(2, raw.Pending!.Version);
+        Assert.Equal("new", raw.Pending.Value.Description);
+
+        // Act 2: promote pending -> committed (guarded on the staged version 2)
+        var promoted = await _sut.PromotePendingAsync(committed.Id, expectedVersion: 2);
+        Assert.True(promoted);
+
+        // Assert 2: committed read now returns the NEW value and advanced version
+        var afterPromote = await _sut.GetCommittedAsync(committed.Id);
+        Assert.Equal("new", afterPromote.Description);
+        Assert.Equal(2, afterPromote.CommittedVersion);
+        Assert.Null(afterPromote.Pending);
+
+        // pending slot cleared on the stored row too
+        var rawAfter = await _sut.GetAsync(committed.Id);
+        Assert.Null(rawAfter.Pending);
+    }
+
+    [Fact]
+    public async Task GetCommitted_With_No_Pending_Returns_Committed_Value()
+    {
+        var committed = CreateSegment("s1-no-pending", "value");
+        committed.CommittedVersion = 5;
+        await _sut.AddOneAsync(committed);
+
+        var read = await _sut.GetCommittedAsync(committed.Id);
+
+        Assert.Equal("value", read.Description);
+        Assert.Equal(5, read.CommittedVersion);
+        Assert.Null(read.Pending);
+    }
+
+    [Fact]
+    public async Task PromotePending_Is_NoOp_When_No_Pending()
+    {
+        var committed = CreateSegment("s1-promote-noop", "old");
+        committed.CommittedVersion = 3;
+        await _sut.AddOneAsync(committed);
+
+        var promoted = await _sut.PromotePendingAsync(committed.Id, expectedVersion: 4);
+        Assert.False(promoted);
+
+        var read = await _sut.GetCommittedAsync(committed.Id);
+        Assert.Equal("old", read.Description);
+        Assert.Equal(3, read.CommittedVersion);
+        Assert.Null(read.Pending);
+    }
+
+    [Fact]
+    public async Task PromotePending_Is_NoOp_When_Version_Mismatch()
+    {
+        // a stale coordinator (expecting v2) must NOT clobber a newer staged pending (v3) — #33
+        var committed = CreateSegment("s1-version-mismatch", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        var pendingValue = CreateSegment("s1-version-mismatch", "new");
+        await _sut.SetPendingAsync(committed.Id, pendingValue, version: 3);
+
+        var promoted = await _sut.PromotePendingAsync(committed.Id, expectedVersion: 2);
+        Assert.False(promoted);
+
+        var read = await _sut.GetCommittedAsync(committed.Id);
+        Assert.Equal("old", read.Description);
+        Assert.Equal(1, read.CommittedVersion);
+
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(3, raw.Pending!.Version);
+    }
+
+    [Fact]
+    public async Task GetPending_Returns_Only_Segments_With_Pending()
+    {
+        var committedOnly = CreateSegment("s1-committed-only", "x");
+        await _sut.AddOneAsync(committedOnly);
+
+        var pendingSeg = CreateSegment("s1-with-pending", "x");
+        await _sut.AddOneAsync(pendingSeg);
+        await _sut.SetPendingAsync(pendingSeg.Id, CreateSegment("s1-with-pending", "y"), version: 2);
+
+        var pending = await _sut.GetPendingAsync();
+
+        Assert.Single(pending);
+        Assert.All(pending, s => Assert.NotNull(s.Pending));
+        Assert.Equal("s1-with-pending", pending[0].Key);
+    }
+
+    [Fact]
+    public async Task GetAllCommitted_Returns_All_Segments_With_Pending_Stripped()
+    {
+        var a = CreateSegment("s1-all-a", "x");
+        await _sut.AddOneAsync(a);
+
+        var b = CreateSegment("s1-all-b", "x");
+        await _sut.AddOneAsync(b);
+        await _sut.SetPendingAsync(b.Id, CreateSegment("s1-all-b", "y"), version: 2);
+
+        var all = await _sut.GetAllCommittedAsync();
+
+        Assert.Equal(2, all.Count);
+        Assert.All(all, s => Assert.Null(s.Pending));
+    }
+}

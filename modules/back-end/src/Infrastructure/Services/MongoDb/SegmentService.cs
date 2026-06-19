@@ -178,6 +178,83 @@ public class SegmentService(MongoDbClient mongoDb, ILogger<SegmentService> logge
         }
     }
 
+    public async Task<Segment> GetCommittedAsync(Guid id)
+    {
+        var segment = await GetAsync(id);
+
+        // The committed read must NEVER expose a pending (staged) change. The top-level
+        // document is the committed value; drop the pending slot before returning it.
+        segment.Pending = null;
+
+        return segment;
+    }
+
+    public async Task SetPendingAsync(Guid id, Segment pendingValue, long version)
+    {
+        // ensure the segment exists (committed value is left untouched)
+        await GetAsync(id);
+
+        var pending = new PendingSegmentChange
+        {
+            Version = version,
+            Value = pendingValue
+        };
+
+        var filter = Builders<Segment>.Filter.Eq(x => x.Id, id);
+        var update = Builders<Segment>.Update.Set(x => x.Pending, pending);
+
+        await Collection.UpdateOneAsync(filter, update);
+    }
+
+    public async Task<bool> PromotePendingAsync(Guid id, long expectedVersion)
+    {
+        var segment = await GetAsync(id);
+
+        // Version guard (#33/#34): only promote if the pending change we are about to commit is
+        // still the one the caller observed. If a racing SetPendingAsync replaced it (different
+        // version) or it was already promoted (null), do nothing.
+        if (segment.Pending?.Version != expectedVersion)
+        {
+            return false;
+        }
+
+        // promote pending -> committed in-memory, then persist the full document so the
+        // committed value advances and the pending slot is cleared atomically.
+        segment.PromotePending();
+
+        // Optimistic replace filtered on Pending.Version == expectedVersion: if another writer
+        // staged a new pending version after our read, the filter no longer matches and the
+        // replace is a no-op (MatchedCount == 0), so a concurrent SetPendingAsync cannot be lost
+        // (#33).
+        var filter = Builders<Segment>.Filter.And(
+            Builders<Segment>.Filter.Eq(x => x.Id, id),
+            Builders<Segment>.Filter.Eq(x => x.Pending!.Version, expectedVersion)
+        );
+
+        var result = await Collection.ReplaceOneAsync(filter, segment);
+        return result.MatchedCount > 0;
+    }
+
+    public async Task<IReadOnlyList<Segment>> GetPendingAsync()
+    {
+        // every segment that currently carries a staged change
+        var segments = await FindManyAsync(x => x.Pending != null);
+        return segments.ToList();
+    }
+
+    public async Task<IReadOnlyList<Segment>> GetAllCommittedAsync()
+    {
+        // enumerate every segment, then strip the pending slot so only the COMMITTED value is
+        // exposed (mirroring GetCommittedAsync). The top-level document is the committed value.
+        var segments = await FindManyAsync(_ => true);
+        foreach (var segment in segments)
+        {
+            segment.Pending = null;
+        }
+
+        return segments.ToList();
+    }
+
     private async Task<(string scope, ICollection<Guid> envIds)> TranslateScopeAsync(string scope)
     {
         if (!RN.TryParse(scope, out var props))
