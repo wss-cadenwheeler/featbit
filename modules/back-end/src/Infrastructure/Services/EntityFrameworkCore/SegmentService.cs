@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using Application.Bases.Exceptions;
 using Application.Bases.Models;
 using Application.Segments;
 using Dapper;
@@ -171,6 +172,91 @@ public class SegmentService(AppDbContext dbContext, ILogger<SegmentService> logg
                 caches.Add(new SegmentCache(envIds, sharedSegment));
             }
         }
+    }
+
+    // Committed-vs-pending, Postgres/EF parity with the Mongo SegmentService. Keyed by segment Id
+    // (a segment is a single entity, possibly shared across envs). Matches the Mongo behavior; the
+    // EF promote path has a documented residual non-atomic window (#33).
+
+    public async Task<Segment> GetCommittedAsync(Guid id)
+    {
+        // No-tracking so stripping the pending slot below is purely a read-shaping
+        // operation and never accidentally persisted on a later SaveChanges.
+        var segment = await Queryable
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == id);
+        if (segment == null)
+        {
+            throw new EntityNotFoundException(nameof(Segment), id.ToString());
+        }
+
+        // The committed read must NEVER expose a pending (staged) change. The top-level
+        // row is the committed value; drop the pending slot before returning it.
+        segment.Pending = null;
+
+        return segment;
+    }
+
+    public async Task SetPendingAsync(Guid id, Segment pendingValue, long version)
+    {
+        // load the committed row (left otherwise untouched)
+        var segment = await GetAsync(id);
+
+        // write ONLY the pending data; committed fields stay as they are
+        segment.SetPending(pendingValue, version);
+
+        await UpdateAsync(segment);
+    }
+
+    public async Task<bool> PromotePendingAsync(Guid id, long expectedVersion)
+    {
+        var segment = await GetAsync(id);
+
+        // Version guard (#33/#34): only promote if the pending change still matches the version
+        // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
+        // or already promoted (null), do nothing.
+        if (segment.Pending?.Version != expectedVersion)
+        {
+            return false;
+        }
+
+        // promote pending -> committed, then persist the full row so the committed
+        // value advances and the pending slot is cleared.
+        segment.PromotePending();
+
+        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
+        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync committing in
+        // that window could be overwritten. The in-memory version check narrows but does not close
+        // it for the EF provider; closing it requires an optimistic-concurrency token (tracked in
+        // #33). The Mongo provider closes it via a version-filtered ReplaceOneAsync.
+        await UpdateAsync(segment);
+        return true;
+    }
+
+    public async Task<IReadOnlyList<Segment>> GetPendingAsync()
+    {
+        // Pending is the jsonb column. Postgres translates "pending IS NOT NULL"
+        // for the whole jsonb document, so this is a server-side scan across all segments.
+        return await Queryable
+            .Where(s => s.Pending != null)
+            .ToListAsync();
+    }
+
+    public async Task<IReadOnlyList<Segment>> GetAllCommittedAsync()
+    {
+        // enumerate every segment, then strip the pending slot so only the COMMITTED value is
+        // exposed (mirroring GetCommittedAsync). AsNoTracking so the strip is purely read-shaping
+        // and never persisted.
+        var segments = await Queryable
+            .AsNoTracking()
+            .ToListAsync();
+
+        foreach (var segment in segments)
+        {
+            segment.Pending = null;
+        }
+
+        return segments;
     }
 
     private async Task<(string scope, ICollection<Guid> envIds)> TranslateScopeAsync(string scope)
