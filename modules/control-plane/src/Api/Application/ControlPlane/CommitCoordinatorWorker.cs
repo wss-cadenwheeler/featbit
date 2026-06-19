@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using Application.Caches;
 using Application.Configuration;
 using Application.ControlPlane;
@@ -39,6 +40,28 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     /// <c>ControlPlane:CommitCoordinator:IntervalSeconds</c>.
     /// </summary>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Stable meter name for control-plane consistency observability. Operators / tests subscribe
+    /// to this meter (e.g. via <see cref="MeterListener"/> or <c>IMeterFactory</c>) to observe the
+    /// eviction counters emitted by the commit coordinator.
+    /// </summary>
+    public const string MeterName = "FeatBit.ControlPlane.Consistency";
+
+    /// <summary>
+    /// Counter incremented once per (flag-commit, evicted DC) pair: i.e. every time a flag version
+    /// is committed while a configured DC is absent from the live set (its lease expired / it is
+    /// down). Tagged with the evicted <c>dc_id</c>.
+    /// </summary>
+    public const string EvictedCommitCounterName = "control_plane.consistency.evicted_commits";
+
+    private static readonly Meter Meter = new(MeterName);
+
+    private static readonly Counter<long> EvictedCommitCounter = Meter.CreateCounter<long>(
+        EvictedCommitCounterName,
+        unit: "{commit}",
+        description:
+        "Number of flag-version commits made while a configured DC was evicted (absent from the live set).");
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICacheService _compositeCache;
@@ -195,6 +218,28 @@ public sealed class CommitCoordinatorWorker : BackgroundService
             // IS the new committed state; it carries the same shape the BestEffort path publishes.
             await _messageProducer.PublishAsync(Topics.FeatureFlagChange, pendingChange.Value);
             count++;
+
+            // Observability (#16): the commit decision above is intentionally made on the LIVE set
+            // (committing without a down DC is the design). Record — for operators — any CONFIGURED
+            // DC that was evicted (probed by GetStagedDcsAsync, so present in the staged map's key
+            // set, but absent from the live set). This does not change the commit decision.
+            var evictedDcs = stagedMap.Keys
+                .Where(dc => !liveDcs.Contains(dc))
+                .ToList();
+
+            if (evictedDcs.Count > 0)
+            {
+                foreach (var dc in evictedDcs)
+                {
+                    EvictedCommitCounter.Add(1, new KeyValuePair<string, object?>("dc_id", dc));
+                }
+
+                _logger.LogWarning(
+                    "Committed flag {FlagId} v{Version} without DC(s) {EvictedDcs} — proceeding on live set.",
+                    flag.Id,
+                    version,
+                    string.Join(", ", evictedDcs));
+            }
         }
 
         return count;

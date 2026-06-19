@@ -9,8 +9,10 @@ using Domain.Messages;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
 using Infrastructure.Services.MongoDb;
+using System.Diagnostics.Metrics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MongoDB.Bson;
@@ -159,7 +161,9 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         });
     }
 
-    private CommitCoordinatorWorker CreateSut(SpyMessageProducer producer)
+    private CommitCoordinatorWorker CreateSut(
+        SpyMessageProducer producer,
+        ILogger<CommitCoordinatorWorker>? logger = null)
     {
         // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
         // resolves them at runtime via IServiceScopeFactory.
@@ -180,7 +184,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
             _composite,
             producer,
             configuration,
-            NullLogger<CommitCoordinatorWorker>.Instance);
+            logger ?? NullLogger<CommitCoordinatorWorker>.Instance);
     }
 
     // ----- acceptance cases -----
@@ -378,7 +382,147 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Single(producer.Published);
     }
 
+    // ----- eviction observability (#16) -----
+
+    [Fact]
+    public async Task EvictedCommit_Logs_And_IncrementsCounter_NamingEvictedDc()
+    {
+        // dc-a live + staged; dc-b is CONFIGURED (composite probes it) but its lease has EXPIRED, so
+        // it is evicted from the live set. The commit proceeds on the live set, and the eviction
+        // must be recorded (warning log naming dc-b + counter increment tagged dc_id=dc-b).
+        const string key = "evicted-commit-observed";
+        var (_, _, v) = await SeedCommittedV1PendingV2(key);
+        var flag = await _flagService.GetAsync(_envId, key);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));   // dc-a live
+        await UpsertLeaseAsync(DcB, now.AddMinutes(-5));  // dc-b lease EXPIRED -> evicted
+
+        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+
+        var logger = new CapturingLogger();
+        var producer = new SpyMessageProducer();
+        var sut = CreateSut(producer, logger);
+
+        using var counter = new CounterCollector(CommitCoordinatorWorker.EvictedCommitCounterName);
+
+        var committed = await sut.RunOnceAsync();
+
+        // commit decision unchanged: it still committed on the live set
+        Assert.Equal(1, committed);
+
+        // metric: exactly one increment, tagged with the evicted dc_id
+        var measurement = Assert.Single(counter.Measurements);
+        Assert.Equal(1, measurement.Value);
+        Assert.Equal(DcB, measurement.Tags["dc_id"]);
+
+        // log: a warning naming the flag, the version, and the evicted DC
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains(flag.Id.ToString(), warning);
+        Assert.Contains(v.ToString(), warning);
+        Assert.Contains(DcB, warning);
+    }
+
+    [Fact]
+    public async Task NoEviction_When_AllConfiguredDcsLive_DoesNotLogOrIncrement()
+    {
+        // both configured DCs are live + staged -> no eviction; no extra warning, no counter.
+        const string key = "no-eviction-observed";
+        var (_, _, v) = await SeedCommittedV1PendingV2(key);
+        var flag = await _flagService.GetAsync(_envId, key);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
+
+        var logger = new CapturingLogger();
+        var producer = new SpyMessageProducer();
+        var sut = CreateSut(producer, logger);
+
+        using var counter = new CounterCollector(CommitCoordinatorWorker.EvictedCommitCounterName);
+
+        var committed = await sut.RunOnceAsync();
+
+        Assert.Equal(1, committed);
+        Assert.Empty(counter.Measurements);
+        Assert.Empty(logger.Warnings);
+    }
+
     // ----- test doubles -----
+
+    /// <summary>
+    /// Captures emitted measurements for a single named counter on the control-plane consistency
+    /// meter via <see cref="MeterListener"/>, so the test can assert the eviction counter fired
+    /// with the expected value + tags.
+    /// </summary>
+    private sealed class CounterCollector : IDisposable
+    {
+        private readonly MeterListener _listener;
+
+        public List<(long Value, IReadOnlyDictionary<string, object?> Tags)> Measurements { get; } = new();
+
+        public CounterCollector(string instrumentName)
+        {
+            _listener = new MeterListener
+            {
+                InstrumentPublished = (instrument, listener) =>
+                {
+                    if (instrument.Meter.Name == CommitCoordinatorWorker.MeterName
+                        && instrument.Name == instrumentName)
+                    {
+                        listener.EnableMeasurementEvents(instrument);
+                    }
+                }
+            };
+
+            _listener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+            {
+                var dict = new Dictionary<string, object?>();
+                foreach (var tag in tags)
+                {
+                    dict[tag.Key] = tag.Value;
+                }
+
+                Measurements.Add((measurement, dict));
+            });
+
+            _listener.Start();
+        }
+
+        public void Dispose() => _listener.Dispose();
+    }
+
+    /// <summary>Captures warning-level log messages (rendered) for assertion.</summary>
+    private sealed class CapturingLogger : ILogger<CommitCoordinatorWorker>
+    {
+        public List<string> Warnings { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
+        }
+    }
 
     private sealed class SpyMessageProducer : IMessageProducer
     {
