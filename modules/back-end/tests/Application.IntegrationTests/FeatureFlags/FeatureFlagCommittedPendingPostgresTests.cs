@@ -141,8 +141,9 @@ public sealed class FeatureFlagCommittedPendingPostgresTests : IAsyncLifetime
         Assert.Equal(2, raw.Pending!.Version);
         Assert.True(raw.Pending.Value.IsEnabled);
 
-        // Act 2: promote pending -> committed
-        await _sut.PromotePendingAsync(_envId, key);
+        // Act 2: promote pending -> committed (guarded on the staged version 2)
+        var promoted = await _sut.PromotePendingAsync(_envId, key, expectedVersion: 2);
+        Assert.True(promoted);
 
         // Assert 2: committed read now returns the NEW value and advanced version
         var afterPromote = await _sut.GetCommittedAsync(_envId, key);
@@ -178,11 +179,36 @@ public sealed class FeatureFlagCommittedPendingPostgresTests : IAsyncLifetime
         committed.CommittedVersion = 3;
         await _sut.AddOneAsync(committed);
 
-        await _sut.PromotePendingAsync(_envId, key);
+        var promoted = await _sut.PromotePendingAsync(_envId, key, expectedVersion: 4);
+        Assert.False(promoted);
 
         var read = await _sut.GetCommittedAsync(_envId, key);
         Assert.False(read.IsEnabled);
         Assert.Equal(3, read.CommittedVersion);
         Assert.Null(read.Pending);
+    }
+
+    [Fact]
+    public async Task PromotePending_Is_NoOp_When_Version_Mismatch()
+    {
+        // a stale coordinator (expecting v2) must NOT clobber a newer staged pending (v3) — #33
+        const string key = "b4-promote-version-mismatch";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        var pendingValue = CreateFlag(key, isEnabled: true);
+        await _sut.SetPendingAsync(_envId, key, pendingValue, version: 3);
+
+        var promoted = await _sut.PromotePendingAsync(_envId, key, expectedVersion: 2);
+        Assert.False(promoted);
+
+        var read = await _sut.GetCommittedAsync(_envId, key);
+        Assert.False(read.IsEnabled);
+        Assert.Equal(1, read.CommittedVersion);
+
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(3, raw.Pending!.Version);
     }
 }
