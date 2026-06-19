@@ -122,6 +122,16 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         }
     }
 
+    /// <summary>
+    /// Probes whether this Redis holds the staged version value key
+    /// <c>featbit:segment:{id}:v{ts}</c> (B2 stage/commit storage, mirroring
+    /// <see cref="HasStagedFlagAsync"/>).
+    /// </summary>
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts)
+    {
+        return Redis.KeyExistsAsync(RedisCaches.SegmentVersion(id, ts));
+    }
+
     public async Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId)
     {
         // delete cache
