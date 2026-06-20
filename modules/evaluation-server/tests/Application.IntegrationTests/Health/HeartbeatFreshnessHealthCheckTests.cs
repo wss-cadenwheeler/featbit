@@ -74,7 +74,7 @@ public class HeartbeatFreshnessHealthCheckTests
     }
 
     [Fact]
-    public async Task GatedCommit_Stale_IsDegraded_AndNamesDcIdAndAge()
+    public async Task GatedCommit_Stale_IsUnhealthy_AndNamesDcIdAndAge()
     {
         var config = Config(
             ("ControlPlane:ConsistencyMode", "GatedCommit"),
@@ -88,7 +88,7 @@ public class HeartbeatFreshnessHealthCheckTests
 
         var result = await Check(CreateSut(config, status, clock));
 
-        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Contains("dc-west", result.Description);
         Assert.Contains("120", result.Description);
     }
@@ -111,7 +111,7 @@ public class HeartbeatFreshnessHealthCheckTests
     }
 
     [Fact]
-    public async Task GatedCommit_NeverPublished_PastStartupGrace_IsDegraded()
+    public async Task GatedCommit_NeverPublished_PastStartupGrace_IsUnhealthy()
     {
         var config = Config(
             ("ControlPlane:ConsistencyMode", "GatedCommit"),
@@ -125,7 +125,7 @@ public class HeartbeatFreshnessHealthCheckTests
 
         var result = await Check(sut);
 
-        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Contains("dc-east", result.Description);
     }
 
@@ -142,9 +142,9 @@ public class HeartbeatFreshnessHealthCheckTests
         clock.Advance(TimeSpan.FromSeconds(HeartbeatFreshnessHealthCheck.DefaultStalenessThresholdSeconds - 1));
         Assert.Equal(HealthStatus.Healthy, (await Check(CreateSut(config, status, clock))).Status);
 
-        // Past the default -> degraded.
+        // Past the default -> unhealthy (hard readiness fence).
         clock.Advance(TimeSpan.FromSeconds(2));
-        Assert.Equal(HealthStatus.Degraded, (await Check(CreateSut(config, status, clock))).Status);
+        Assert.Equal(HealthStatus.Unhealthy, (await Check(CreateSut(config, status, clock))).Status);
     }
 
     [Fact]
@@ -167,33 +167,33 @@ public class HeartbeatFreshnessHealthCheckTests
     }
 
     /// <summary>
-    /// Readiness contract: ASP.NET Core's default health-result mapping treats
-    /// <see cref="HealthStatus.Degraded"/> as HTTP 200 (ready); only
-    /// <see cref="HealthStatus.Unhealthy"/> returns 503. The eval-server readiness endpoint does not
-    /// override that mapping (see <c>MiddlewaresRegister</c>), so a degraded heartbeat keeps
-    /// <c>/health/readiness</c> passing. This check must therefore NEVER return Unhealthy — it only
-    /// ever returns Healthy or Degraded — so it can never fail readiness.
+    /// Readiness contract (HARD FENCE): ASP.NET Core's default mapping returns HTTP 503 for
+    /// <see cref="HealthStatus.Unhealthy"/> (only Healthy/Degraded → 200). The check is tagged for
+    /// <c>/health/readiness</c>, so under GatedCommit a stale heartbeat FAILS readiness and the pod is
+    /// pulled from rotation. Under BestEffort the check is a no-op (never Unhealthy), so it can never
+    /// fence a pod when gating is off.
     /// </summary>
     [Fact]
-    public async Task NeverReturnsUnhealthy_AcrossModesAndAges()
+    public async Task BestEffort_NeverUnhealthy_EvenWhenVeryStale()
     {
-        // BestEffort with a very stale heartbeat.
         var bestEffort = Config(("ControlPlane:ConsistencyMode", "BestEffort"));
         var s1 = new HeartbeatPublishStatus();
         s1.MarkSuccess(T0);
-        Assert.NotEqual(
-            HealthStatus.Unhealthy,
-            (await Check(CreateSut(bestEffort, s1, new FakeClock(T0.AddHours(1))))).Status);
+        // Even an hour stale, BestEffort must stay Healthy (never fences readiness).
+        var result = await Check(CreateSut(bestEffort, s1, new FakeClock(T0.AddHours(1))));
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+    }
 
-        // GatedCommit, far past the threshold and never published — the worst case.
+    [Fact]
+    public async Task GatedCommit_FarPastThreshold_IsUnhealthy_FailingReadiness()
+    {
         var gated = Config(
             ("ControlPlane:ConsistencyMode", "GatedCommit"),
             ("ControlPlane:HeartbeatStalenessThresholdSeconds", "30"));
         var clock = new FakeClock(T0);
-        var sut = CreateSut(gated, new HeartbeatPublishStatus(), clock);
+        var sut = CreateSut(gated, new HeartbeatPublishStatus(), clock); // never published
         clock.Advance(TimeSpan.FromHours(1));
         var result = await Check(sut);
-        Assert.Equal(HealthStatus.Degraded, result.Status);
-        Assert.NotEqual(HealthStatus.Unhealthy, result.Status);
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
     }
 }

@@ -16,21 +16,21 @@ namespace Api.Health;
 /// is irrelevant when changes are not cross-DC gated.</item>
 /// <item><b>GatedCommit</b> — when the pod has been unable to publish a heartbeat for longer than
 /// <c>ControlPlane:HeartbeatStalenessThresholdSeconds</c> (it has likely been evicted / partitioned
-/// from the control plane), report <see cref="HealthStatus.Degraded"/> — NOT
-/// <see cref="HealthStatus.Unhealthy"/>. The pod keeps serving its consistent last-committed values;
-/// we surface degradation for operators rather than pulling it from rotation.</item>
+/// from the control plane), report <see cref="HealthStatus.Unhealthy"/> — a HARD readiness fence.</item>
 /// </list>
 /// </para>
 /// <para>
-/// <b>Readiness:</b> the ASP.NET Core health middleware maps both <c>Healthy</c> and <c>Degraded</c>
-/// to HTTP 200 by default (only <c>Unhealthy</c> → 503), and the eval-server readiness endpoint does
-/// not override that mapping. Therefore a <c>Degraded</c> result keeps <c>/health/readiness</c>
-/// passing — this check is observational, NOT a hard readiness fence.
+/// <b>Readiness (hard fence):</b> the ASP.NET Core health middleware maps <c>Unhealthy</c> to HTTP 503,
+/// so this check is tagged for <c>/health/readiness</c> and an <c>Unhealthy</c> result FAILS readiness —
+/// the pod is pulled from load-balancer rotation. This is the strict consistency-over-availability
+/// choice: a partitioned/evicted DC's eval servers stop serving entirely rather than serving
+/// stale-but-consistent values. It is tagged Readiness only (NOT liveness), so the pod is removed from
+/// rotation, not restarted; it returns to rotation once heartbeats resume.
 /// </para>
 /// <para>
 /// Also emits the <c>evaluation_server.consistency.heartbeat_staleness_seconds</c> observable gauge
 /// (seconds since last successful publish; 0 when healthy) and logs a warning on the transition into
-/// degraded.
+/// the unhealthy/fenced state.
 /// </para>
 /// </remarks>
 public sealed class HeartbeatFreshnessHealthCheck : IHealthCheck
@@ -157,22 +157,22 @@ public sealed class HeartbeatFreshnessHealthCheck : IHealthCheck
         var message = lastSuccess.HasValue
             ? $"Heartbeat stale: DcId={dcId} has not published a heartbeat for {ageSeconds}s " +
               $"(threshold {thresholdSeconds}s); pod likely evicted/partitioned from the control " +
-              "plane. Serving last-committed values."
+              "plane. Failing readiness (pulled from rotation)."
             : $"No heartbeat published since startup: DcId={dcId}, {ageSeconds}s since start " +
-              $"(threshold {thresholdSeconds}s); pod cannot reach the control plane. Serving " +
-              "last-committed values.";
+              $"(threshold {thresholdSeconds}s); pod cannot reach the control plane. Failing " +
+              "readiness (pulled from rotation).";
 
-        // Log a warning only on the transition into degraded to avoid log spam.
+        // Log a warning only on the transition into the fenced state to avoid log spam.
         if (Interlocked.Exchange(ref _wasDegraded, 1) == 0)
         {
             _logger.LogWarning(
-                "Heartbeat freshness degraded: DcId={DcId}, StalenessSeconds={StalenessSeconds}, " +
+                "Heartbeat freshness unhealthy: DcId={DcId}, StalenessSeconds={StalenessSeconds}, " +
                 "ThresholdSeconds={ThresholdSeconds}. Pod likely evicted/partitioned from the " +
-                "control plane; continuing to serve last-committed values.",
+                "control plane; failing readiness to pull it from rotation.",
                 dcId, ageSeconds, thresholdSeconds);
         }
 
-        return Task.FromResult(HealthCheckResult.Degraded(message));
+        return Task.FromResult(HealthCheckResult.Unhealthy(message));
     }
 
     private int GetThresholdSeconds()
