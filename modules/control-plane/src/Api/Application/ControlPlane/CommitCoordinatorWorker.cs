@@ -69,6 +69,27 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     /// </summary>
     public const string EvictedCommitCounterName = "control_plane.consistency.evicted_commits";
 
+    /// <summary>
+    /// F1 (#24): counter incremented once per successful commit (flag OR segment). Tagged
+    /// <c>resource_type</c> = <c>flag</c> | <c>segment</c> (and <c>env_id</c> on the flag path, cheaply
+    /// available from the pending flag record).
+    /// </summary>
+    public const string CommitsCounterName = "control_plane.consistency.commits";
+
+    /// <summary>
+    /// F1 (#24): histogram of the stage-to-commit latency in milliseconds, recorded at each commit as
+    /// <c>now - resourceUpdatedAt</c> (the resource's <c>UpdatedAt</c> is the staged version's
+    /// timestamp, so this approximates stage->commit latency). Tagged <c>resource_type</c>.
+    /// </summary>
+    public const string TimeToCommitHistogramName = "control_plane.consistency.time_to_commit_ms";
+
+    /// <summary>
+    /// F1 (#24): observable gauge reporting the count of currently-pending (staged-but-not-committed)
+    /// items per <c>resource_type</c> = <c>flag</c> | <c>segment</c>. Backed by fields refreshed at the
+    /// end of each <see cref="RunOnceAsync"/> from the latest <c>GetPendingAsync</c> reads.
+    /// </summary>
+    public const string PendingBacklogGaugeName = "control_plane.consistency.pending_backlog";
+
     private static readonly Meter Meter = new(MeterName);
 
     private static readonly Counter<long> EvictedCommitCounter = Meter.CreateCounter<long>(
@@ -76,6 +97,62 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         unit: "{commit}",
         description:
         "Number of flag-version commits made while a configured DC was evicted (absent from the live set).");
+
+    private static readonly Counter<long> CommitsCounter = Meter.CreateCounter<long>(
+        CommitsCounterName,
+        unit: "{commit}",
+        description: "Number of successful commits, tagged by resource_type (flag | segment).");
+
+    private static readonly Histogram<double> TimeToCommitHistogram = Meter.CreateHistogram<double>(
+        TimeToCommitHistogramName,
+        unit: "ms",
+        description:
+        "Stage-to-commit latency (now - resource UpdatedAt) in milliseconds, tagged by resource_type.");
+
+    // Observable backlog gauge: reports the most recent pending counts captured at the end of a tick.
+    // Static so a single registration on the shared Meter survives across worker instances (matching
+    // the rest of the static instruments above). Volatile because the gauge callback may be invoked
+    // by the metrics infra on a different thread than the tick that updates the fields.
+    private static volatile int _pendingFlagBacklog;
+    private static volatile int _pendingSegmentBacklog;
+
+    // NOTE (#46): per-DC "applied watermark / lag" metrics are intentionally NOT emitted here. They
+    // depend on the eval-server's applied-watermark, whose source is still inaccurate (tracked in
+    // #46); adding them now would publish misleading data. Revisit once #46 lands.
+    private static readonly ObservableGauge<long> PendingBacklogGauge = Meter.CreateObservableGauge(
+        PendingBacklogGaugeName,
+        ObservePendingBacklog,
+        unit: "{item}",
+        description: "Currently-pending (staged-but-not-committed) item count per resource_type.");
+
+    private static IEnumerable<Measurement<long>> ObservePendingBacklog()
+    {
+        yield return new Measurement<long>(
+            _pendingFlagBacklog,
+            new KeyValuePair<string, object?>("resource_type", "flag"));
+        yield return new Measurement<long>(
+            _pendingSegmentBacklog,
+            new KeyValuePair<string, object?>("resource_type", "segment"));
+    }
+
+    /// <summary>
+    /// F1 (#24): record a stage-to-commit latency sample. <paramref name="resourceUpdatedAt"/> is the
+    /// staged value's <c>UpdatedAt</c> (the staged version's timestamp), so <c>now - UpdatedAt</c>
+    /// approximates stage->commit latency. Clamped at 0 to avoid a negative sample from clock skew.
+    /// </summary>
+    private static void RecordTimeToCommit(string resourceType, DateTime resourceUpdatedAt)
+    {
+        var updatedAtUtc = DateTime.SpecifyKind(resourceUpdatedAt, DateTimeKind.Utc);
+        var elapsedMs = (DateTime.UtcNow - updatedAtUtc).TotalMilliseconds;
+        if (elapsedMs < 0)
+        {
+            elapsedMs = 0;
+        }
+
+        TimeToCommitHistogram.Record(
+            elapsedMs,
+            new KeyValuePair<string, object?>("resource_type", resourceType));
+    }
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICacheService _compositeCache;
@@ -162,6 +239,12 @@ public sealed class CommitCoordinatorWorker : BackgroundService
             .GetRequiredService<ISegmentService>()
             .GetPendingAsync();
 
+        // F1 (#24): refresh the observable pending-backlog gauge from this tick's GetPendingAsync
+        // counts. Done up front so EVERY return path (including the no-pending and no-live-DC early
+        // returns below) reports the current backlog. Side-effect-only; does not affect commits.
+        _pendingFlagBacklog = pending.Count;
+        _pendingSegmentBacklog = pendingSegments.Count;
+
         if (pending.Count == 0 && pendingSegments.Count == 0)
         {
             return 0;
@@ -240,6 +323,15 @@ public sealed class CommitCoordinatorWorker : BackgroundService
             // IS the new committed state; it carries the same shape the BestEffort path publishes.
             await _messageProducer.PublishAsync(Topics.FeatureFlagChange, pendingChange.Value);
             count++;
+
+            // F1 (#24): consistency metrics. Side-effect-only — must not change commit behavior.
+            // One commit increment (tagged resource_type=flag + env_id) and one stage->commit latency
+            // sample (now - the staged value's UpdatedAt).
+            CommitsCounter.Add(
+                1,
+                new KeyValuePair<string, object?>("resource_type", "flag"),
+                new KeyValuePair<string, object?>("env_id", flag.EnvId.ToString()));
+            RecordTimeToCommit("flag", pendingChange.Value.UpdatedAt);
 
             // Observability (#16): the commit decision above is intentionally made on the LIVE set
             // (committing without a down DC is the design). Record — for operators — any CONFIGURED
@@ -354,6 +446,14 @@ public sealed class CommitCoordinatorWorker : BackgroundService
                 }
 
                 count++;
+
+                // F1 (#24): consistency metrics, mirroring the flag path. Side-effect-only. One commit
+                // increment (tagged resource_type=segment) and one stage->commit latency sample (now -
+                // the staged value's UpdatedAt, whose unix-ms equals the staged version).
+                CommitsCounter.Add(
+                    1,
+                    new KeyValuePair<string, object?>("resource_type", "segment"));
+                RecordTimeToCommit("segment", pendingChange.Value.UpdatedAt);
 
                 // Observability (#16): mirror the flag path — record any CONFIGURED DC that was
                 // evicted (present in the probed staged map's keys but absent from the live set).
