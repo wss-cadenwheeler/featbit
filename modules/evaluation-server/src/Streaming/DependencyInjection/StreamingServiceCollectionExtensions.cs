@@ -48,8 +48,9 @@ public static class StreamingServiceCollectionExtensions
         // connection
         services.AddSingleton<IConnectionManager, ConnectionManager>();
 
-        // applied watermark tracker (per-env, highest committed flag version this pod has applied)
-        services.AddSingleton<IAppliedWatermarkTracker, AppliedWatermarkTracker>();
+        // applied watermark reader (per-env, derived on demand from the local DC Redis flag index
+        // so all pods in a DC agree and a fresh pod is immediately correct)
+        services.AddSingleton<IAppliedWatermarkReader, RedisAppliedWatermarkReader>();
 
         // message handlers
         services

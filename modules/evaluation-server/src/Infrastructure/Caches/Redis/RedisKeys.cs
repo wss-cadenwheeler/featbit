@@ -15,6 +15,22 @@ public static class RedisKeys
 
     public static RedisKey FlagIndex(Guid envId) => new($"{FlagIndexPrefix}{envId}");
 
+    /// <summary>
+    /// The glob pattern matching every per-env flag index key (<c>featbit:flag-index:*</c>),
+    /// for use with Redis <c>SCAN</c> when enumerating envs that have a committed flag index.
+    /// </summary>
+    public static string FlagIndexScanPattern => $"{FlagIndexPrefix}*";
+
+    /// <summary>
+    /// Extracts the environment id from a flag index key (<c>featbit:flag-index:{envId}</c>),
+    /// or <c>null</c> if the key does not match the expected shape.
+    /// </summary>
+    public static Guid? TryParseFlagIndexEnvId(string key)
+        => key.StartsWith(FlagIndexPrefix, StringComparison.Ordinal)
+           && Guid.TryParse(key.AsSpan(FlagIndexPrefix.Length), out var envId)
+            ? envId
+            : null;
+
     public static RedisKey Flag(string id) => new($"{FlagPrefix}{id}");
 
     // --- Stage/commit read keys (mirror back-end RedisCaches B1 conventions) ---------------------
