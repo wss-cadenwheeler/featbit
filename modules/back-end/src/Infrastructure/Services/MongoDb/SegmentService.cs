@@ -194,6 +194,13 @@ public class SegmentService(MongoDbClient mongoDb, ILogger<SegmentService> logge
         // ensure the segment exists (committed value is left untouched)
         await GetAsync(id);
 
+        // A pending value must never itself carry a pending change (no pending-within-pending);
+        // null it out to keep the staged document flat (mirrors Segment.SetPending).
+        if (pendingValue != null)
+        {
+            pendingValue.Pending = null;
+        }
+
         var pending = new PendingSegmentChange
         {
             Version = version,

@@ -157,6 +157,13 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
         // ensure the flag exists (committed value is left untouched)
         await GetAsync(envId, key);
 
+        // A pending value must never itself carry a pending change (no pending-within-pending);
+        // null it out to keep the staged document flat (mirrors FeatureFlag.SetPending).
+        if (pendingValue != null)
+        {
+            pendingValue.Pending = null;
+        }
+
         var pending = new PendingFlagChange
         {
             Version = version,

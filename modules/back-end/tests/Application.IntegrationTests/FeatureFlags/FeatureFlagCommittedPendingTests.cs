@@ -225,4 +225,52 @@ public sealed class FeatureFlagCommittedPendingTests : IAsyncLifetime
         Assert.Equal(4, raw.Pending!.Version);
         Assert.True(raw.Pending.Value.IsEnabled);
     }
+
+    [Fact]
+    public async Task Promote_Refreshes_Audit_Fields_On_Committed_Value()
+    {
+        // #35: promotion must refresh the committed value's audit fields so UpdatedAt reflects WHEN
+        // it became authoritative and UpdatorId reflects WHO authored the pending change.
+        const string key = "b3-promote-audit";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        // force a clearly-stale committed timestamp/author so the refresh is observable
+        var staleTime = DateTime.UtcNow.AddDays(-7);
+        committed.UpdatedAt = staleTime;
+        committed.UpdatorId = Guid.NewGuid();
+        await _sut.AddOneAsync(committed);
+
+        var pendingAuthor = Guid.NewGuid();
+        var pendingValue = CreateFlag(key, isEnabled: true);
+        pendingValue.UpdatorId = pendingAuthor;
+        await _sut.SetPendingAsync(_envId, key, pendingValue, version: 2);
+
+        var promoted = await _sut.PromotePendingAsync(_envId, key, expectedVersion: 2);
+        Assert.True(promoted);
+
+        var afterPromote = await _sut.GetCommittedAsync(_envId, key);
+        Assert.True(afterPromote.UpdatedAt > staleTime);
+        Assert.Equal(pendingAuthor, afterPromote.UpdatorId);
+    }
+
+    [Fact]
+    public async Task SetPending_Strips_Nested_Pending_From_Staged_Value()
+    {
+        // #35: a pending value must never itself carry a (nested) pending change.
+        const string key = "b3-no-nested-pending";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        var pendingValue = CreateFlag(key, isEnabled: true);
+        // attach a bogus nested pending that must be stripped on stage
+        pendingValue.SetPending(CreateFlag(key, isEnabled: false), version: 99);
+        Assert.NotNull(pendingValue.Pending);
+
+        await _sut.SetPendingAsync(_envId, key, pendingValue, version: 2);
+
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Null(raw.Pending!.Value.Pending);
+    }
 }

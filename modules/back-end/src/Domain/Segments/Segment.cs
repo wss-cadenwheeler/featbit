@@ -188,6 +188,14 @@ public class Segment : AuditedEntity
     /// </summary>
     public void SetPending(Segment pendingValue, long version)
     {
+        // A pending value must never itself carry a pending change (no pending-within-pending):
+        // the staged payload describes a single committed-to-be state, so null out any nested
+        // pending before storing it. This keeps the staged document flat and avoids recursive bloat.
+        if (pendingValue != null)
+        {
+            pendingValue.Pending = null;
+        }
+
         Pending = new PendingSegmentChange
         {
             Version = version,
@@ -221,6 +229,11 @@ public class Segment : AuditedEntity
         Rules = promoted.Rules;
         Tags = promoted.Tags;
         IsArchived = promoted.IsArchived;
+
+        // Refresh the audit timestamp so the committed value reflects WHEN it was promoted: the
+        // promotion is the moment this value becomes authoritative. (Segment is an AuditedEntity
+        // with no UpdatorId, so only UpdatedAt is carried.)
+        UpdatedAt = DateTime.UtcNow;
 
         CommittedVersion = version;
         Pending = null;
