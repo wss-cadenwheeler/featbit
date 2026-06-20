@@ -29,7 +29,7 @@ public static class ServicesRegister
         services.AddSwaggerGen();
 
         // health check dependencies
-        services.AddHealthChecks().AddReadinessChecks(configuration);
+        var healthChecks = services.AddHealthChecks().AddReadinessChecks(configuration);
 
         // cors
         builder.AddCustomCors();
@@ -56,6 +56,16 @@ public static class ServicesRegister
 
         if (configuration.UseControlPlane())
         {
+            // D5 (#22): shared singleton recording the last successful heartbeat publish, plus the
+            // freshness health check that surfaces a Degraded (not Unhealthy) self-fence signal under
+            // GatedCommit. Tagged Readiness so it appears on /health/readiness; ASP.NET Core maps
+            // Degraded -> HTTP 200 by default (only Unhealthy -> 503), so a Degraded result is
+            // observational and does NOT fail readiness.
+            services.AddSingleton<IHeartbeatPublishStatus, HeartbeatPublishStatus>();
+            healthChecks.AddCheck<HeartbeatFreshnessHealthCheck>(
+                "heartbeat-freshness",
+                tags: new[] { HealthCheckBuilderExtensions.ReadinessTag });
+
             services.AddHostedService<HeartbeatService>();
         }
 

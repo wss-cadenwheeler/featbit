@@ -9,7 +9,8 @@ public class HeartbeatService(
     IMessageProducer messageProducer,
     ILogger<HeartbeatService> logger,
     IConfiguration configuration,
-    IAppliedWatermarkReader appliedWatermarkReader) : BackgroundService
+    IAppliedWatermarkReader appliedWatermarkReader,
+    IHeartbeatPublishStatus publishStatus) : BackgroundService
 {
     private readonly Guid _podId = InfrastructureInfo.Id;
 
@@ -23,7 +24,26 @@ public class HeartbeatService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await messageProducer.PublishAsync(Topics.PodHeartbeat, await BuildHeartbeatAsync(stoppingToken));
+            try
+            {
+                await messageProducer.PublishAsync(Topics.PodHeartbeat, await BuildHeartbeatAsync(stoppingToken));
+
+                // D5 (#22): record a successful publish so HeartbeatFreshnessHealthCheck can detect
+                // when this pod can no longer reach the control plane.
+                publishStatus.MarkSuccess(DateTimeOffset.UtcNow);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Shutdown — stop the loop without recording a failure.
+                break;
+            }
+            catch (Exception ex)
+            {
+                // Leave LastSuccessfulPublishAt unchanged: the freshness check measures age since the
+                // last successful publish, which is exactly what should grow while publishing fails.
+                publishStatus.MarkFailure(DateTimeOffset.UtcNow);
+                logger.LogWarning(ex, "HeartbeatService failed to publish heartbeat for PodId: {PodId}", _podId);
+            }
 
             await Task.Delay(heartbeatTimeSpan, stoppingToken);
         }
