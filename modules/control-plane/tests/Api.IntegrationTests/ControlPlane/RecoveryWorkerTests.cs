@@ -5,6 +5,7 @@ using Application.ControlPlane;
 using Application.Services;
 using Domain.ControlPlane;
 using Domain.FeatureFlags;
+using Domain.Segments;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
 using Infrastructure.Services.MongoDb;
@@ -46,6 +47,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
     private MongoDbClient _mongoDb = null!;
     private FeatureFlagService _flagService = null!;
+    private SegmentService _segmentService = null!;
     private MongoLeaseStore _leaseStore = null!;
 
     private ConnectionMultiplexer _mux = null!;
@@ -68,6 +70,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         await _mongoDb.Database.RunCommandAsync<BsonDocument>(new BsonDocument("ping", 1));
 
         _flagService = new FeatureFlagService(_mongoDb);
+        _segmentService = new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance);
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
@@ -134,6 +137,24 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         );
     }
 
+    private Segment CreateSegment(string key, string[] included)
+    {
+        // Environment-specific so GetEnvironmentIdsAsync resolves to [_envId] without any Mongo
+        // env/project/org lookup — the env ids backfilled to the returning DC's index are deterministic.
+        return new Segment(
+            workspaceId: Guid.NewGuid(),
+            envId: _envId,
+            name: key,
+            key: key,
+            type: SegmentType.EnvironmentSpecific,
+            scopes: [],
+            included: included,
+            excluded: [],
+            rules: [],
+            description: string.Empty
+        );
+    }
+
     private async Task UpsertLeaseAsync(string dcId, DateTimeOffset expiresAt)
     {
         await _leaseStore.UpsertLeaseAsync(new DcLease
@@ -151,6 +172,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         // resolves them at runtime via IServiceScopeFactory.
         var services = new ServiceCollection();
         services.AddTransient<IFeatureFlagService>(_ => _flagService);
+        services.AddTransient<ISegmentService>(_ => _segmentService);
         services.AddTransient<ILeaseStore>(_ => _leaseStore);
         var provider = services.BuildServiceProvider();
 
@@ -174,6 +196,10 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
     /// </summary>
     private static long VersionTokenOf(FeatureFlag flag) =>
         new DateTimeOffset(flag.UpdatedAt).ToUnixTimeMilliseconds();
+
+    /// <summary>Segment counterpart of <see cref="VersionTokenOf(FeatureFlag)"/>.</summary>
+    private static long VersionTokenOf(Segment segment) =>
+        new DateTimeOffset(segment.UpdatedAt).ToUnixTimeMilliseconds();
 
     // ----- acceptance -----
 
@@ -251,6 +277,102 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         // dc-a was untouched by the recovery (it was already live, not returning).
         var dcaPointer = await _mux.GetDatabase(0).StringGetAsync(RedisCaches.FlagCommittedPointer(v2.Id));
         Assert.Equal(v2Ts, (long)dcaPointer);
+    }
+
+    [Fact]
+    public async Task Backfills_ReturningDc_With_LatestCommittedSegmentVersion()
+    {
+        const string flagKey = "returning-dc-flag";
+        const string segmentKey = "returning-dc-segment";
+
+        // ---- a flag at v1 on BOTH DCs so the existing flag backfill path is exercised alongside ----
+        var flag = CreateFlag(flagKey, isEnabled: false);
+        flag.CommittedVersion = 1;
+        await _flagService.AddOneAsync(flag);
+        var flagTs = VersionTokenOf(flag);
+        await _dcaCache.StageFlagAsync(flag, flagTs);
+        await _dcaCache.CommitFlagAsync(_envId, flag.Id.ToString(), flagTs);
+        await _dcbCache.StageFlagAsync(flag, flagTs);
+        await _dcbCache.CommitFlagAsync(_envId, flag.Id.ToString(), flagTs);
+
+        // ---- segment v1 committed on BOTH DCs (both live) ----
+        var s1 = CreateSegment(segmentKey, included: ["alice"]);
+        s1.CommittedVersion = 1;
+        await _segmentService.AddOneAsync(s1);
+        var s1Ts = VersionTokenOf(s1);
+        var envIds = await _segmentService.GetEnvironmentIdsAsync(s1);
+        Assert.Equal(new[] { _envId }, envIds);
+
+        await _dcaCache.StageSegmentAsync(s1, s1Ts);
+        await _dcaCache.CommitSegmentAsync(envIds, s1.Id.ToString(), s1Ts);
+        await _dcbCache.StageSegmentAsync(s1, s1Ts);
+        await _dcbCache.CommitSegmentAsync(envIds, s1.Id.ToString(), s1Ts);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var sut = CreateSut();
+
+        // First tick: both DCs first-seen -> backfilled (harmless), establishes the watermark.
+        await sut.RunOnceAsync();
+
+        // ---- dc-b loses its lease ----
+        await UpsertLeaseAsync(DcB, now.AddMinutes(-5)); // expired
+
+        // ---- segment changes to v2, committed on dc-a ONLY (dc-b absent) ----
+        var s2 = CreateSegment(segmentKey, included: ["alice", "bob"]);
+        s2.Id = s1.Id;
+        s2.CommittedVersion = 2;
+        // ensure a distinct, newer version token than v1
+        s2.UpdatedAt = s1.UpdatedAt.AddSeconds(1);
+        await _segmentService.UpdateAsync(s2);
+        var s2Ts = VersionTokenOf(s2);
+        Assert.NotEqual(s1Ts, s2Ts);
+
+        await _dcaCache.StageSegmentAsync(s2, s2Ts);
+        await _dcaCache.CommitSegmentAsync(envIds, s2.Id.ToString(), s2Ts);
+
+        // dc-b is still at v1 and never got v2.
+        Assert.False(await _dcbCache.HasStagedSegmentAsync(s2.Id, s2Ts));
+        var dcbPointerBefore =
+            await _mux.GetDatabase(1).StringGetAsync(RedisCaches.SegmentCommittedPointer(s2.Id));
+        Assert.Equal(s1Ts, (long)dcbPointerBefore);
+
+        // A recovery tick now sees only dc-a live; nothing returned.
+        var noReturn = await sut.RunOnceAsync();
+        Assert.Equal(0, noReturn);
+
+        // ---- dc-b's lease returns ----
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var backfilled = await sut.RunOnceAsync();
+
+        // exactly one DC (dc-b) backfilled
+        Assert.Equal(1, backfilled);
+
+        // dc-b's Redis now has the segment at v2: versioned value key + committed pointer + index.
+        Assert.True(await _dcbCache.HasStagedSegmentAsync(s2.Id, s2Ts));
+
+        var dcbPointerAfter =
+            await _mux.GetDatabase(1).StringGetAsync(RedisCaches.SegmentCommittedPointer(s2.Id));
+        Assert.Equal(s2Ts, (long)dcbPointerAfter);
+
+        var dcbIndexScore = await _mux.GetDatabase(1)
+            .SortedSetScoreAsync(RedisKeys.SegmentIndex(_envId), s2.Id.ToString());
+        Assert.NotNull(dcbIndexScore);
+        Assert.Equal(s2Ts, (long)dcbIndexScore!.Value);
+
+        // dc-a was untouched by the recovery (it was already live, not returning).
+        var dcaPointer =
+            await _mux.GetDatabase(0).StringGetAsync(RedisCaches.SegmentCommittedPointer(s2.Id));
+        Assert.Equal(s2Ts, (long)dcaPointer);
+
+        // the flag backfill still works (don't regress): dc-b has the flag committed at v1.
+        Assert.True(await _dcbCache.HasStagedFlagAsync(flag.Id, flagTs));
+        var dcbFlagPointer =
+            await _mux.GetDatabase(1).StringGetAsync(RedisCaches.FlagCommittedPointer(flag.Id));
+        Assert.Equal(flagTs, (long)dcbFlagPointer);
     }
 
     [Fact]

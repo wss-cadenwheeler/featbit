@@ -12,11 +12,12 @@ namespace Api.Application.ControlPlane;
 
 /// <summary>
 /// E1 returning-DC recovery (catch-up-before-serve). Under <see cref="ConsistencyMode.GatedCommit"/>
-/// the commit coordinator commits a flag on the LIVE set, so a flag that changed while a DC was
-/// evicted is committed with NO pending — the returned DC's Redis would otherwise stay stale
-/// forever. This worker watches the live set; when a DC newly appears (its lease returns), it
-/// backfills that DC's Redis with the COMMITTED value of every flag (stage the versioned value +
-/// flip the committed pointer + advance the index), so the returned DC catches up.
+/// the commit coordinator commits a flag (and, identically, a segment) on the LIVE set, so a
+/// flag/segment that changed while a DC was evicted is committed with NO pending — the returned DC's
+/// Redis would otherwise stay stale forever. This worker watches the live set; when a DC newly
+/// appears (its lease returns), it backfills that DC's Redis with the COMMITTED value of every flag
+/// AND every segment (stage the versioned value + flip the committed pointer + advance the index),
+/// so the returned DC catches up.
 ///
 /// Model A, locked decisions:
 ///  - A: a separate worker (this one), not folded into the commit coordinator.
@@ -108,8 +109,8 @@ public sealed class RecoveryWorker : BackgroundService
     /// Performs a single recovery tick and returns the number of DCs backfilled. Exposed so it can
     /// be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
-    /// For each DcId newly present in the live set since the previous tick, every flag's committed
-    /// value is staged and committed into that DC's Redis (targeted, not broadcast).
+    /// For each DcId newly present in the live set since the previous tick, every flag's AND every
+    /// segment's committed value is staged and committed into that DC's Redis (targeted, not broadcast).
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -117,6 +118,7 @@ public sealed class RecoveryWorker : BackgroundService
         // scope so the singleton BackgroundService does not capture a scoped/disposed instance.
         using var scope = _scopeFactory.CreateScope();
         var featureFlagService = scope.ServiceProvider.GetRequiredService<IFeatureFlagService>();
+        var segmentService = scope.ServiceProvider.GetRequiredService<ISegmentService>();
         var leaseStore = scope.ServiceProvider.GetRequiredService<ILeaseStore>();
 
         // Live DCs = distinct DcIds that currently hold at least one unexpired lease.
@@ -151,6 +153,16 @@ public sealed class RecoveryWorker : BackgroundService
         }
 
         var allCommitted = await featureFlagService.GetAllCommittedAsync();
+        var allCommittedSegments = await segmentService.GetAllCommittedAsync();
+
+        // Resolve each committed segment's target env ids ONCE (not per returned DC): the env ids of a
+        // segment are a function of the segment, independent of which DC is being repaired. Mirrors the
+        // flag loop deriving its own ts but reuses the same envIds across DCs.
+        var segmentEnvIds = new Dictionary<string, ICollection<Guid>>(allCommittedSegments.Count);
+        foreach (var segment in allCommittedSegments)
+        {
+            segmentEnvIds[segment.Id.ToString()] = await segmentService.GetEnvironmentIdsAsync(segment);
+        }
 
         var backfilled = 0;
         foreach (var dcId in returned)
@@ -169,16 +181,31 @@ public sealed class RecoveryWorker : BackgroundService
                 await composite.CommitFlagToDcAsync(dcId, flag.EnvId, flag.Id.ToString(), ts);
             }
 
+            foreach (var segment in allCommittedSegments)
+            {
+                // Same shape as the flag backfill: the committed segment's version token (unix-ms of
+                // UpdatedAt, mirroring SegmentChangeMessageHandler), then stage the versioned value +
+                // flip the committed pointer + per-env index — targeted at ONLY the returned DC.
+                // Idempotent: re-applying an already-present version no-ops.
+                var ts = new DateTimeOffset(segment.UpdatedAt).ToUnixTimeMilliseconds();
+                var envIds = segmentEnvIds[segment.Id.ToString()];
+
+                await composite.StageSegmentToDcAsync(dcId, segment, ts);
+                await composite.CommitSegmentToDcAsync(dcId, envIds, segment.Id.ToString(), ts);
+            }
+
             // D (best-effort client refresh): there is no per-DC client-targeting primitive today, so
             // pushing a full sync to that DC's connected clients is deferred rather than broadcast to
             // ALL DCs (which would defeat the per-DC intent).
             // TODO per-DC client refresh: trigger PushFullSync for dcId's connected clients once a
             // per-DC client-targeting primitive exists.
             _logger.LogInformation(
-                "Recovery: backfilled returning DC {DcId} with {FlagCount} committed flag(s). " +
+                "Recovery: backfilled returning DC {DcId} with {FlagCount} committed flag(s) and " +
+                "{SegmentCount} committed segment(s). " +
                 "TODO per-DC client refresh deferred (no per-DC client targeting yet).",
                 dcId,
-                allCommitted.Count);
+                allCommitted.Count,
+                allCommittedSegments.Count);
 
             backfilled++;
         }
