@@ -217,6 +217,28 @@ public class CompositeRedisCacheService(
     public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
         TargetedAsync(dcId, s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagToDcAsync));
 
+    /// <summary>
+    /// Recovery-facing targeted write (#58, segment counterpart of <see cref="StageFlagToDcAsync"/>):
+    /// stages <paramref name="segment"/> at version <paramref name="ts"/> into ONE DC's Redis (the
+    /// <see cref="DcCacheService"/> whose <see cref="DcCacheService.DcId"/> matches
+    /// <paramref name="dcId"/>), unlike the broadcast <see cref="StageSegmentAsync"/>. If no DC
+    /// matches, logs a warning and no-ops. A failing write is swallowed and logged with the same
+    /// resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
+        TargetedAsync(dcId, s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (#58, segment counterpart of <see cref="CommitFlagToDcAsync"/>):
+    /// commits <paramref name="segmentId"/> at version <paramref name="ts"/> into ONE DC's Redis
+    /// (advancing that DC's committed pointer + per-env index), unlike the broadcast
+    /// <see cref="CommitSegmentAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// no-ops. A failing write is swallowed and logged with the same resilience as
+    /// <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
+        TargetedAsync(dcId, s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentToDcAsync));
+
     private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
     {
         var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);
