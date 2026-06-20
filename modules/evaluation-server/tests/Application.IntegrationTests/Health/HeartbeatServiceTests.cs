@@ -37,7 +37,8 @@ public class HeartbeatServiceTests
             new NoopMessageProducer(),
             NullLogger<HeartbeatService>.Instance,
             configuration,
-            reader);
+            reader,
+            new HeartbeatPublishStatus());
 
     [Fact]
     public async Task BuildHeartbeat_PopulatesDcIdAndRegion_FromConfig()
