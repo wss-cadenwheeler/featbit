@@ -149,6 +149,22 @@ public class FeatureFlagService(AppDbContext dbContext)
         // load the committed row (left otherwise untouched)
         var flag = await GetAsync(envId, key);
 
+        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+        // than both the already-staged pending version (if any) AND the committed version. An
+        // out-of-order/stale stage carrying a lower version (but still above committed) must not
+        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+        if (version <= flag.CommittedVersion || (flag.Pending != null && version <= flag.Pending.Version))
+        {
+            // stale / out-of-order stage — leave the existing pending (or lack of one) intact
+            return;
+        }
+
+        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
+        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync staging a
+        // newer pending in that window could be overwritten. The in-memory version check narrows
+        // but does not close it for the EF provider; closing it requires an optimistic-concurrency
+        // token (tracked in #33). The Mongo provider closes it via a version-filtered UpdateOneAsync.
+
         // write ONLY the pending data; committed fields stay as they are
         flag.SetPending(pendingValue, version);
 
