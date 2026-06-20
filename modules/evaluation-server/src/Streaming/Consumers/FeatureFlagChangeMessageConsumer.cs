@@ -2,7 +2,6 @@ using System.Text.Json;
 using Domain.Messages;
 using Microsoft.Extensions.Logging;
 using Streaming.Connections;
-using Streaming.Health;
 using Streaming.Protocol;
 using Streaming.Services;
 
@@ -11,7 +10,6 @@ namespace Streaming.Consumers;
 public class FeatureFlagChangeMessageConsumer(
     IConnectionManager connectionManager,
     IDataSyncService dataSyncService,
-    IAppliedWatermarkTracker appliedWatermarkTracker,
     ILogger<FeatureFlagChangeMessageConsumer> logger)
     : IMessageConsumer
 {
@@ -24,14 +22,9 @@ public class FeatureFlagChangeMessageConsumer(
 
         var envId = flag.GetProperty("envId").GetGuid();
 
-        // Record the applied watermark for this env. The version is the flag's updatedAt as
-        // unix-ms, consistent with the Redis flag index (see ClientSdkFlag). The tracker keeps
-        // the max per env. Scope: flags only — segments can be folded in later.
-        if (flag.TryGetProperty("updatedAt", out var updatedAt) &&
-            updatedAt.TryGetDateTimeOffset(out var updatedAtValue))
-        {
-            appliedWatermarkTracker.Update(envId, updatedAtValue.ToUnixTimeMilliseconds());
-        }
+        // The applied watermark is no longer tracked here: it is derived on demand from the local
+        // DC Redis flag index by IAppliedWatermarkReader (see HeartbeatService), so all pods in a
+        // DC agree and a fresh pod is immediately correct.
 
         var connections = connectionManager.GetEnvConnections(envId);
         foreach (var connection in connections)

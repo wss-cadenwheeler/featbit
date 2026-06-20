@@ -9,7 +9,7 @@ public class HeartbeatService(
     IMessageProducer messageProducer,
     ILogger<HeartbeatService> logger,
     IConfiguration configuration,
-    IAppliedWatermarkTracker appliedWatermarkTracker) : BackgroundService
+    IAppliedWatermarkReader appliedWatermarkReader) : BackgroundService
 {
     private readonly Guid _podId = InfrastructureInfo.Id;
 
@@ -23,7 +23,7 @@ public class HeartbeatService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await messageProducer.PublishAsync(Topics.PodHeartbeat, BuildHeartbeat());
+            await messageProducer.PublishAsync(Topics.PodHeartbeat, await BuildHeartbeatAsync(stoppingToken));
 
             await Task.Delay(heartbeatTimeSpan, stoppingToken);
         }
@@ -33,12 +33,14 @@ public class HeartbeatService(
 
     /// <summary>
     /// Builds the heartbeat payload for the current pod: liveness (PodId/Timestamp),
-    /// placement (DcId/Region from config), and how far this pod is serving per
-    /// environment (AppliedWatermarks). Extracted for unit testing.
+    /// placement (DcId/Region from config), and how far this DC is serving per environment
+    /// (AppliedWatermarks). The watermarks are derived from the local DC Redis flag index via
+    /// <see cref="IAppliedWatermarkReader"/>, so all pods in a DC report the same value and a
+    /// fresh pod is immediately correct. Extracted for testing.
     /// </summary>
-    internal HealthMessage BuildHeartbeat()
+    internal async Task<HealthMessage> BuildHeartbeatAsync(CancellationToken cancellationToken = default)
     {
-        var snapshot = appliedWatermarkTracker.Snapshot();
+        var watermarks = await appliedWatermarkReader.ReadAsync(cancellationToken);
 
         return new HealthMessage
         {
@@ -46,7 +48,7 @@ public class HeartbeatService(
             Timestamp = DateTimeOffset.UtcNow,
             Region = configuration.GetRegion(),
             DcId = configuration.GetDcId(),
-            AppliedWatermarks = snapshot.Count > 0 ? snapshot : null
+            AppliedWatermarks = watermarks.Count > 0 ? watermarks : null
         };
     }
 }
