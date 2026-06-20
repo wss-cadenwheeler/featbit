@@ -5,6 +5,7 @@ using Application.ControlPlane;
 using Application.Services;
 using Domain.ControlPlane;
 using Domain.FeatureFlags;
+using Domain.Messages;
 using Domain.Segments;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
@@ -16,6 +17,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MongoDB.Bson;
 using StackExchange.Redis;
+using Action = Domain.Messages.Action;
 
 namespace Api.IntegrationTests.ControlPlane;
 
@@ -54,6 +56,9 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
     private RedisCacheService _dcaCache = null!; // db 0
     private RedisCacheService _dcbCache = null!; // db 1
     private CompositeRedisCacheService _composite = null!;
+
+    // Spy producer the SUT publishes the per-DC client-refresh command to. Set by CreateSut.
+    private RecordingMessageProducer _producer = null!;
 
     private static string RedisConnectionString =>
         Environment.GetEnvironmentVariable("E1_REDIS") ?? DefaultRedis;
@@ -183,9 +188,12 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
             })
             .Build();
 
+        _producer = new RecordingMessageProducer();
+
         return new RecoveryWorker(
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
+            _producer,
             configuration,
             logger ?? NullLogger<RecoveryWorker>.Instance);
     }
@@ -405,7 +413,81 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         Assert.Equal(0, second);
     }
 
+    [Fact]
+    public async Task Publishes_Targeted_ClientRefresh_For_ReturningDc()
+    {
+        const string key = "returning-dc-refresh";
+
+        // ---- v1 committed on BOTH DCs (both live) ----
+        var v1 = CreateFlag(key, isEnabled: false);
+        v1.CommittedVersion = 1;
+        await _flagService.AddOneAsync(v1);
+        var v1Ts = VersionTokenOf(v1);
+
+        await _dcaCache.StageFlagAsync(v1, v1Ts);
+        await _dcaCache.CommitFlagAsync(_envId, v1.Id.ToString(), v1Ts);
+        await _dcbCache.StageFlagAsync(v1, v1Ts);
+        await _dcbCache.CommitFlagAsync(_envId, v1.Id.ToString(), v1Ts);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var sut = CreateSut();
+
+        // First tick: both DCs first-seen -> both backfilled -> a targeted command per DC.
+        await sut.RunOnceAsync();
+
+        var firstTickCommands = _producer.Published
+            .Where(p => p.Topic == ControlPlaneTopics.ControlPlaneCommand)
+            .Select(p => (ControlPlaneCommand)p.Message)
+            .ToList();
+        Assert.Equal(2, firstTickCommands.Count);
+        Assert.All(firstTickCommands, c => Assert.Equal(Action.PushFullSync, c.Action));
+        Assert.Contains(firstTickCommands, c => c.TargetDcId == DcA);
+        Assert.Contains(firstTickCommands, c => c.TargetDcId == DcB);
+
+        // ---- steady state: same live set -> nothing returned -> NO new commands published ----
+        var publishedBefore = _producer.Published.Count;
+        var noReturn = await sut.RunOnceAsync();
+        Assert.Equal(0, noReturn);
+        Assert.Equal(publishedBefore, _producer.Published.Count);
+
+        // ---- dc-b leaves then returns -> exactly one targeted command, for dc-b only ----
+        await UpsertLeaseAsync(DcB, now.AddMinutes(-5)); // expired
+        await sut.RunOnceAsync();                        // dc-b drops out of the live set (no return)
+        var beforeReturn = _producer.Published.Count;
+
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));  // dc-b returns
+        var backfilled = await sut.RunOnceAsync();
+        Assert.Equal(1, backfilled);
+
+        var returnCommands = _producer.Published
+            .Skip(beforeReturn)
+            .Where(p => p.Topic == ControlPlaneTopics.ControlPlaneCommand)
+            .Select(p => (ControlPlaneCommand)p.Message)
+            .ToList();
+        var refresh = Assert.Single(returnCommands);
+        Assert.Equal(Action.PushFullSync, refresh.Action);
+        Assert.Equal(DcB, refresh.TargetDcId);
+    }
+
     // ----- test doubles -----
+
+    /// <summary>
+    /// Spy <see cref="IMessageProducer"/> that records every (topic, message) published, so a test can
+    /// assert the per-DC client-refresh <see cref="ControlPlaneCommand"/> was published after backfill.
+    /// </summary>
+    private sealed class RecordingMessageProducer : IMessageProducer
+    {
+        public List<(string Topic, object Message)> Published { get; } = new();
+
+        public Task PublishAsync<TMessage>(string topic, TMessage message) where TMessage : class
+        {
+            Published.Add((topic, message));
+            return Task.CompletedTask;
+        }
+    }
 
     private sealed class TestRedisClient(IConnectionMultiplexer connection, int db) : IRedisClient
     {

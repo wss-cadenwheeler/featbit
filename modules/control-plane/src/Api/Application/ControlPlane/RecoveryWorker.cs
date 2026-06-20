@@ -3,10 +3,12 @@ using Application.Configuration;
 using Application.ControlPlane;
 using Application.Services;
 using Api.Infrastructure.Caches;
+using Domain.Messages;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Action = Domain.Messages.Action;
 
 namespace Api.Application.ControlPlane;
 
@@ -25,8 +27,10 @@ namespace Api.Application.ControlPlane;
 ///       <see cref="CompositeRedisCacheService.CommitFlagToDcAsync"/>) — only the returned DC is
 ///       written, never a broadcast.
 ///  - C: no readiness gate — backfill runs as soon as the DC is seen live.
-///  - D: best-effort client refresh — no per-DC client-targeting primitive exists today, so this is
-///       logged as a TODO rather than pushed to ALL DCs (which would defeat the per-DC intent).
+///  - D: per-DC client refresh — after a returned DC's backfill, a <c>PushFullSync</c> command is
+///       published with <see cref="ControlPlaneCommand.TargetDcId"/> set to that DcId, so only that
+///       DC's eval servers refresh their connected SDK clients (others ignore the targeted command).
+///       Best-effort: a publish failure is logged but does NOT fail the backfill.
 ///
 /// Idempotent: re-staging/re-committing an already-present version is a no-op (the staged value key
 /// and committed pointer are version-keyed). It does NOT publish <c>Topics.FeatureFlagChange</c> —
@@ -35,6 +39,12 @@ namespace Api.Application.ControlPlane;
 /// TODO: leader election if control plane runs multiple replicas. Today multiple replicas would each
 /// run this loop; the staged-write + commit-pointer flip are idempotent so it is safe (at worst
 /// redundant writes), but a leader election would avoid the duplicate work. Out of scope here.
+///
+/// ASSUMPTION (per-DC client refresh): the targeted <c>PushFullSync</c> command relies on the
+/// <see cref="ControlPlaneTopics.ControlPlaneCommand"/> topic reaching EVERY DC's eval servers (the
+/// existing admin "push full sync to ALL active clients" implies it does). The TargetDcId filter then
+/// scopes who acts. If, in some MQ topologies, control-plane commands are delivered only locally,
+/// remote-DC targeting would additionally need a per-DC command publish — a follow-up, NOT built here.
 /// </summary>
 public sealed class RecoveryWorker : BackgroundService
 {
@@ -46,6 +56,7 @@ public sealed class RecoveryWorker : BackgroundService
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICacheService _compositeCache;
+    private readonly IMessageProducer _messageProducer;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<RecoveryWorker> _logger;
@@ -58,11 +69,13 @@ public sealed class RecoveryWorker : BackgroundService
     public RecoveryWorker(
         IServiceScopeFactory scopeFactory,
         [FromKeyedServices("compositeCache")] ICacheService compositeCache,
+        IMessageProducer messageProducer,
         IConfiguration configuration,
         ILogger<RecoveryWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _compositeCache = compositeCache;
+        _messageProducer = messageProducer;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -194,22 +207,47 @@ public sealed class RecoveryWorker : BackgroundService
                 await composite.CommitSegmentToDcAsync(dcId, envIds, segment.Id.ToString(), ts);
             }
 
-            // D (best-effort client refresh): there is no per-DC client-targeting primitive today, so
-            // pushing a full sync to that DC's connected clients is deferred rather than broadcast to
-            // ALL DCs (which would defeat the per-DC intent).
-            // TODO per-DC client refresh: trigger PushFullSync for dcId's connected clients once a
-            // per-DC client-targeting primitive exists.
             _logger.LogInformation(
                 "Recovery: backfilled returning DC {DcId} with {FlagCount} committed flag(s) and " +
-                "{SegmentCount} committed segment(s). " +
-                "TODO per-DC client refresh deferred (no per-DC client targeting yet).",
+                "{SegmentCount} committed segment(s).",
                 dcId,
                 allCommitted.Count,
                 allCommittedSegments.Count);
+
+            // D (per-DC client refresh): the returned DC's Redis is now current, but SDK clients still
+            // connected to that DC's eval servers hold stale values until they reconnect. Publish a
+            // PushFullSync command TARGETED at this DcId so only that DC's eval servers refresh their
+            // clients (others ignore the TargetDcId-scoped command). Best-effort: a publish failure is
+            // logged but does NOT fail the backfill — the Redis repair already succeeded.
+            await PublishClientRefreshAsync(dcId);
 
             backfilled++;
         }
 
         return backfilled;
+    }
+
+    /// <summary>
+    /// Best-effort: publish a <see cref="Action.PushFullSync"/> command scoped to <paramref name="dcId"/>
+    /// (<see cref="ControlPlaneCommand.TargetDcId"/>) so only that DC's eval servers refresh their
+    /// connected SDK clients after the backfill. A publish failure is logged and swallowed — it must
+    /// not fail the backfill that already repaired the DC's Redis.
+    /// </summary>
+    private async Task PublishClientRefreshAsync(string dcId)
+    {
+        try
+        {
+            await _messageProducer.PublishAsync(
+                ControlPlaneTopics.ControlPlaneCommand,
+                new ControlPlaneCommand { Action = Action.PushFullSync, TargetDcId = dcId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Recovery: failed to publish per-DC client refresh (PushFullSync) for returning DC {DcId}. " +
+                "Backfill succeeded; clients on that DC will refresh on their next reconnect.",
+                dcId);
+        }
     }
 }
