@@ -2,10 +2,12 @@ using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
 using Application.Caches;
 using Application.ControlPlane;
+using Application.Segments;
 using Application.Services;
 using Domain.ControlPlane;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Segments;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
 using Infrastructure.Services.MongoDb;
@@ -21,30 +23,35 @@ using StackExchange.Redis;
 namespace Api.IntegrationTests.ControlPlane;
 
 /// <summary>
-/// C3b-2 commit coordinator acceptance tests. Exercises the locked design end-to-end against real
-/// infrastructure: a real MongoDB (pending flags + DC leases) and a real Redis whose two logical DB
-/// indexes simulate two DCs' Redis (dc-a = db 0, dc-b = db 1). The coordinator commits a pending
-/// version only once EVERY live DC has it staged.
+/// S3 (#17) commit coordinator SEGMENT acceptance tests. Mirrors
+/// <see cref="CommitCoordinatorWorkerTests"/> for the segment loop: a pending (staged-but-not-
+/// committed) segment version is committed only once EVERY live DC has it staged. On commit, the
+/// committed pointer/index is advanced in every DC's Redis, the Mongo pending is promoted
+/// (version-guarded), and the affected-flags segment-change is published per env (replicating
+/// SegmentChangeMessageHandler's BestEffort propagation, deferred to commit time).
 ///
-/// Requires:
+/// Real infra (fails loudly, never silently skips):
 ///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6384 (override via C3B2_REDIS):
-///      docker run -d --rm -p 6384:6379 --name c3b2-redis redis:7-alpine
-/// Fails loudly (not silently skips) if either is unreachable.
+///  - Redis on port 6389 (override via S3_REDIS): two logical DB indexes simulate two DCs
+///    (dc-a = db 0, dc-b = db 1).
+///      docker run -d --rm -p 6389:6379 --name s3-redis redis:7-alpine
+///
+/// The segment publish is spied via a fake <see cref="ISegmentMessageService"/> so the tests assert
+/// the per-env segment change fires ONLY on commit.
 /// </summary>
-public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
+public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
 {
     private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6384";
+    private const string DefaultRedis = "localhost:6389";
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
 
-    private readonly string _dbName = $"featbit_c3b2_test_{Guid.NewGuid():N}";
+    private readonly string _dbName = $"featbit_s3_test_{Guid.NewGuid():N}";
     private readonly Guid _envId = Guid.NewGuid();
 
     private MongoDbClient _mongoDb = null!;
-    private FeatureFlagService _flagService = null!;
+    private SegmentService _segmentService = null!;
     private MongoLeaseStore _leaseStore = null!;
 
     private ConnectionMultiplexer _mux = null!;
@@ -53,7 +60,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
     private CompositeRedisCacheService _composite = null!;
 
     private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("C3B2_REDIS") ?? DefaultRedis;
+        Environment.GetEnvironmentVariable("S3_REDIS") ?? DefaultRedis;
 
     public async Task InitializeAsync()
     {
@@ -66,7 +73,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         _mongoDb = new MongoDbClient(options);
         await _mongoDb.Database.RunCommandAsync<BsonDocument>(new BsonDocument("ping", 1));
 
-        _flagService = new FeatureFlagService(_mongoDb);
+        _segmentService = new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance);
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
@@ -79,8 +86,8 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         {
             throw new InvalidOperationException(
                 $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6384:6379 --name c3b2-redis redis:7-alpine " +
-                "(or set the C3B2_REDIS env var).");
+                "docker run -d --rm -p 6389:6379 --name s3-redis redis:7-alpine " +
+                "(or set the S3_REDIS env var).");
         }
 
         _dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
@@ -97,7 +104,6 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        // flush both DC DB indexes so a shared Redis is left clean
         await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
         await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
         _mux.Dispose();
@@ -107,47 +113,41 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- helpers -----
 
-    private FeatureFlag CreateFlag(string key, bool isEnabled)
+    private Segment CreateSegment(string key, params string[] included)
     {
-        var enabledVariationId = Guid.NewGuid().ToString();
-        var disabledVariationId = Guid.NewGuid().ToString();
-
-        var variations = new List<Variation>
-        {
-            new() { Id = enabledVariationId, Name = "true", Value = "true" },
-            new() { Id = disabledVariationId, Name = "false", Value = "false" }
-        };
-
-        return new FeatureFlag(
+        return new Segment(
+            workspaceId: Guid.NewGuid(),
             envId: _envId,
             name: key,
-            description: string.Empty,
             key: key,
-            isEnabled: isEnabled,
-            variationType: "boolean",
-            variations: variations,
-            disabledVariationId: disabledVariationId,
-            enabledVariationId: enabledVariationId,
-            tags: [],
-            currentUserId: Guid.NewGuid()
-        );
+            type: SegmentType.EnvironmentSpecific,
+            scopes: [],
+            included: included,
+            excluded: [],
+            rules: [],
+            description: string.Empty);
     }
 
-    /// <summary>Seeds a committed flag (v1, disabled) with a staged pending change (v2, enabled).</summary>
-    private async Task<(FeatureFlag committed, FeatureFlag pendingValue, long pendingVersion)> SeedCommittedV1PendingV2(string key)
+    /// <summary>
+    /// Seeds a committed segment (v1, included=["alice"]) with a staged pending change
+    /// (v2, included=["bob"]). The pending value carries the SAME Id and its
+    /// <c>UpdatedAt</c> is set so its unix-ms equals the pending version, matching how S2 stages.
+    /// </summary>
+    private async Task<long> SeedCommittedV1PendingV2(string key)
     {
-        var committed = CreateFlag(key, isEnabled: false);
+        var committed = CreateSegment(key, "alice");
         committed.CommittedVersion = 1;
-        await _flagService.AddOneAsync(committed);
+        await _segmentService.AddOneAsync(committed);
 
-        // the pending value is an edit of the SAME flag entity, so it carries the same Id (the
-        // staged Redis key and the coordinator's probe are both keyed on flag.Id)
-        var pendingValue = CreateFlag(key, isEnabled: true);
-        pendingValue.Id = committed.Id;
         const long pendingVersion = 2;
-        await _flagService.SetPendingAsync(_envId, key, pendingValue, pendingVersion);
 
-        return (committed, pendingValue, pendingVersion);
+        var pendingValue = CreateSegment(key, "bob");
+        pendingValue.Id = committed.Id;
+        pendingValue.UpdatedAt = DateTimeOffset.FromUnixTimeMilliseconds(pendingVersion).UtcDateTime;
+
+        await _segmentService.SetPendingAsync(committed.Id, pendingValue, pendingVersion);
+
+        return pendingVersion;
     }
 
     private async Task UpsertLeaseAsync(string dcId, DateTimeOffset expiresAt)
@@ -162,17 +162,18 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
     }
 
     private CommitCoordinatorWorker CreateSut(
-        SpyMessageProducer producer,
+        SpySegmentMessageService segmentMessages,
         ILogger<CommitCoordinatorWorker>? logger = null)
     {
-        // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
-        // resolves them at runtime via IServiceScopeFactory. ISegmentService is also registered
-        // (always present in the real app); these flag-only tests seed no pending segments, so the
-        // coordinator's segment loop is a no-op.
+        // Wire the same services the worker resolves per tick through a real DI scope. There are no
+        // pending flags in these tests, so IFeatureFlagService is a real (empty) service. The
+        // segment publish is spied via the fake ISegmentMessageService.
         var services = new ServiceCollection();
-        services.AddTransient<IFeatureFlagService>(_ => _flagService);
+        services.AddTransient<IFeatureFlagService>(_ => new FeatureFlagService(_mongoDb));
+        services.AddTransient<ISegmentService>(_ => _segmentService);
         services.AddTransient<ILeaseStore>(_ => _leaseStore);
-        services.AddTransient<ISegmentService>(_ => new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance));
+        services.AddTransient<ISegmentMessageService>(_ => segmentMessages);
+        services.AddTransient<IFeatureFlagAppService>(_ => new ThrowingFeatureFlagAppService());
         var provider = services.BuildServiceProvider();
 
         var configuration = new ConfigurationBuilder()
@@ -185,7 +186,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         return new CommitCoordinatorWorker(
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
-            producer,
+            new SpyMessageProducer(),
             configuration,
             logger ?? NullLogger<CommitCoordinatorWorker>.Instance);
     }
@@ -195,194 +196,189 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
     [Fact]
     public async Task NoCommit_When_OnlyOneOfTwoLiveDcs_HasStaged()
     {
-        const string key = "only-one-dc-staged";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-only-one-dc-staged";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
-        // both DCs are live
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
         // only dc-a (db 0) has v2 staged
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var committed = await sut.RunOnceAsync();
 
         Assert.Equal(0, committed);
-        Assert.Empty(producer.Published);
+        Assert.Empty(spy.Published);
 
         // committed read still returns the OLD value; pending intact
-        var read = await _flagService.GetCommittedAsync(_envId, key);
-        Assert.False(read.IsEnabled);
+        var read = await _segmentService.GetCommittedAsync(segment.Id);
         Assert.Equal(1, read.CommittedVersion);
+        Assert.Equal(new[] { "alice" }, read.Included);
 
-        var raw = await _flagService.GetAsync(_envId, key);
+        var raw = await _segmentService.GetAsync(segment.Id);
         Assert.NotNull(raw.Pending);
         Assert.Equal(v, raw.Pending!.Version);
 
         // dc-b committed pointer never advanced
-        Assert.False(await _dcbCache.HasStagedFlagAsync(flag.Id, v));
+        Assert.False(await _dcbCache.HasStagedSegmentAsync(segment.Id, v));
     }
 
     [Fact]
     public async Task Commits_When_AllLiveDcs_HaveStaged()
     {
-        const string key = "all-dcs-staged";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-all-dcs-staged";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
         // both DCs have v2 staged
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
+        await _dcbCache.StageSegmentAsync(segment.Pending!.Value, v);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var committed = await sut.RunOnceAsync();
 
         Assert.Equal(1, committed);
 
         // committed read now returns the NEW value + advanced version
-        var read = await _flagService.GetCommittedAsync(_envId, key);
-        Assert.True(read.IsEnabled);
+        var read = await _segmentService.GetCommittedAsync(segment.Id);
         Assert.Equal(v, read.CommittedVersion);
+        Assert.Equal(new[] { "bob" }, read.Included);
 
         // pending slot cleared
-        var raw = await _flagService.GetAsync(_envId, key);
+        var raw = await _segmentService.GetAsync(segment.Id);
         Assert.Null(raw.Pending);
 
         // committed pointer advanced in BOTH DCs (broadcast)
-        var dcaPointer = await _mux.GetDatabase(0).StringGetAsync(RedisCaches.FlagCommittedPointer(flag.Id));
-        var dcbPointer = await _mux.GetDatabase(1).StringGetAsync(RedisCaches.FlagCommittedPointer(flag.Id));
+        var dcaPointer = await _mux.GetDatabase(0).StringGetAsync(RedisCaches.SegmentCommittedPointer(segment.Id));
+        var dcbPointer = await _mux.GetDatabase(1).StringGetAsync(RedisCaches.SegmentCommittedPointer(segment.Id));
         Assert.Equal(v, (long)dcaPointer);
         Assert.Equal(v, (long)dcbPointer);
 
-        // published to the evaluation-server topic with the new committed value
-        var publish = Assert.Single(producer.Published);
-        Assert.Equal(Topics.FeatureFlagChange, publish.Topic);
-        var publishedFlag = Assert.IsType<FeatureFlag>(publish.Message);
-        Assert.True(publishedFlag.IsEnabled);
-        Assert.Equal(flag.Id, publishedFlag.Id);
+        // segment change published for the segment's single env (env-specific -> [EnvId])
+        var publish = Assert.Single(spy.Published);
+        Assert.Equal(_envId, publish.EnvId);
+        Assert.Equal(segment.Id, publish.Segment.Id);
+        Assert.Equal(new[] { "bob" }, publish.Segment.Included);
     }
 
     [Fact]
     public async Task Commits_Ignoring_ExpiredDc_When_OnlyLiveDc_HasStaged()
     {
-        const string key = "expired-dc-ignored";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-expired-dc-ignored";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));   // dc-a live
         await UpsertLeaseAsync(DcB, now.AddMinutes(-5));  // dc-b lease EXPIRED
 
-        // only the live DC (dc-a) has v2 staged; dc-b never got it (but it's dead anyway)
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+        // only the live DC (dc-a) has v2 staged
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var committed = await sut.RunOnceAsync();
 
         Assert.Equal(1, committed);
 
-        var read = await _flagService.GetCommittedAsync(_envId, key);
-        Assert.True(read.IsEnabled);
+        var read = await _segmentService.GetCommittedAsync(segment.Id);
         Assert.Equal(v, read.CommittedVersion);
-
-        Assert.Single(producer.Published);
+        Assert.Single(spy.Published);
     }
 
     [Fact]
     public async Task Skips_When_PendingVersion_NotNewerThanCommitted()
     {
         // committed v5, pending staged at v2 (stale) -> must be skipped on monotonicity (#34)
-        const string key = "stale-pending";
-        var committed = CreateFlag(key, isEnabled: true);
+        const string key = "seg-stale-pending";
+        var committed = CreateSegment(key, "alice");
         committed.CommittedVersion = 5;
-        await _flagService.AddOneAsync(committed);
+        await _segmentService.AddOneAsync(committed);
 
-        var pendingValue = CreateFlag(key, isEnabled: false);
+        var pendingValue = CreateSegment(key, "bob");
         pendingValue.Id = committed.Id;
-        await _flagService.SetPendingAsync(_envId, key, pendingValue, version: 2);
-        var flag = await _flagService.GetAsync(_envId, key);
+        pendingValue.UpdatedAt = DateTimeOffset.FromUnixTimeMilliseconds(2).UtcDateTime;
+        await _segmentService.SetPendingAsync(committed.Id, pendingValue, version: 2);
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
         // even if both DCs have it staged, the stale version must not be committed
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, 2);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, 2);
+        await _dcaCache.StageSegmentAsync(pendingValue, 2);
+        await _dcbCache.StageSegmentAsync(pendingValue, 2);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var committed2 = await sut.RunOnceAsync();
 
         Assert.Equal(0, committed2);
-        Assert.Empty(producer.Published);
+        Assert.Empty(spy.Published);
 
-        var read = await _flagService.GetCommittedAsync(_envId, key);
-        Assert.True(read.IsEnabled);
+        var read = await _segmentService.GetCommittedAsync(committed.Id);
         Assert.Equal(5, read.CommittedVersion);
+        Assert.Equal(new[] { "alice" }, read.Included);
     }
 
     [Fact]
     public async Task NoCommit_When_NoLiveDcs()
     {
-        const string key = "no-live-dcs";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-no-live-dcs";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
         // both DCs have it staged, but NO live leases exist
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
+        await _dcbCache.StageSegmentAsync(segment.Pending!.Value, v);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var committed = await sut.RunOnceAsync();
 
         Assert.Equal(0, committed);
-        Assert.Empty(producer.Published);
+        Assert.Empty(spy.Published);
 
-        var read = await _flagService.GetCommittedAsync(_envId, key);
-        Assert.False(read.IsEnabled);
+        var read = await _segmentService.GetCommittedAsync(segment.Id);
         Assert.Equal(1, read.CommittedVersion);
     }
 
     [Fact]
     public async Task SecondTick_IsIdempotent_AfterCommit()
     {
-        const string key = "idempotent";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-idempotent";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
+        await _dcbCache.StageSegmentAsync(segment.Pending!.Value, v);
 
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
 
         var first = await sut.RunOnceAsync();
         var second = await sut.RunOnceAsync();
 
         Assert.Equal(1, first);
         Assert.Equal(0, second); // nothing left pending -> no-op
-        Assert.Single(producer.Published);
+        Assert.Single(spy.Published);
     }
 
     // ----- eviction observability (#16) -----
@@ -390,28 +386,24 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
     [Fact]
     public async Task EvictedCommit_Logs_And_IncrementsCounter_NamingEvictedDc()
     {
-        // dc-a live + staged; dc-b is CONFIGURED (composite probes it) but its lease has EXPIRED, so
-        // it is evicted from the live set. The commit proceeds on the live set, and the eviction
-        // must be recorded (warning log naming dc-b + counter increment tagged dc_id=dc-b).
-        const string key = "evicted-commit-observed";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
+        const string key = "seg-evicted-commit-observed";
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));   // dc-a live
         await UpsertLeaseAsync(DcB, now.AddMinutes(-5));  // dc-b lease EXPIRED -> evicted
 
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
 
         var logger = new CapturingLogger();
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer, logger);
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy, logger);
 
         using var counter = new CounterCollector(CommitCoordinatorWorker.EvictedCommitCounterName);
 
         var committed = await sut.RunOnceAsync();
 
-        // commit decision unchanged: it still committed on the live set
         Assert.Equal(1, committed);
 
         // metric: exactly one increment, tagged with the evicted dc_id
@@ -419,48 +411,56 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(1, measurement.Value);
         Assert.Equal(DcB, measurement.Tags["dc_id"]);
 
-        // log: a warning naming the flag, the version, and the evicted DC
+        // log: a warning naming the segment, the version, and the evicted DC
         var warning = Assert.Single(logger.Warnings);
-        Assert.Contains(flag.Id.ToString(), warning);
+        Assert.Contains(segment.Id.ToString(), warning);
         Assert.Contains(v.ToString(), warning);
         Assert.Contains(DcB, warning);
     }
 
-    [Fact]
-    public async Task NoEviction_When_AllConfiguredDcsLive_DoesNotLogOrIncrement()
+    // ----- helpers -----
+
+    /// <summary>Resolves the seeded segment's Id by its key (single env-specific segment per test).</summary>
+    private async Task<Guid> PendingId(string key)
     {
-        // both configured DCs are live + staged -> no eviction; no extra warning, no counter.
-        const string key = "no-eviction-observed";
-        var (_, _, v) = await SeedCommittedV1PendingV2(key);
-        var flag = await _flagService.GetAsync(_envId, key);
-
-        var now = DateTimeOffset.UtcNow;
-        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
-        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
-
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
-
-        var logger = new CapturingLogger();
-        var producer = new SpyMessageProducer();
-        var sut = CreateSut(producer, logger);
-
-        using var counter = new CounterCollector(CommitCoordinatorWorker.EvictedCommitCounterName);
-
-        var committed = await sut.RunOnceAsync();
-
-        Assert.Equal(1, committed);
-        Assert.Empty(counter.Measurements);
-        Assert.Empty(logger.Warnings);
+        var pending = await _segmentService.GetPendingAsync();
+        return pending.First(s => s.Key == key).Id;
     }
 
     // ----- test doubles -----
 
+    private sealed class SpySegmentMessageService : ISegmentMessageService
+    {
+        public List<(Guid EnvId, ICollection<FlagReference> AffectedFlags, Segment Segment)> Published { get; } = new();
+
+        public ValueTask<ICollection<FlagReference>> GetAffectedFlagsAsync(Guid envId, OnSegmentChange notification)
+        {
+            // No related flags are seeded in these tests, so there are no affected flags to compute.
+            // Returning empty keeps OnSegmentUpdatedAsync (the throwing app service) from being hit.
+            return ValueTask.FromResult<ICollection<FlagReference>>([]);
+        }
+
+        public Task PublishSegmentChangeMessage(Guid envId, ICollection<FlagReference> affectedFlags, Segment segment)
+        {
+            Published.Add((envId, affectedFlags, segment));
+            return Task.CompletedTask;
+        }
+    }
+
     /// <summary>
-    /// Captures emitted measurements for a single named counter on the control-plane consistency
-    /// meter via <see cref="MeterListener"/>, so the test can assert the eviction counter fired
-    /// with the expected value + tags.
+    /// Guard: with no affected flags, OnSegmentUpdatedAsync must never be called. If the coordinator
+    /// ever calls it (a regression), the test fails loudly instead of silently passing.
     /// </summary>
+    private sealed class ThrowingFeatureFlagAppService : IFeatureFlagAppService
+    {
+        public Task ApplyDraftAsync(Guid draftId, string operation, Guid operatorId) =>
+            throw new InvalidOperationException("ApplyDraftAsync should not be called by the commit coordinator.");
+
+        public Task OnSegmentUpdatedAsync(Segment segment, Guid operatorId, ICollection<FlagReference> flagReferences) =>
+            throw new InvalidOperationException(
+                "OnSegmentUpdatedAsync should not be called when there are no affected flags.");
+    }
+
     private sealed class CounterCollector : IDisposable
     {
         private readonly MeterListener _listener;
@@ -498,7 +498,6 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         public void Dispose() => _listener.Dispose();
     }
 
-    /// <summary>Captures warning-level log messages (rendered) for assertion.</summary>
     private sealed class CapturingLogger : ILogger<CommitCoordinatorWorker>
     {
         public List<string> Warnings { get; } = new();
@@ -529,13 +528,8 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     private sealed class SpyMessageProducer : IMessageProducer
     {
-        public List<(string Topic, object Message)> Published { get; } = new();
-
-        public Task PublishAsync<TMessage>(string topic, TMessage message) where TMessage : class
-        {
-            Published.Add((topic, message));
-            return Task.CompletedTask;
-        }
+        public Task PublishAsync<TMessage>(string topic, TMessage message) where TMessage : class =>
+            Task.CompletedTask;
     }
 
     private sealed class TestRedisClient(IConnectionMultiplexer connection, int db) : IRedisClient
