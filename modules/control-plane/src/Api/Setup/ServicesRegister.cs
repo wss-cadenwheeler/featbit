@@ -62,6 +62,10 @@ public static class ServicesRegister
         // lease returns to the live set. No-ops unless ControlPlane:ConsistencyMode == GatedCommit.
         builder.Services.AddHostedService<RecoveryWorker>();
 
+        // #48 advisory DcId consistency check: warns (never fails) when the configured Redis DcId set
+        // and the reporting ELS lease DcId set diverge. No-ops unless ConsistencyMode == GatedCommit.
+        builder.Services.AddHostedService<DcIdConsistencyChecker>();
+
         return builder;
     }
     
