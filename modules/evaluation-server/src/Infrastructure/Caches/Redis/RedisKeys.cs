@@ -8,6 +8,7 @@ public static class RedisKeys
     private const string FlagCommittedPrefix = "featbit:flag-committed:";
     private const string FlagIndexPrefix = "featbit:flag-index:";
     private const string SegmentPrefix = "featbit:segment:";
+    private const string SegmentCommittedPrefix = "featbit:segment-committed:";
     private const string SegmentIndexPrefix = "featbit:segment-index:";
     private const string SecretPrefix = "featbit:secret:";
     private const string RateLimitPrefix = "featbit:rl:";
@@ -38,6 +39,27 @@ public static class RedisKeys
     public static RedisKey SegmentIndex(Guid envId) => new($"{SegmentIndexPrefix}{envId}");
 
     public static RedisKey Segment(string id) => new($"{SegmentPrefix}{id}");
+
+    // --- Stage/commit read keys (mirror back-end RedisCaches B2 conventions) ---------------------
+    // The back-end gated segment commit path writes a per-version snapshot under a versioned key
+    // derived from the segment value key, plus a committed-pointer key recording the authoritative
+    // version:
+    //   featbit:segment:{id}:v{ts}        -- immutable per-version snapshot ("staged" value)
+    //   featbit:segment-committed:{id}    -- value is the committed timestamp ({ts}) as a string
+    // RedisStore reads the pointer to resolve which versioned value is authoritative; when the
+    // pointer is absent it falls back to the legacy single-value Segment key (BestEffort path).
+
+    /// <summary>
+    /// The versioned, immutable value key for a single staged segment version:
+    /// <c>featbit:segment:{id}:v{ts}</c>.
+    /// </summary>
+    public static RedisKey SegmentVersion(string id, long ts) => new($"{SegmentPrefix}{id}:v{ts}");
+
+    /// <summary>
+    /// The committed-pointer key holding the timestamp of the currently committed segment version:
+    /// <c>featbit:segment-committed:{id}</c>.
+    /// </summary>
+    public static RedisKey SegmentCommittedPointer(string id) => new($"{SegmentCommittedPrefix}{id}");
 
     public static RedisKey Secret(string secretString) => new($"{SecretPrefix}{secretString}");
 
