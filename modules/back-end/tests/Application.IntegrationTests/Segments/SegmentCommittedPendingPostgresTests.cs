@@ -277,4 +277,44 @@ public sealed class SegmentCommittedPendingPostgresTests : IAsyncLifetime
         Assert.Equal(2, all.Count);
         Assert.All(all, s => Assert.Null(s.Pending));
     }
+
+    [Fact]
+    public async Task Promote_Refreshes_UpdatedAt_On_Committed_Value()
+    {
+        // #35: promotion must refresh the committed value's UpdatedAt so it reflects WHEN the value
+        // became authoritative. (Segment is an AuditedEntity with no UpdatorId.)
+        var committed = CreateSegment("s1-promote-audit", "old");
+        committed.CommittedVersion = 1;
+        var staleTime = DateTime.UtcNow.AddDays(-7);
+        committed.UpdatedAt = staleTime;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-promote-audit", "new"), version: 2);
+
+        var promoted = await _sut.PromotePendingAsync(committed.Id, expectedVersion: 2);
+        Assert.True(promoted);
+
+        var afterPromote = await _sut.GetCommittedAsync(committed.Id);
+        Assert.Equal("new", afterPromote.Description);
+        Assert.True(afterPromote.UpdatedAt > staleTime);
+    }
+
+    [Fact]
+    public async Task SetPending_Strips_Nested_Pending_From_Staged_Value()
+    {
+        // #35: a pending value must never itself carry a (nested) pending change.
+        var committed = CreateSegment("s1-no-nested-pending", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        var pendingValue = CreateSegment("s1-no-nested-pending", "new");
+        pendingValue.SetPending(CreateSegment("s1-no-nested-pending", "bogus"), version: 99);
+        Assert.NotNull(pendingValue.Pending);
+
+        await _sut.SetPendingAsync(committed.Id, pendingValue, version: 2);
+
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Null(raw.Pending!.Value.Pending);
+    }
 }

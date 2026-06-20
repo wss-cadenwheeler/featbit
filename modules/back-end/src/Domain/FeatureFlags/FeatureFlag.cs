@@ -332,6 +332,14 @@ public class FeatureFlag : FullAuditedEntity
     /// </summary>
     public void SetPending(FeatureFlag pendingValue, long version)
     {
+        // A pending value must never itself carry a pending change (no pending-within-pending):
+        // the staged payload describes a single committed-to-be state, so null out any nested
+        // pending before storing it. This keeps the staged document flat and avoids recursive bloat.
+        if (pendingValue != null)
+        {
+            pendingValue.Pending = null;
+        }
+
         Pending = new PendingFlagChange
         {
             Version = version,
@@ -368,6 +376,15 @@ public class FeatureFlag : FullAuditedEntity
         ExptIncludeAllTargets = promoted.ExptIncludeAllTargets;
         Tags = promoted.Tags;
         IsArchived = promoted.IsArchived;
+        // Revision is part of the committed-relevant state (it changes on every mutation and is
+        // observed by evaluators); adopt the pending value's revision on promotion.
+        Revision = promoted.Revision;
+
+        // Refresh audit fields so the committed value reflects WHEN it was promoted and WHO authored
+        // the change. The promotion is the moment this value becomes authoritative, so UpdatedAt must
+        // advance to now; carry the pending author's UpdatorId.
+        UpdatorId = promoted.UpdatorId;
+        UpdatedAt = DateTime.UtcNow;
 
         CommittedVersion = version;
         Pending = null;
