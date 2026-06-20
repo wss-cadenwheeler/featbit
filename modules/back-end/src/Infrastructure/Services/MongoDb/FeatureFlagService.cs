@@ -163,9 +163,21 @@ public class FeatureFlagService : MongoDbService<FeatureFlag>, IFeatureFlagServi
             Value = pendingValue
         };
 
+        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+        // than both the already-staged pending version (if any) AND the committed version. An
+        // out-of-order/stale stage carrying a lower version (but still above committed) must not
+        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+        // The filter is evaluated server-side so the check-and-set is atomic: if a concurrent
+        // writer staged a newer pending after our existence check, the filter no longer matches
+        // and this update becomes a no-op (MatchedCount == 0).
         var filter = Builders<FeatureFlag>.Filter.And(
             Builders<FeatureFlag>.Filter.Eq(x => x.EnvId, envId),
-            Builders<FeatureFlag>.Filter.Eq(x => x.Key, key)
+            Builders<FeatureFlag>.Filter.Eq(x => x.Key, key),
+            Builders<FeatureFlag>.Filter.Lt(x => x.CommittedVersion, version),
+            Builders<FeatureFlag>.Filter.Or(
+                Builders<FeatureFlag>.Filter.Eq(x => x.Pending, null),
+                Builders<FeatureFlag>.Filter.Lt(x => x.Pending!.Version, version)
+            )
         );
         var update = Builders<FeatureFlag>.Update.Set(x => x.Pending, pending);
 

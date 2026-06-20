@@ -200,7 +200,21 @@ public class SegmentService(MongoDbClient mongoDb, ILogger<SegmentService> logge
             Value = pendingValue
         };
 
-        var filter = Builders<Segment>.Filter.Eq(x => x.Id, id);
+        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+        // than both the already-staged pending version (if any) AND the committed version. An
+        // out-of-order/stale stage carrying a lower version (but still above committed) must not
+        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+        // The filter is evaluated server-side so the check-and-set is atomic: if a concurrent
+        // writer staged a newer pending after our existence check, the filter no longer matches
+        // and this update becomes a no-op (MatchedCount == 0).
+        var filter = Builders<Segment>.Filter.And(
+            Builders<Segment>.Filter.Eq(x => x.Id, id),
+            Builders<Segment>.Filter.Lt(x => x.CommittedVersion, version),
+            Builders<Segment>.Filter.Or(
+                Builders<Segment>.Filter.Eq(x => x.Pending, null),
+                Builders<Segment>.Filter.Lt(x => x.Pending!.Version, version)
+            )
+        );
         var update = Builders<Segment>.Update.Set(x => x.Pending, pending);
 
         await Collection.UpdateOneAsync(filter, update);

@@ -161,6 +161,54 @@ public sealed class SegmentCommittedPendingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SetPending_Stale_Version_Does_Not_Clobber_Newer_Pending()
+    {
+        // #34: stage v3, then a stale v2 stage must NOT overwrite the newer pending.
+        var committed = CreateSegment("s1-setpending-stale", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-setpending-stale", "v3"), version: 3);
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-setpending-stale", "v2"), version: 2);
+
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(3, raw.Pending!.Version);
+        Assert.Equal("v3", raw.Pending.Value.Description);
+    }
+
+    [Fact]
+    public async Task SetPending_Not_Written_When_Version_Not_Above_Committed()
+    {
+        // #34: committed is already v2; staging v2 (or lower) must write no pending.
+        var committed = CreateSegment("s1-setpending-not-above-committed", "old");
+        committed.CommittedVersion = 2;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-setpending-not-above-committed", "new"), version: 2);
+
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.Null(raw.Pending);
+    }
+
+    [Fact]
+    public async Task SetPending_Newer_Version_Overwrites_Older_Pending()
+    {
+        // #34: staging v4 over an existing pending v3 must advance the pending to v4.
+        var committed = CreateSegment("s1-setpending-newer", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-setpending-newer", "v3"), version: 3);
+        await _sut.SetPendingAsync(committed.Id, CreateSegment("s1-setpending-newer", "v4"), version: 4);
+
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(4, raw.Pending!.Version);
+        Assert.Equal("v4", raw.Pending.Value.Description);
+    }
+
+    [Fact]
     public async Task GetPending_Returns_Only_Segments_With_Pending()
     {
         var committedOnly = CreateSegment("s1-committed-only", "x");

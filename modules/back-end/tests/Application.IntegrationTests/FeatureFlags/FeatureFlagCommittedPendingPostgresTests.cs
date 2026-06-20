@@ -211,4 +211,55 @@ public sealed class FeatureFlagCommittedPendingPostgresTests : IAsyncLifetime
         Assert.NotNull(raw.Pending);
         Assert.Equal(3, raw.Pending!.Version);
     }
+
+    [Fact]
+    public async Task SetPending_Stale_Version_Does_Not_Clobber_Newer_Pending()
+    {
+        // #34: stage v3, then a stale v2 stage must NOT overwrite the newer pending.
+        const string key = "b4-setpending-stale";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: true), version: 3);
+        await _sut.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: false), version: 2);
+
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(3, raw.Pending!.Version);
+        Assert.True(raw.Pending.Value.IsEnabled);
+    }
+
+    [Fact]
+    public async Task SetPending_Not_Written_When_Version_Not_Above_Committed()
+    {
+        // #34: committed is already v2; staging v2 (or lower) must write no pending.
+        const string key = "b4-setpending-not-above-committed";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 2;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: true), version: 2);
+
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.Null(raw.Pending);
+    }
+
+    [Fact]
+    public async Task SetPending_Newer_Version_Overwrites_Older_Pending()
+    {
+        // #34: staging v4 over an existing pending v3 must advance the pending to v4.
+        const string key = "b4-setpending-newer";
+        var committed = CreateFlag(key, isEnabled: false);
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        await _sut.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: false), version: 3);
+        await _sut.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: true), version: 4);
+
+        var raw = await _sut.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(4, raw.Pending!.Version);
+        Assert.True(raw.Pending.Value.IsEnabled);
+    }
 }

@@ -30,6 +30,12 @@ public interface IFeatureFlagService : IService<FeatureFlag>
     /// Stage <paramref name="pendingValue"/> as a pending change on the flag identified
     /// by <paramref name="envId"/>/<paramref name="key"/>. The committed value is left
     /// untouched, so <see cref="GetCommittedAsync"/> still returns the old value.
+    /// <para>
+    /// Monotonicity guard (#34): the stage is applied ONLY when <paramref name="version"/> is
+    /// strictly greater than both the already-staged pending version (if any) and the committed
+    /// version; otherwise it is a no-op. This prevents an out-of-order/stale stage from clobbering
+    /// a newer pending change (which the coordinator could then commit).
+    /// </para>
     /// </summary>
     Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version);
 
