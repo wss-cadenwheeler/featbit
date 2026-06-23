@@ -56,6 +56,14 @@ public static class ServicesRegister
 
         if (configuration.UseControlPlane())
         {
+            // The control-plane topology requires the local DC Redis: the control-plane writes
+            // flag/segment changes into per-DC Redis, and the eval server's heartbeat derives the
+            // applied watermark from that same Redis via RedisAppliedWatermarkReader. Ensure
+            // IRedisClient is registered here so the heartbeat can resolve even when the
+            // MqProvider/CacheProvider paths haven't already registered Redis (e.g. MqProvider=Kafka
+            // with CacheProvider=None, which is the standard control-plane QA configuration).
+            services.TryAddRedis(configuration);
+
             // D5 (#22): shared singleton recording the last successful heartbeat publish, plus the
             // freshness health check that surfaces a Degraded (not Unhealthy) self-fence signal under
             // GatedCommit. Tagged Readiness so it appears on /health/readiness; ASP.NET Core maps
