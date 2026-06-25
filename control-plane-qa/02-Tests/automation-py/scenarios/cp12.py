@@ -78,15 +78,15 @@ class CP12Scenario(ConsistencyScenarioBase):
             self.add_timeline_event("phase-start", phase="phase-2-change-while-absent")
             baseline_src = self.get_committed_pointer(source_ctx, "flag", flag_id)
             self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
-            # Source commits via eviction (no live target to gate on).
-            commit_wait = self.config.commit_coordinator_interval_seconds + 5
-            time.sleep(commit_wait)
+            # Source commits via eviction (no live target to gate on). A committed
+            # pointer already exists from the prior state, so wait for it to ADVANCE
+            # past the baseline rather than merely be present.
             committed_src, src_ts = self.poll_committed_pointer(
-                source_ctx, "flag", flag_id, expect_present=True
+                source_ctx, "flag", flag_id, advanced_from=baseline_src
             )
             self.assertions.add(
                 "committed-on-source-while-absent",
-                bool(committed_src and src_ts != baseline_src),
+                bool(committed_src),
                 f"Source {source_ctx} committed to {src_ts} while target was evicted "
                 f"(baseline {baseline_src}).",
                 "evaluated",

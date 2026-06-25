@@ -195,13 +195,19 @@ class ConsistencyScenarioBase(BaseScenario):
         resource_id: str,
         *,
         expect_ts: Optional[str] = None,
+        advanced_from: Optional[str] = None,
         expect_present: bool = True,
         timeout: Optional[int] = None,
     ) -> Tuple[bool, Optional[str]]:
         """Poll a single DC's committed pointer until it matches the expectation.
 
-        Returns ``(matched, observed_ts)``. With ``expect_ts`` the pointer must equal
-        that timestamp; otherwise ``expect_present`` toggles present-vs-absent.
+        Returns ``(matched, observed_ts)``. Precedence:
+        - ``expect_ts``: the pointer must equal that exact timestamp.
+        - ``advanced_from``: the pointer must be present AND differ from this value
+          (i.e. a *new* commit advanced it past the given baseline). Use this rather
+          than ``expect_present`` whenever a committed pointer may already exist, so
+          the poll waits for the new commit instead of returning the stale value.
+        - otherwise ``expect_present`` toggles present-vs-absent.
         """
         deadline = time.time() + (timeout or self.config.timeout_seconds)
         observed: Optional[str] = None
@@ -209,6 +215,9 @@ class ConsistencyScenarioBase(BaseScenario):
             observed = self.get_committed_pointer(context, resource, resource_id)
             if expect_ts is not None:
                 if observed == expect_ts:
+                    return True, observed
+            elif advanced_from is not None:
+                if observed is not None and observed != advanced_from:
                     return True, observed
             elif expect_present and observed is not None:
                 return True, observed
