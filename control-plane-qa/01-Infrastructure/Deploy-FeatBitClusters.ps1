@@ -1039,6 +1039,22 @@ foreach ($clusterContext in @("west", "east")) {
 
 Write-Success "Both clusters are reachable"
 
+# Ensure the metrics-server addon is enabled on both clusters so `kubectl top`
+# (and any resource-usage tooling) works out of the box. Idempotent, so it is
+# safe to run on every invocation, including -SkipClusterCreation / existing
+# clusters where the create-time addon block above does not run.
+Write-Step "Ensuring metrics-server Addon"
+foreach ($clusterProfile in @("west", "east")) {
+    Write-Info "Enabling metrics-server on $clusterProfile cluster..."
+    minikube -p $clusterProfile addons enable metrics-server | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to enable metrics-server on $clusterProfile cluster; 'kubectl top' may be unavailable."
+    }
+    else {
+        Write-Success "metrics-server enabled on $clusterProfile cluster"
+    }
+}
+
 Write-Step "Configuring Shared Cluster Network"
 Ensure-SharedClusterNetwork -NetworkName $sharedClusterNetwork -Subnet $sharedClusterSubnet
 Connect-ClusterToSharedNetwork -ClusterName "west" -NetworkName $sharedClusterNetwork -NodeIp $westSharedClusterIp
