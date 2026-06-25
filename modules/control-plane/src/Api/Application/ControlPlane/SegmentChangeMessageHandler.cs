@@ -13,6 +13,7 @@ public class SegmentChangeMessageHandler(
     [FromKeyedServices("compositeCache")] ICacheService cacheService,
     IFeatureFlagAppService featureFlagAppService,
     ISegmentMessageService segmentMessageService,
+    ISegmentService segmentService,
     ILogger<SegmentChangeMessageHandler> logger,
     IConfiguration configuration,
     IMessageProducer messageProducer) : IMessageHandler
@@ -44,24 +45,43 @@ public class SegmentChangeMessageHandler(
                 deserializedNotificationNode is not null && deserializedRegionNode is not null &&
                 deserializedRegionNode == configuration.GetRegion())
             {
-                await cacheService
-                    .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
-
-                foreach (var envId in deserializedEnvIdsNode)
+                if (configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit)
                 {
-                    var affectedFlags =
-                        await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
+                    // GatedCommit (S2): stage the new segment value to every DC's Redis and record
+                    // the Mongo pending change, but do NOT publish the affected-flags / segment
+                    // change to the evaluation-server topics yet. The commit/publish is the
+                    // coordinator's responsibility (S3).
+                    var ts = new DateTimeOffset(deserializedSegmentNonEnvironmentSpecificNode.UpdatedAt)
+                        .ToUnixTimeMilliseconds();
+                    await cacheService.StageSegmentAsync(deserializedSegmentNonEnvironmentSpecificNode, ts);
+                    await segmentService.SetPendingAsync(
+                        deserializedSegmentNonEnvironmentSpecificNode.Id,
+                        deserializedSegmentNonEnvironmentSpecificNode,
+                        ts);
+                }
+                else
+                {
+                    // BestEffort: unchanged upsert + affected-flags propagation.
+                    await cacheService
+                        .UpsertSegmentAsync(deserializedEnvIdsNode, deserializedSegmentNonEnvironmentSpecificNode);
 
-                    // update affected flags
-                    if (affectedFlags.Count > 0)
+                    foreach (var envId in deserializedEnvIdsNode)
                     {
-                        await featureFlagAppService.OnSegmentUpdatedAsync(deserializedSegmentNonEnvironmentSpecificNode,
-                            deserializedNotificationNode.OperatorId, affectedFlags);
-                    }
+                        var affectedFlags =
+                            await segmentMessageService.GetAffectedFlagsAsync(envId, deserializedNotificationNode);
 
-                    // publish segment change message
-                    await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags,
-                        deserializedSegmentNonEnvironmentSpecificNode);
+                        // update affected flags
+                        if (affectedFlags.Count > 0)
+                        {
+                            await featureFlagAppService.OnSegmentUpdatedAsync(
+                                deserializedSegmentNonEnvironmentSpecificNode,
+                                deserializedNotificationNode.OperatorId, affectedFlags);
+                        }
+
+                        // publish segment change message
+                        await segmentMessageService.PublishSegmentChangeMessage(envId, affectedFlags,
+                            deserializedSegmentNonEnvironmentSpecificNode);
+                    }
                 }
 
                 var webHooksMessage = new

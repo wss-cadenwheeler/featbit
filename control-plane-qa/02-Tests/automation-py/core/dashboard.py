@@ -23,11 +23,11 @@ FAILED = "failed"
 SKIPPED = "skipped"
 
 _STATUS_ICON = {
-    WAITING:  ("[dim]○[/dim]", "dim"),
-    RUNNING:  ("[cyan]⠸[/cyan]", "cyan"),
-    OK:       ("[green]✓[/green]", "green"),
-    FAILED:   ("[red]✗[/red]", "red"),
-    SKIPPED:  ("[dim]−[/dim]", "dim"),
+    WAITING:  ("[dim].[/dim]", "dim"),
+    RUNNING:  ("[cyan]>[/cyan]", "cyan"),
+    OK:       ("[green]+[/green]", "green"),
+    FAILED:   ("[red]x[/red]", "red"),
+    SKIPPED:  ("[dim]-[/dim]", "dim"),
 }
 
 
@@ -102,7 +102,7 @@ def _build_phase_table(phase: _Phase) -> Panel:
         icon_markup, color = _STATUS_ICON.get(item.status, _STATUS_ICON[WAITING])
 
         if item.status == RUNNING:
-            spinner = Spinner("dots", style="cyan")
+            spinner = Spinner("line", style="cyan")
             icon_cell = spinner
         else:
             icon_cell = Text.from_markup(icon_markup)
@@ -113,7 +113,7 @@ def _build_phase_table(phase: _Phase) -> Panel:
             dur_cell = Text(f"{item.duration}s", style="dim")
         elif item.status == RUNNING:
             elapsed = round(time.perf_counter() - (item.started_at or time.perf_counter()), 1)
-            dur_cell = Text(f"{elapsed}s…", style="cyan dim")
+            dur_cell = Text(f"{elapsed}s...", style="cyan dim")
         else:
             dur_cell = Text("")
 
@@ -124,7 +124,7 @@ def _build_phase_table(phase: _Phase) -> Panel:
         for child in item.children:
             child_icon_markup, child_color = _STATUS_ICON.get(child.status, _STATUS_ICON[WAITING])
             if child.status == RUNNING:
-                child_icon_cell = Spinner("dots", style="cyan")
+                child_icon_cell = Spinner("line", style="cyan")
             else:
                 child_icon_cell = Text.from_markup(child_icon_markup)
             child_name_cell = Text(

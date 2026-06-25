@@ -9,18 +9,58 @@ using Microsoft.Extensions.Logging;
 
 namespace Api.Infrastructure.Caches;
 
+/// <summary>
+/// Pairs a <see cref="ICacheService"/> (one DC's Redis) with the id of the DC it
+/// serves, so broadcast results can be keyed by DcId rather than ordinal index.
+/// </summary>
+public record DcCacheService(string DcId, ICacheService Service);
+
 public class CompositeRedisCacheService(
-    IEnumerable<ICacheService> cacheServices,
+    IEnumerable<DcCacheService> cacheServices,
     ILogger<CompositeRedisCacheService> logger) : ICacheService
 {
+    // The public ICacheService methods keep returning Task and discard the
+    // per-instance result map so externally observable behavior is unchanged
+    // (swallow-and-continue). The map is surfaced only via the internal
+    // BroadcastAsync for a future commit coordinator.
     public Task UpsertFlagAsync(FeatureFlag flag) =>
         BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
+
+    public Task StageFlagAsync(FeatureFlag flag, long ts) =>
+        BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+
+    public Task CommitFlagAsync(Guid envId, string flagId, long ts) =>
+        BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+
+    // ICacheService probe: returns the LOCAL DC's result (first instance), consistent with
+    // the heartbeat/health local-first convention above. This is NOT the coordinator API —
+    // the coordinator must use GetStagedDcsAsync to see EVERY DC's staged presence.
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts)
+    {
+        var local = cacheServices.First();
+        return local.Service.HasStagedFlagAsync(id, ts);
+    }
 
     public Task DeleteFlagAsync(Guid envId, Guid flagId) =>
         BroadcastAsync(s => s.DeleteFlagAsync(envId, flagId), nameof(DeleteFlagAsync));
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) =>
         BroadcastAsync(s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentAsync));
+
+    public Task StageSegmentAsync(Segment segment, long ts) =>
+        BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+
+    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) =>
+        BroadcastAsync(s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+
+    // ICacheService probe: returns the LOCAL DC's result (first instance), mirroring
+    // HasStagedFlagAsync. This is NOT the coordinator API — the coordinator must use
+    // GetStagedSegmentDcsAsync to see EVERY DC's staged presence.
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts)
+    {
+        var local = cacheServices.First();
+        return local.Service.HasStagedSegmentAsync(id, ts);
+    }
 
     public Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId) =>
         BroadcastAsync(s => s.DeleteSegmentAsync(envIds, segmentId), nameof(DeleteSegmentAsync));
@@ -39,11 +79,11 @@ public class CompositeRedisCacheService(
         // Try each instance in order until one succeeds; write-through to all.
         var license = string.Empty;
         var succeeded = false;
-        foreach (var service in cacheServices)
+        foreach (var dc in cacheServices)
         {
             try
             {
-                license = await service.GetOrSetLicenseAsync(workspaceId, licenseGetter);
+                license = await dc.Service.GetOrSetLicenseAsync(workspaceId, licenseGetter);
                 succeeded = true;
                 break;
             }
@@ -55,9 +95,10 @@ public class CompositeRedisCacheService(
             {
                 logger.LogError(
                     ex,
-                    "Redis cache operation '{Operation}' failed for implementation {CacheService}. Trying next instance.",
+                    "Redis cache operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Trying next instance.",
                     nameof(GetOrSetLicenseAsync),
-                    service.GetType().FullName);
+                    dc.DcId,
+                    dc.Service.GetType().FullName);
             }
         }
 
@@ -80,20 +121,144 @@ public class CompositeRedisCacheService(
     public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) =>
         BroadcastAsync(s => s.DeleteConnectionMadeAsync(connectionMessage), nameof(DeleteConnectionMadeAsync));
 
-    private Task BroadcastAsync(Func<ICacheService, Task> action, string operationName)
-    {
-        var tasks = cacheServices.Select(s => ExecuteSafelyAsync(s, action, operationName));
-        return Task.WhenAll(tasks);
-    }
-
-    private async Task ExecuteSafelyAsync(
-        ICacheService service,
+    /// <summary>
+    /// Broadcasts <paramref name="action"/> to every cache instance, swallowing and
+    /// logging per-instance failures so one DC's outage does not fail the others.
+    /// Returns a per-DC success map (keyed by DcId) so callers (e.g. a future commit
+    /// coordinator) can observe partial failure instead of having it silently swallowed.
+    /// </summary>
+    internal async Task<IReadOnlyDictionary<string, bool>> BroadcastAsync(
         Func<ICacheService, Task> action,
         string operationName)
     {
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(dc => ExecuteSafelyAsync(dc, action, operationName))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[instances[i].DcId] = outcomes[i];
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Coordinator-facing probe: returns, per <see cref="DcCacheService.DcId"/>, whether that
+    /// DC's Redis holds the staged version <c>flag:{id}:v{ts}</c>. Iterates every configured
+    /// DC (unlike the local-first <see cref="HasStagedFlagAsync"/>) with the same
+    /// swallow-and-continue resilience as <see cref="BroadcastAsync"/>: a DC whose probe throws
+    /// is reported as <c>false</c> rather than failing the whole call.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts)
+    {
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(dc => ProbeStagedSafelyAsync(dc, id, ts))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[instances[i].DcId] = outcomes[i];
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Coordinator-facing probe (segment counterpart of <see cref="GetStagedDcsAsync"/>):
+    /// returns, per <see cref="DcCacheService.DcId"/>, whether that DC's Redis holds the staged
+    /// version <c>segment:{id}:v{ts}</c>. Iterates every configured DC (unlike the local-first
+    /// <see cref="HasStagedSegmentAsync"/>) with the same swallow-and-continue resilience: a DC
+    /// whose probe throws is reported as <c>false</c> rather than failing the whole call.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts)
+    {
+        var instances = cacheServices.ToList();
+        var tasks = instances
+            .Select(dc => ProbeStagedSegmentSafelyAsync(dc, id, ts))
+            .ToList();
+
+        var outcomes = await Task.WhenAll(tasks);
+
+        var results = new Dictionary<string, bool>(outcomes.Length);
+        for (var i = 0; i < outcomes.Length; i++)
+        {
+            results[instances[i].DcId] = outcomes[i];
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Recovery-facing targeted write (E1): stages <paramref name="flag"/> at version
+    /// <paramref name="ts"/> into ONE DC's Redis (the <see cref="DcCacheService"/> whose
+    /// <see cref="DcCacheService.DcId"/> matches <paramref name="dcId"/>), unlike the broadcast
+    /// <see cref="StageFlagAsync"/>. If no DC matches, logs a warning and no-ops. A failing write is
+    /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
+        TargetedAsync(dcId, s => s.StageFlagAsync(flag, ts), nameof(StageFlagToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (E1): commits <paramref name="flagId"/> at version
+    /// <paramref name="ts"/> into ONE DC's Redis (advancing that DC's committed pointer + index),
+    /// unlike the broadcast <see cref="CommitFlagAsync"/>. If no DC matches <paramref name="dcId"/>,
+    /// logs a warning and no-ops. A failing write is swallowed and logged with the same resilience
+    /// as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
+        TargetedAsync(dcId, s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (#58, segment counterpart of <see cref="StageFlagToDcAsync"/>):
+    /// stages <paramref name="segment"/> at version <paramref name="ts"/> into ONE DC's Redis (the
+    /// <see cref="DcCacheService"/> whose <see cref="DcCacheService.DcId"/> matches
+    /// <paramref name="dcId"/>), unlike the broadcast <see cref="StageSegmentAsync"/>. If no DC
+    /// matches, logs a warning and no-ops. A failing write is swallowed and logged with the same
+    /// resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
+        TargetedAsync(dcId, s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (#58, segment counterpart of <see cref="CommitFlagToDcAsync"/>):
+    /// commits <paramref name="segmentId"/> at version <paramref name="ts"/> into ONE DC's Redis
+    /// (advancing that DC's committed pointer + per-env index), unlike the broadcast
+    /// <see cref="CommitSegmentAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// no-ops. A failing write is swallowed and logged with the same resilience as
+    /// <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
+        TargetedAsync(dcId, s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentToDcAsync));
+
+    private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
+    {
+        var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);
+        if (dc == null)
+        {
+            logger.LogWarning(
+                "Targeted cache operation '{Operation}' requested for unknown DC {DcId}; no matching cache instance. No-op.",
+                operationName,
+                dcId);
+            return;
+        }
+
+        await ExecuteSafelyAsync(dc, action, operationName);
+    }
+
+    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
+    {
         try
         {
-            await action(service);
+            return await dc.Service.HasStagedFlagAsync(id, ts);
         }
         catch (OperationCanceledException)
         {
@@ -103,9 +268,57 @@ public class CompositeRedisCacheService(
         {
             logger.LogError(
                 ex,
-                "Redis cache broadcast operation '{Operation}' failed for implementation {CacheService}. Continuing.",
+                "Staged-flag probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
+    }
+
+    private async Task<bool> ProbeStagedSegmentSafelyAsync(DcCacheService dc, Guid id, long ts)
+    {
+        try
+        {
+            return await dc.Service.HasStagedSegmentAsync(id, ts);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Staged-segment probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
+    }
+
+    private async Task<bool> ExecuteSafelyAsync(
+        DcCacheService dc,
+        Func<ICacheService, Task> action,
+        string operationName)
+    {
+        try
+        {
+            await action(dc.Service);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Redis cache broadcast operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Continuing.",
                 operationName,
-                service.GetType().FullName);
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
         }
     }
 
@@ -132,6 +345,6 @@ public class CompositeRedisCacheService(
     public Task<List<HealthMessage>> GetAllHealthMessages()
     {
         var local = cacheServices.First();
-        return local.GetAllHealthMessages();
+        return local.Service.GetAllHealthMessages();
     }
 }

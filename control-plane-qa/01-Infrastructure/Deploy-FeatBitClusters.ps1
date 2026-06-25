@@ -1668,6 +1668,20 @@ foreach ($clusterContext in @("west", "east")) {
         Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
     }
 
+    # Cross-DC consistency (gated commit): the eval server must report its DC
+    # identity so the control plane can build the per-DC live set and gate commits.
+    # DcId = cluster name ("west"/"east"); MUST match the control-plane Redis DcId.
+    $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
+    if ($consistencyMode -eq 'GatedCommit') {
+        kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
+            "ControlPlane__ConsistencyMode=GatedCommit" `
+            "ControlPlane__DcId=$clusterContext" `
+            "ControlPlane__Region=$clusterContext" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to set consistency (DcId) config on evaluation-server in $clusterContext"
+        }
+    }
+
     # Scale evaluation-server to 3 replicas so cp09 can exercise intra-cluster
     # failover (kill one pod, observe clients re-roll to surviving pods in
     # the same cluster via the host nginx LB) in addition to cross-cluster
@@ -1686,19 +1700,67 @@ Write-Info "Configuring cross-cluster Redis instances on control-plane deploymen
 # the remote cluster's Redis reached via the host port-forward on host.minikube.internal.
 #   West control-plane → east Redis on host port 6380
 #   East control-plane → west Redis on host port 6379
-kubectl --context west -n featbit set env deployment/control-plane `
-    "Redis__Instances__0=redis:6379" `
-    "Redis__Instances__1=${CrossClusterRedisHost}:6380" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Failed to set Redis cross-cluster instance on control-plane in west"
+$consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
+if ($consistencyMode -eq 'GatedCommit') {
+    # GatedCommit: label each Redis instance with its DcId — the join key the commit
+    # coordinator uses to correlate a DC's Redis with that DC's eval-server leases.
+    # Object-form keys (__ConnectionString / __DcId) are REQUIRED to bind to
+    # RedisInstanceConfig. Each DcId MUST equal that cluster's eval-server
+    # ControlPlane__DcId (the cluster name, set in the per-cluster loop above).
+    #   west control-plane: 0 = local west redis (DcId=west), 1 = remote east redis (DcId=east)
+    #   east control-plane: 0 = local east redis (DcId=east), 1 = remote west redis (DcId=west)
+    kubectl --context west -n featbit set env deployment/control-plane `
+        "ControlPlane__ConsistencyMode=GatedCommit" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=west" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6380" `
+        "Redis__Instances__1__DcId=east" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set gated-commit Redis/DcId config on control-plane in west"
+    }
+    kubectl --context east -n featbit set env deployment/control-plane `
+        "ControlPlane__ConsistencyMode=GatedCommit" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=east" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6379" `
+        "Redis__Instances__1__DcId=west" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set gated-commit Redis/DcId config on control-plane in east"
+    }
+    Write-Success "GatedCommit: cross-cluster Redis labeled with DcIds (west 0=west/1=east, east 0=east/1=west); ConsistencyMode=GatedCommit on both control planes + eval servers"
 }
-kubectl --context east -n featbit set env deployment/control-plane `
-    "Redis__Instances__0=redis:6379" `
-    "Redis__Instances__1=${CrossClusterRedisHost}:6379" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
+else {
+    # BestEffort MUST use the SAME object-form keys (__ConnectionString / __DcId) as the
+    # GatedCommit branch. The control-plane binds Redis:Instances to RedisInstanceConfig[]
+    # (see CacheServiceCollectionExtensions), whose connection comes from the __ConnectionString
+    # sub-key. The scalar form ("Redis__Instances__0=host:port") does NOT bind to
+    # RedisInstanceConfig.ConnectionString, so the composite cache ends up with empty
+    # connection strings and the remote-DC (Instance 1) write SILENTLY no-ops — the remote
+    # cluster's Redis never receives flag/secret changes. DcId labels are not required under
+    # BestEffort (an empty DcId falls back to the ordinal index with a warning) but are set
+    # here for parity with the GatedCommit branch and to suppress that warning.
+    #   west control-plane: 0 = local west redis (DcId=west), 1 = remote east redis (DcId=east)
+    #   east control-plane: 0 = local east redis (DcId=east), 1 = remote west redis (DcId=west)
+    kubectl --context west -n featbit set env deployment/control-plane `
+        "ControlPlane__ConsistencyMode=BestEffort" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=west" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6380" `
+        "Redis__Instances__1__DcId=east" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set Redis cross-cluster instance on control-plane in west"
+    }
+    kubectl --context east -n featbit set env deployment/control-plane `
+        "ControlPlane__ConsistencyMode=BestEffort" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=east" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6379" `
+        "Redis__Instances__1__DcId=west" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
+    }
+    Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
 }
-Write-Success "Cross-cluster Redis configured (west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
 Start-Sleep -Seconds 45

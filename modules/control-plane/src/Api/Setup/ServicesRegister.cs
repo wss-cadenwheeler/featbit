@@ -54,6 +54,18 @@ public static class ServicesRegister
             builder.Configuration.GetSection(PodHealthOptions.SectionName));
         builder.Services.AddHostedService<PodHealthChecker>();
 
+        // C3b-2 commit coordinator: gated-commit reconciliation of pending flag changes. No-ops
+        // unless ControlPlane:ConsistencyMode == GatedCommit (checked inside the worker).
+        builder.Services.AddHostedService<CommitCoordinatorWorker>();
+
+        // E1 returning-DC recovery: backfills a DC's Redis with all committed flag values when its
+        // lease returns to the live set. No-ops unless ControlPlane:ConsistencyMode == GatedCommit.
+        builder.Services.AddHostedService<RecoveryWorker>();
+
+        // #48 advisory DcId consistency check: warns (never fails) when the configured Redis DcId set
+        // and the reporting ELS lease DcId set diverge. No-ops unless ConsistencyMode == GatedCommit.
+        builder.Services.AddHostedService<DcIdConsistencyChecker>();
+
         return builder;
     }
     

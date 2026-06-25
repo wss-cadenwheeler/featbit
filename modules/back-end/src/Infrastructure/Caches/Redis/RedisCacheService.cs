@@ -25,6 +25,44 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
         await Redis.SortedSetAddAsync(index.Key, index.Member, index.Score);
     }
 
+    /// <summary>
+    /// Stages a new flag version (B1 stage/commit storage). Writes ONLY the versioned value key
+    /// <c>featbit:flag:{id}:v{ts}</c>; it does NOT move the committed pointer and does NOT touch
+    /// the env flag sorted-set index. The previously committed value therefore stays readable
+    /// until <see cref="CommitFlagAsync"/> is called.
+    /// </summary>
+    public async Task StageFlagAsync(FeatureFlag flag, long ts)
+    {
+        var staged = RedisCaches.FlagStaged(flag, ts);
+        await Redis.StringSetAsync(staged.Key, staged.Value);
+    }
+
+    /// <summary>
+    /// Commits a previously staged flag version (B1 stage/commit storage). Sets the committed
+    /// pointer <c>featbit:flag-committed:{id}</c> to <paramref name="ts"/> AND advances the env
+    /// flag sorted-set index score to <paramref name="ts"/> (mirroring <see cref="UpsertFlagAsync"/>'s
+    /// index logic), making the staged version the authoritative committed value.
+    /// </summary>
+    public async Task CommitFlagAsync(Guid envId, string flagId, long ts)
+    {
+        // flip the committed pointer to the staged version
+        var pointerKey = RedisCaches.FlagCommittedPointer(Guid.Parse(flagId));
+        await Redis.StringSetAsync(pointerKey, ts);
+
+        // advance the env flag index score (mirror UpsertFlag index logic)
+        var indexKey = RedisKeys.FlagIndex(envId);
+        await Redis.SortedSetAddAsync(indexKey, flagId, ts);
+    }
+
+    /// <summary>
+    /// Probes whether this Redis holds the staged version value key
+    /// <c>featbit:flag:{id}:v{ts}</c> (B1 stage/commit storage).
+    /// </summary>
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts)
+    {
+        return Redis.KeyExistsAsync(RedisCaches.FlagVersion(id, ts));
+    }
+
     public async Task DeleteFlagAsync(Guid envId, Guid flagId)
     {
         // delete cache
@@ -48,6 +86,50 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
             var index = RedisCaches.SegmentIndex(envId, segment);
             await Redis.SortedSetAddAsync(index.Key, index.Member, index.Score);
         }
+    }
+
+    /// <summary>
+    /// Stages a new segment version (B2 stage/commit storage, mirroring <see cref="StageFlagAsync"/>).
+    /// Writes ONLY the versioned value key <c>featbit:segment:{id}:v{ts}</c>; it does NOT move the
+    /// committed pointer and does NOT touch any env segment sorted-set index. The previously
+    /// committed value therefore stays readable until <see cref="CommitSegmentAsync"/> is called.
+    /// </summary>
+    public async Task StageSegmentAsync(Segment segment, long ts)
+    {
+        var staged = RedisCaches.SegmentStaged(segment, ts);
+        await Redis.StringSetAsync(staged.Key, staged.Value);
+    }
+
+    /// <summary>
+    /// Commits a previously staged segment version (B2 stage/commit storage, mirroring
+    /// <see cref="CommitFlagAsync"/>). Sets the committed pointer
+    /// <c>featbit:segment-committed:{id}</c> to <paramref name="ts"/> AND advances the segment
+    /// sorted-set index score to <paramref name="ts"/> for each env in <paramref name="envIds"/>
+    /// (segments can belong to multiple envs, mirroring <see cref="UpsertSegmentAsync"/>'s index
+    /// logic), making the staged version the authoritative committed value.
+    /// </summary>
+    public async Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts)
+    {
+        // flip the committed pointer to the staged version
+        var pointerKey = RedisCaches.SegmentCommittedPointer(Guid.Parse(segmentId));
+        await Redis.StringSetAsync(pointerKey, ts);
+
+        // advance the segment index score for each env (mirror UpsertSegment index logic)
+        foreach (var envId in envIds)
+        {
+            var indexKey = RedisKeys.SegmentIndex(envId);
+            await Redis.SortedSetAddAsync(indexKey, segmentId, ts);
+        }
+    }
+
+    /// <summary>
+    /// Probes whether this Redis holds the staged version value key
+    /// <c>featbit:segment:{id}:v{ts}</c> (B2 stage/commit storage, mirroring
+    /// <see cref="HasStagedFlagAsync"/>).
+    /// </summary>
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts)
+    {
+        return Redis.KeyExistsAsync(RedisCaches.SegmentVersion(id, ts));
     }
 
     public async Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId)

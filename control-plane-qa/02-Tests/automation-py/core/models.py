@@ -177,6 +177,29 @@ class ScenarioConfig:
     ws_use_load_balancer: bool = True
     ws_lb_host: str = "featbit-eval.local"
     ws_lb_port: int = 80
+    # --- GatedCommit consistency scenarios (CP-10 – CP-14) -----------------------
+    consistency_mode: str = "GatedCommit"  # or "BestEffort"
+    lease_ttl_seconds: int = 15
+    commit_coordinator_interval_seconds: int = 5
+    recovery_interval_seconds: int = 10
+    heartbeat_staleness_threshold_seconds: int = 180
+    segment_key: Optional[str] = None
+    west_eval_readiness_url: Optional[str] = None
+    east_eval_readiness_url: Optional[str] = None
+    # Sever / heal the cross-DC network link (CP-11 eviction, CP-12 recovery). A single
+    # partition models a real DC outage: the isolated DC's Redis goes stale AND its lease
+    # expires (evicted), then heals/recovers. Typically a chaos-mesh NetworkChaos applied
+    # to both clusters.
+    partition_start_command: Optional[str] = None
+    partition_stop_command: Optional[str] = None
+    # Stop / resume a DC's evaluation-server heartbeats (CP-13 local readiness fence).
+    heartbeat_stop_command: Optional[str] = None
+    heartbeat_resume_command: Optional[str] = None
+    # Flip ConsistencyMode and restart services (CP-14 mode toggle / rollback).
+    set_gatedcommit_command: Optional[str] = None
+    set_besteffort_command: Optional[str] = None
+    # Scrape the FeatBit.ControlPlane.Consistency meter (commits, evicted_commits, ...).
+    consistency_metrics_check_command: Optional[str] = None
 
 
 class ScenariosummaryJson(BaseModel):

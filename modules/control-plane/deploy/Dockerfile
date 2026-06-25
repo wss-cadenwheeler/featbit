@@ -12,6 +12,7 @@ COPY control-plane/*.slnx ./control-plane/
 
 COPY control-plane/src/Api/Api.csproj ./control-plane/src/Api/
 COPY control-plane/tests/Api.UnitTests/Api.UnitTests.csproj ./control-plane/tests/Api.UnitTests/
+COPY control-plane/tests/Api.IntegrationTests/Api.IntegrationTests.csproj ./control-plane/tests/Api.IntegrationTests/
 
 COPY back-end/src/Application/Application.csproj ./back-end/src/Application/
 COPY back-end/src/Domain/Domain.csproj ./back-end/src/Domain/
