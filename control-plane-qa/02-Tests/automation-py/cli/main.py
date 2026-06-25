@@ -23,6 +23,11 @@ from scenarios import (
     CP07Scenario,
     CP08Scenario,
     CP09Scenario,
+    CP10Scenario,
+    CP11Scenario,
+    CP12Scenario,
+    CP13Scenario,
+    CP14Scenario,
 )
 from scripts import seed_data as seed_module
 
@@ -61,7 +66,9 @@ def _log_reset_details(results: dict, log_detail: str = "summary") -> None:
         redis_west_ok=redis_west.get("success") if "redis_west" in available_components else None,
         redis_east_ok=redis_east.get("success") if "redis_east" in available_components else None,
         kafka_ok=kafka.get("success") if "kafka" in available_components else None,
-        mirrormaker_ok=mirrormakers.get("success") if "mirrormakers" in available_components else None,
+        mirrormaker_ok=(
+            mirrormakers.get("success") if "mirrormakers" in available_components else None
+        ),
         mongodb_ok=mongodb.get("success") if "mongodb" in available_components else None,
         available_components=available_components,
     )
@@ -194,7 +201,11 @@ def _log_sequence_details(results: dict, log_detail: str = "summary") -> None:
         for step in results.get("steps", []):
             logger.info("reset.sequence.step", step=step.get("name"), success=step.get("success"))
         logger.info("reset.sequence.health", health=results.get("health"))
-        logger.info("reset.sequence.api_scale", scale_down=results.get("api_scale_down"), scale_up=results.get("api_scale_up"))
+        logger.info(
+            "reset.sequence.api_scale",
+            scale_down=results.get("api_scale_down"),
+            scale_up=results.get("api_scale_up"),
+        )
         return
 
     for step in results.get("steps", []):
@@ -298,7 +309,9 @@ def cli(ctx: click.Context) -> None:
 )
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
-@click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
+@click.option(
+    "--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts")
+)
 def seed(
     seed_data: bool,
     env_id: Optional[str],
@@ -335,7 +348,7 @@ def seed(
             force_flags_off=True,
             verbose=log_detail == "verbose",
         )
-        click.echo(f"✓ Seed completed successfully")
+        click.echo("Seed completed successfully")
         click.echo(f"  Workspace: {result['workspace_id']}")
         click.echo(f"  Organization: {result['organization_id']}")
         click.echo(f"  Project: {result['project_id']}")
@@ -344,29 +357,39 @@ def seed(
         # Output in key=value format for shell capture
         click.echo(f"\nEnvironment: {result['environment_id']} ({result['env_id_guid']})")
     except Exception as e:
-        click.echo(f"✗ Seed failed: {e}", err=True)
+        click.echo(f"Seed failed: {e}", err=True)
         raise SystemExit(1)
 
 
 @cli.command()
-@click.argument("scenario", type=click.Choice([
-    "cp01-west-to-east",
-    "cp01-east-to-west",
-    "cp02-west-to-east",
-    "cp02-east-to-west",
-    "cp03-west-with-east-redis-outage",
-    "cp03-east-with-west-redis-outage",
-    "cp04-west-to-east",
-    "cp04-east-to-west",
-    "cp05-west-to-east",
-    "cp05-east-to-west",
-    "cp06-west-to-east",
-    "cp06-east-to-west",
-    "cp07-west-to-east",
-    "cp07-east-to-west",
-    "cp08-full-sync",
-    "cp09-pod-heartbeats",
-]))
+@click.argument(
+    "scenario",
+    type=click.Choice(
+        [
+            "cp01-west-to-east",
+            "cp01-east-to-west",
+            "cp02-west-to-east",
+            "cp02-east-to-west",
+            "cp03-west-with-east-redis-outage",
+            "cp03-east-with-west-redis-outage",
+            "cp04-west-to-east",
+            "cp04-east-to-west",
+            "cp05-west-to-east",
+            "cp05-east-to-west",
+            "cp06-west-to-east",
+            "cp06-east-to-west",
+            "cp07-west-to-east",
+            "cp07-east-to-west",
+            "cp08-full-sync",
+            "cp09-pod-heartbeats",
+            "cp10-gatedcommit-happy-path",
+            "cp11-gatedcommit-eviction",
+            "cp12-gatedcommit-recovery",
+            "cp13-gatedcommit-degraded-health",
+            "cp14-consistency-mode-toggle",
+        ]
+    ),
+)
 @click.option("--env-id", required=True, help="Environment ID")
 @click.option(
     "--west-api-base-url",
@@ -419,7 +442,9 @@ def seed(
 @click.option("--start-disruption", default=lambda: get_env("START_DISRUPTION_COMMAND", ""))
 @click.option("--stop-disruption", default=lambda: get_env("STOP_DISRUPTION_COMMAND", ""))
 @click.option("--source-topic-check", default=lambda: get_env("SOURCE_TOPIC_CHECK_COMMAND", ""))
-@click.option("--downstream-topic-check", default=lambda: get_env("DOWNSTREAM_TOPIC_CHECK_COMMAND", ""))
+@click.option(
+    "--downstream-topic-check", default=lambda: get_env("DOWNSTREAM_TOPIC_CHECK_COMMAND", "")
+)
 @click.option("--retry-log-check", default=lambda: get_env("RETRY_LOG_CHECK_COMMAND", ""))
 @click.option("--redis-west-check", default=lambda: get_env("REDIS_WEST_CHECK_COMMAND", ""))
 @click.option("--redis-east-check", default=lambda: get_env("REDIS_EAST_CHECK_COMMAND", ""))
@@ -465,7 +490,47 @@ def seed(
     show_default=True,
     help="Route CP-09 WebSocket clients through the nginx LB (default) or pin VUs per cluster",
 )
-@click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
+@click.option(
+    "--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts")
+)
+# --- GatedCommit consistency options (CP-10 - CP-14) ---------------------------------
+@click.option(
+    "--consistency-mode",
+    type=click.Choice(["GatedCommit", "BestEffort"], case_sensitive=False),
+    default=lambda: get_env("CONSISTENCY_MODE", "GatedCommit"),
+    help="Consistency mode the deployment is running in (CP-10 - CP-14)",
+)
+@click.option(
+    "--lease-ttl-seconds", type=int, default=lambda: int(get_env("LEASE_TTL_SECONDS", "15"))
+)
+@click.option(
+    "--commit-coordinator-interval-seconds",
+    type=int,
+    default=lambda: int(get_env("COMMIT_COORDINATOR_INTERVAL_SECONDS", "5")),
+)
+@click.option(
+    "--recovery-interval-seconds",
+    type=int,
+    default=lambda: int(get_env("RECOVERY_INTERVAL_SECONDS", "10")),
+)
+@click.option(
+    "--heartbeat-staleness-threshold-seconds",
+    type=int,
+    default=lambda: int(get_env("HEARTBEAT_STALENESS_THRESHOLD_SECONDS", "180")),
+)
+@click.option("--segment-key", default=lambda: get_env("SEGMENT_KEY", ""))
+@click.option("--west-eval-readiness-url", default=lambda: get_env("WEST_EVAL_READINESS_URL", ""))
+@click.option("--east-eval-readiness-url", default=lambda: get_env("EAST_EVAL_READINESS_URL", ""))
+@click.option("--stage-block-start", default=lambda: get_env("STAGE_BLOCK_START_COMMAND", ""))
+@click.option("--stage-block-stop", default=lambda: get_env("STAGE_BLOCK_STOP_COMMAND", ""))
+@click.option("--heartbeat-stop", default=lambda: get_env("HEARTBEAT_STOP_COMMAND", ""))
+@click.option("--heartbeat-resume", default=lambda: get_env("HEARTBEAT_RESUME_COMMAND", ""))
+@click.option("--set-gatedcommit", default=lambda: get_env("SET_GATEDCOMMIT_COMMAND", ""))
+@click.option("--set-besteffort", default=lambda: get_env("SET_BESTEFFORT_COMMAND", ""))
+@click.option(
+    "--consistency-metrics-check",
+    default=lambda: get_env("CONSISTENCY_METRICS_CHECK_COMMAND", ""),
+)
 def scenario(
     scenario: str,
     env_id: str,
@@ -499,6 +564,21 @@ def scenario(
     ws_lb_port: int,
     ws_use_load_balancer: bool,
     artifacts_root: str,
+    consistency_mode: str,
+    lease_ttl_seconds: int,
+    commit_coordinator_interval_seconds: int,
+    recovery_interval_seconds: int,
+    heartbeat_staleness_threshold_seconds: int,
+    segment_key: str,
+    west_eval_readiness_url: str,
+    east_eval_readiness_url: str,
+    stage_block_start: str,
+    stage_block_stop: str,
+    heartbeat_stop: str,
+    heartbeat_resume: str,
+    set_gatedcommit: str,
+    set_besteffort: str,
+    consistency_metrics_check: str,
 ) -> None:
     """Run a single scenario."""
     config = ScenarioConfig(
@@ -536,6 +616,21 @@ def scenario(
         ws_lb_host=ws_lb_host,
         ws_lb_port=ws_lb_port,
         ws_use_load_balancer=ws_use_load_balancer,
+        consistency_mode=consistency_mode,
+        lease_ttl_seconds=lease_ttl_seconds,
+        commit_coordinator_interval_seconds=commit_coordinator_interval_seconds,
+        recovery_interval_seconds=recovery_interval_seconds,
+        heartbeat_staleness_threshold_seconds=heartbeat_staleness_threshold_seconds,
+        segment_key=segment_key or None,
+        west_eval_readiness_url=west_eval_readiness_url or None,
+        east_eval_readiness_url=east_eval_readiness_url or None,
+        stage_block_start_command=stage_block_start or None,
+        stage_block_stop_command=stage_block_stop or None,
+        heartbeat_stop_command=heartbeat_stop or None,
+        heartbeat_resume_command=heartbeat_resume or None,
+        set_gatedcommit_command=set_gatedcommit or None,
+        set_besteffort_command=set_besteffort or None,
+        consistency_metrics_check_command=consistency_metrics_check or None,
     )
 
     if scenario.startswith("cp01"):
@@ -554,18 +649,28 @@ def scenario(
         scenario_obj = CP07Scenario(config)
     elif scenario.startswith("cp08"):
         scenario_obj = CP08Scenario(config)
-    else:
+    elif scenario.startswith("cp09"):
         scenario_obj = CP09Scenario(config)
+    elif scenario.startswith("cp10"):
+        scenario_obj = CP10Scenario(config)
+    elif scenario.startswith("cp11"):
+        scenario_obj = CP11Scenario(config)
+    elif scenario.startswith("cp12"):
+        scenario_obj = CP12Scenario(config)
+    elif scenario.startswith("cp13"):
+        scenario_obj = CP13Scenario(config)
+    else:
+        scenario_obj = CP14Scenario(config)
 
     click.echo(f"Running {scenario}...")
     passed = scenario_obj.run()
 
     if passed:
-        click.echo(f"✓ PASS: {scenario}")
+        click.echo(f"PASS: {scenario}")
         click.echo(f"  Artifacts: {scenario_obj.artifact_dir}")
         raise SystemExit(0)
     else:
-        click.echo(f"✗ FAIL: {scenario}")
+        click.echo(f"FAIL: {scenario}")
         click.echo("")
 
         failed = scenario_obj.assertions.get_failed()
@@ -573,15 +678,17 @@ def scenario(
         failed_count = scenario_obj.assertions.get_failed_count()
         skipped_count = scenario_obj.assertions.get_skipped_count()
 
-        click.echo(f"Results: {passed_count} passed | {failed_count} FAILED | {skipped_count} skipped")
+        click.echo(
+            f"Results: {passed_count} passed | {failed_count} FAILED | {skipped_count} skipped"
+        )
         click.echo("")
 
         if failed:
             click.echo("Failed Assertions:")
             for assertion in failed:
-                click.echo(f"  ✗ {assertion.name}")
+                click.echo(f"  - {assertion.name}")
                 if assertion.details:
-                    click.echo(f"    └─ {assertion.details}")
+                    click.echo(f"      {assertion.details}")
             click.echo("")
 
         click.echo(f"Artifacts Directory: {scenario_obj.artifact_dir}")
@@ -648,7 +755,10 @@ class _null_context:
 
 
 @cli.command()
-@click.argument("suite", type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08", "cp09"]))
+@click.argument(
+    "suite",
+    type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08", "cp09"]),
+)
 @click.option(
     "--seed-data",
     is_flag=True,
@@ -754,7 +864,9 @@ class _null_context:
     show_default=True,
     help="Route CP-09 WebSocket clients through the nginx LB (default) or pin VUs per cluster",
 )
-@click.option("--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts"))
+@click.option(
+    "--artifacts-root", default=lambda: get_env("ARTIFACTS_ROOT", "control-plane-qa/artifacts")
+)
 @click.option(
     "--chaos-mesh-manifest",
     default=lambda: get_env("CHAOS_MESH_MANIFEST", "k8s/chaos-mesh/redis-network-loss.yaml"),
@@ -836,7 +948,7 @@ def suite(
         scenario_names=scenario_names,
     )
 
-    with (dashboard if use_dashboard else _null_context()):
+    with dashboard if use_dashboard else _null_context():
         if reset_env:
             logger.info(
                 "suite.reset.started",
@@ -1015,9 +1127,7 @@ def suite(
             else:
                 _log_scenario_failure_details(scenario_name, scenario_obj)
                 if use_dashboard:
-                    failed_names = ", ".join(
-                        a.name for a in scenario_obj.assertions.get_failed()
-                    )
+                    failed_names = ", ".join(a.name for a in scenario_obj.assertions.get_failed())
                     dashboard.update_scenario(scenario_name, "failed", detail=failed_names)
                 all_passed = False
 
