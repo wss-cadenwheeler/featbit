@@ -757,7 +757,24 @@ class _null_context:
 @cli.command()
 @click.argument(
     "suite",
-    type=click.Choice(["cp01", "cp02", "cp03", "cp04", "cp05", "cp06", "cp07", "cp08", "cp09"]),
+    type=click.Choice(
+        [
+            "cp01",
+            "cp02",
+            "cp03",
+            "cp04",
+            "cp05",
+            "cp06",
+            "cp07",
+            "cp08",
+            "cp09",
+            "cp10",
+            "cp11",
+            "cp12",
+            "cp13",
+            "cp14",
+        ]
+    ),
 )
 @click.option(
     "--seed-data",
@@ -873,6 +890,40 @@ class _null_context:
     help="Path to the Chaos Mesh NetworkChaos manifest for Redis disruption (CP-03). Relative paths resolve from control-plane-qa/.",
 )
 @click.option(
+    "--consistency-mode",
+    type=click.Choice(["GatedCommit", "BestEffort"], case_sensitive=False),
+    default=lambda: get_env("CONSISTENCY_MODE", "GatedCommit"),
+    help="Mode the deployment runs in (CP-10 - CP-14). The suite does NOT flip cluster config.",
+)
+@click.option(
+    "--cross-dc-partition-manifest",
+    default=lambda: get_env(
+        "CROSS_DC_PARTITION_MANIFEST", "01-Infrastructure/chaos-mesh/cross-dc-partition.yaml"
+    ),
+    help="NetworkChaos manifest severing the cross-DC link (CP-11/CP-12). Relative paths "
+    "resolve from control-plane-qa/.",
+)
+@click.option(
+    "--eval-kafka-partition-manifest",
+    default=lambda: get_env(
+        "EVAL_KAFKA_PARTITION_MANIFEST", "01-Infrastructure/chaos-mesh/eval-kafka-partition.yaml"
+    ),
+    help="NetworkChaos manifest severing eval<->kafka in east (CP-13). Relative paths resolve "
+    "from control-plane-qa/.",
+)
+@click.option(
+    "--east-eval-readiness-url",
+    default=lambda: get_env("EAST_EVAL_READINESS_URL", ""),
+    help="Host-reachable east eval /health/readiness URL for CP-13 (e.g. via port-forward); "
+    "CP-13 skips its fence assertions when unset.",
+)
+@click.option(
+    "--heartbeat-staleness-threshold-seconds",
+    type=int,
+    default=lambda: int(get_env("HEARTBEAT_STALENESS_THRESHOLD_SECONDS", "180")),
+    help="CP-13 staleness threshold; must match the eval deployment's configured value.",
+)
+@click.option(
     "--no-dashboard",
     is_flag=True,
     default=False,
@@ -907,6 +958,11 @@ def suite(
     ws_use_load_balancer: bool,
     artifacts_root: str,
     chaos_mesh_manifest: str,
+    consistency_mode: str,
+    cross_dc_partition_manifest: str,
+    eval_kafka_partition_manifest: str,
+    east_eval_readiness_url: str,
+    heartbeat_staleness_threshold_seconds: int,
     no_dashboard: bool,
 ) -> None:
     """Run a test suite (CP-01, CP-02, CP-03, or CP-04)."""
@@ -917,6 +973,10 @@ def suite(
         "ff-cp02-west",
         "ff-cp02-east",
         "ff-cp03-resilience",
+        "ff-cp10-gatedcommit",
+        "ff-cp11-eviction",
+        "ff-cp12-recovery",
+        "ff-cp14-mode",
     ]
     if suite == "cp01":
         scenario_names = ["cp01-west-to-east", "cp01-east-to-west"]
@@ -937,8 +997,18 @@ def suite(
         scenario_names = ["cp07-west-to-east", "cp07-east-to-west"]
     elif suite == "cp08":
         scenario_names = ["cp08-full-sync"]
-    else:
+    elif suite == "cp09":
         scenario_names = ["cp09-pod-heartbeats"]
+    elif suite == "cp10":
+        scenario_names = ["cp10-gatedcommit-happy-path"]
+    elif suite == "cp11":
+        scenario_names = ["cp11-gatedcommit-eviction"]
+    elif suite == "cp12":
+        scenario_names = ["cp12-gatedcommit-recovery"]
+    elif suite == "cp13":
+        scenario_names = ["cp13-gatedcommit-degraded-health"]
+    else:
+        scenario_names = ["cp14-consistency-mode-toggle"]
 
     dashboard = SuiteDashboard(
         suite=suite,
@@ -1030,11 +1100,22 @@ def suite(
             click.echo("Error: --env-id required unless --seed-data is used", err=True)
             raise SystemExit(1)
 
+        def _resolve_manifest(p: str) -> str:
+            mp = Path(p)
+            if not mp.is_absolute():
+                # Relative paths resolve from control-plane-qa/ (parents[3] of cli/main.py).
+                mp = Path(__file__).resolve().parents[3] / mp
+            return str(mp.resolve())
+
         all_passed = True
         for scenario_name in scenario_names:
-            # Build per-scenario disruption commands for CP-03.
+            # Build per-scenario disruption commands.
             start_cmd = None
             stop_cmd = None
+            partition_start_cmd = None
+            partition_stop_cmd = None
+            heartbeat_stop_cmd = None
+            heartbeat_resume_cmd = None
             if scenario_name.startswith("cp03"):
                 _manifest = Path(chaos_mesh_manifest)
                 if not _manifest.is_absolute():
@@ -1047,6 +1128,21 @@ def suite(
                     target_context = "west"
                 start_cmd = f"kubectl apply -f {manifest_path} --context {target_context}"
                 stop_cmd = f"kubectl delete -f {manifest_path} --context {target_context} --ignore-not-found"
+            elif scenario_name.startswith(("cp11", "cp12")):
+                # CP-11/CP-12: one cross-DC partition (apply/delete in both clusters).
+                _m = _resolve_manifest(cross_dc_partition_manifest)
+                partition_start_cmd = (
+                    f"kubectl --context west apply -f {_m} && kubectl --context east apply -f {_m}"
+                )
+                partition_stop_cmd = (
+                    f"kubectl --context west delete -f {_m} --ignore-not-found && "
+                    f"kubectl --context east delete -f {_m} --ignore-not-found"
+                )
+            elif scenario_name.startswith("cp13"):
+                # CP-13: intra-east eval<->kafka partition (local heartbeat break).
+                _m = _resolve_manifest(eval_kafka_partition_manifest)
+                heartbeat_stop_cmd = f"kubectl --context east apply -f {_m}"
+                heartbeat_resume_cmd = f"kubectl --context east delete -f {_m} --ignore-not-found"
 
             config = ScenarioConfig(
                 scenario_name=scenario_name,
@@ -1081,6 +1177,13 @@ def suite(
                 ws_lb_host=ws_lb_host,
                 ws_lb_port=ws_lb_port,
                 ws_use_load_balancer=ws_use_load_balancer,
+                consistency_mode=consistency_mode,
+                partition_start_command=partition_start_cmd,
+                partition_stop_command=partition_stop_cmd,
+                heartbeat_stop_command=heartbeat_stop_cmd,
+                heartbeat_resume_command=heartbeat_resume_cmd,
+                east_eval_readiness_url=east_eval_readiness_url or None,
+                heartbeat_staleness_threshold_seconds=heartbeat_staleness_threshold_seconds,
             )
 
             if scenario_name.startswith("cp01"):
@@ -1099,8 +1202,18 @@ def suite(
                 scenario_obj = CP07Scenario(config)
             elif scenario_name.startswith("cp08"):
                 scenario_obj = CP08Scenario(config)
-            else:
+            elif scenario_name.startswith("cp09"):
                 scenario_obj = CP09Scenario(config)
+            elif scenario_name.startswith("cp10"):
+                scenario_obj = CP10Scenario(config)
+            elif scenario_name.startswith("cp11"):
+                scenario_obj = CP11Scenario(config)
+            elif scenario_name.startswith("cp12"):
+                scenario_obj = CP12Scenario(config)
+            elif scenario_name.startswith("cp13"):
+                scenario_obj = CP13Scenario(config)
+            else:
+                scenario_obj = CP14Scenario(config)
 
             if use_dashboard:
                 _sname = scenario_name
