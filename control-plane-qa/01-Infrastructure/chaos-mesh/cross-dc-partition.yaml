@@ -1,0 +1,33 @@
+# Cross-DC network partition for GatedCommit consistency tests (CP-11 / CP-12).
+#
+# All cross-cluster traffic in the control-plane-qa topology funnels through the host
+# bridge IP (the kubectl port-forwards for redis 6379/6380, kafka, and the Mongo
+# replicaset NodePorts). Blocking each featbit pod's EGRESS to that host IP severs the
+# cross-DC link regardless of port-forward tunneling, because we block the initiating
+# pod's outbound connection at its own netns. Intra-cluster pod-to-pod traffic does not
+# transit the host, so it stays up — a clean partition of just the east<->west link.
+#
+# Apply in BOTH clusters to produce a mutual partition (a real network partition is
+# bidirectional). West retains Mongo replica-set majority (2 of 3 nodes), so west stays
+# writable and east becomes the isolated/evicted DC — the asymmetry CP-11/CP-12 need.
+#
+# Usage:
+#   start: kubectl --context <west|east> apply  -f cross-dc-partition.yaml
+#   stop:  kubectl --context <west|east> delete -f cross-dc-partition.yaml --ignore-not-found
+#
+# HOST_BRIDGE_IP is templated by the scenario at apply time (default 172.31.128.1).
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: cross-dc-partition
+  namespace: chaos-mesh
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces:
+      - featbit
+  direction: both
+  externalTargets:
+    - "172.31.128.1"
+  duration: "10m"

@@ -1,12 +1,13 @@
-"""CP-12: GatedCommit Recovery Backfill (Returning DC).
+"""CP-12: GatedCommit Recovery Backfill (cross-DC partition).
 
 Automates control-plane-qa/02-Tests/manual_scripts/consistency/GatedCommitRecovery.md.
 
-A DC that dropped out (lease expired) and returns must be backfilled by the recovery
-worker with the current committed flag (and segment) state before it rejoins. Requires
-heartbeat stop/resume commands for the target DC. The segment-membership edit step is
-left as a skipped assertion (the segment update API path is out of scope for this
-generator); segment *pointer* backfill is checked when a segment id is available.
+Uses a single cross-DC network partition (chaos-mesh NetworkChaos on both clusters) to
+take the target DC out: while partitioned it misses commits (its Redis goes stale) and
+is evicted, so the survivor commits alone. Healing the partition makes the target
+"return", and the recovery worker backfills its Redis with the current committed flag
+(and segment) state. The segment-membership edit is out of scope (skipped); segment
+pointer backfill is checked when a segment id is available.
 """
 
 import time
@@ -23,7 +24,7 @@ class CP12Scenario(ConsistencyScenarioBase):
     SEGMENT_KEY = "seg-cp12-recovery"
 
     def definition(self) -> ScenarioDefinition:
-        # Source = west (stays live, accepts changes), target = east (drops, returns).
+        # Source = west (survivor), target = east (partitioned, then recovered).
         return ScenarioDefinition(
             scenario_type="cp12",
             source_region="west",
@@ -50,11 +51,11 @@ class CP12Scenario(ConsistencyScenarioBase):
                 )
                 return self.assertions.all_passed()
 
-            if not self.config.heartbeat_stop_command:
+            if not self.config.partition_start_command:
                 self.assertions.add_skip(
-                    "heartbeat-stop-configured",
-                    "No heartbeat_stop_command configured; cannot take the target DC out to "
-                    "exercise recovery backfill.",
+                    "partition-configured",
+                    "No partition_start_command configured; cannot sever the cross-DC link "
+                    "to take the target DC out and exercise recovery backfill.",
                 )
                 return self.assertions.all_passed()
 
@@ -66,61 +67,81 @@ class CP12Scenario(ConsistencyScenarioBase):
                 return self.assertions.all_passed()
             self.assertions.add_pass("flag-id-resolved", f"flag_id={flag_id}.")
 
-            # --- Phase 1: Drop target out -----------------------------------------
-            self.add_timeline_event("phase-start", phase="phase-1-drop-target")
-            self.run_named_command(
-                "heartbeat-stop", self.config.heartbeat_stop_command, required=True
-            )
-            evict_wait = self.config.lease_ttl_seconds + 5
-            time.sleep(evict_wait)
+            partitioned = False
+            src_ts = None
+            try:
+                # --- Phase 1: Partition the target out ----------------------------
+                self.add_timeline_event("phase-start", phase="phase-1-partition")
+                baseline_src = self.get_committed_pointer(source_ctx, "flag", flag_id)
+                self.run_named_command(
+                    "partition-start", self.config.partition_start_command, required=True
+                )
+                partitioned = True
+                time.sleep(self.config.commit_coordinator_interval_seconds)
 
-            # --- Phase 2: Make a committed change while target is absent -----------
-            self.add_timeline_event("phase-start", phase="phase-2-change-while-absent")
-            baseline_src = self.get_committed_pointer(source_ctx, "flag", flag_id)
-            self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
-            # Source commits via eviction (no live target to gate on). A committed
-            # pointer already exists from the prior state, so wait for it to ADVANCE
-            # past the baseline rather than merely be present.
-            committed_src, src_ts = self.poll_committed_pointer(
-                source_ctx, "flag", flag_id, advanced_from=baseline_src
-            )
-            self.assertions.add(
-                "committed-on-source-while-absent",
-                bool(committed_src),
-                f"Source {source_ctx} committed to {src_ts} while target was evicted "
-                f"(baseline {baseline_src}).",
-                "evaluated",
-            )
+                # --- Phase 2: Commit on the survivor while the target is absent ----
+                self.add_timeline_event("phase-start", phase="phase-2-change-while-absent")
+                self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
+                # A committed pointer already exists, so wait for it to ADVANCE past the
+                # baseline (the survivor commits once the target's lease expires).
+                evict_timeout = (
+                    self.config.lease_ttl_seconds
+                    + self.config.commit_coordinator_interval_seconds
+                    + self.config.timeout_seconds
+                )
+                committed_src, src_ts = self.poll_committed_pointer(
+                    source_ctx, "flag", flag_id, advanced_from=baseline_src, timeout=evict_timeout
+                )
+                self.assertions.add(
+                    "committed-on-source-while-absent",
+                    bool(committed_src),
+                    f"Survivor {source_ctx} committed to {src_ts} while the target was "
+                    f"partitioned/evicted (baseline {baseline_src}).",
+                    "evaluated",
+                )
 
-            # Target Redis should now be stale (still at the old pointer, or unreachable).
-            target_before = self.get_committed_pointer(target_ctx, "flag", flag_id)
-            self.assertions.add(
-                "target-stale-before-recovery",
-                target_before != src_ts,
-                f"Target {target_ctx} pointer ({target_before}) is stale vs source ({src_ts}) "
-                "before recovery.",
-                "evaluated",
-            )
+                # The partitioned target must be stale (missed the commit).
+                target_before = self.get_committed_pointer(target_ctx, "flag", flag_id)
+                self.assertions.add(
+                    "target-stale-before-recovery",
+                    target_before != src_ts,
+                    f"Partitioned target {target_ctx} pointer ({target_before}) is stale vs "
+                    f"survivor ({src_ts}) before recovery.",
+                    "evaluated",
+                )
 
-            # --- Phase 3: Bring target back -> recovery worker backfills -----------
-            self.add_timeline_event("phase-start", phase="phase-3-recover")
-            self.run_named_command(
-                "heartbeat-resume", self.config.heartbeat_resume_command, required=True
-            )
+                # --- Phase 3: Heal -> recovery worker backfills the target --------
+                self.add_timeline_event("phase-start", phase="phase-3-recover")
+                self.run_named_command(
+                    "partition-stop", self.config.partition_stop_command, required=True
+                )
+                partitioned = False
+            finally:
+                if partitioned:
+                    self.run_named_command(
+                        "partition-stop-cleanup",
+                        self.config.partition_stop_command,
+                        required=False,
+                    )
+
             recovery_timeout = (
                 self.config.recovery_interval_seconds * 3 + self.config.timeout_seconds
             )
-            backfilled, observed_ts = self.poll_committed_pointer(
-                target_ctx, "flag", flag_id, expect_ts=src_ts, timeout=recovery_timeout
+            # After heal the pointer may re-commit/advance again, so assert the target
+            # CONVERGES with the survivor (both equal, non-null) and has moved off its
+            # stale value — rather than matching the exact ts captured during the partition.
+            converged, observed = self.poll_committed_convergence(
+                "flag", flag_id, [source_ctx, target_ctx], timeout=recovery_timeout
             )
+            observed_ts = observed.get(target_ctx)
             self.assertions.add(
                 "flag-backfilled-on-recovery",
-                backfilled,
-                f"Target {target_ctx} committed pointer backfilled to {observed_ts} "
-                f"(matches source {src_ts}) after recovery.",
+                converged and observed_ts != target_before,
+                f"Target {target_ctx} committed pointer backfilled to {observed_ts} and "
+                f"converged with survivor {observed.get(source_ctx)} after recovery "
+                f"(was stale at {target_before}).",
                 "evaluated",
             )
-            # The committed versioned snapshot must also be present in the recovered DC.
             staged = self.staged_versions(target_ctx, "flag", flag_id)
             self.assertions.add(
                 "flag-version-present-after-recovery",
@@ -153,8 +174,6 @@ class CP12Scenario(ConsistencyScenarioBase):
                     "segment_ids_by_key to cover segment recovery).",
                 )
 
-            # The SDK-serving check (eval endpoint) and segment-membership edit are not
-            # automated here; the committed pointer is the gated read source of truth.
             self.assertions.add_skip(
                 "sdk-serves-committed-value",
                 "Verifying an SDK/eval-endpoint evaluation in the recovered DC is not "
@@ -173,7 +192,7 @@ class CP12Scenario(ConsistencyScenarioBase):
         except Exception as exc:  # noqa: BLE001
             self.assertions.add_fail("runner-execution", str(exc))
             self.run_named_command(
-                "heartbeat-resume", self.config.heartbeat_resume_command, required=False
+                "partition-stop", self.config.partition_stop_command, required=False
             )
             return False
         finally:

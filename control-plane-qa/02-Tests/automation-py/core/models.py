@@ -186,10 +186,13 @@ class ScenarioConfig:
     segment_key: Optional[str] = None
     west_eval_readiness_url: Optional[str] = None
     east_eval_readiness_url: Optional[str] = None
-    # Block the control plane from staging into one DC's Redis (commit gating test).
-    stage_block_start_command: Optional[str] = None
-    stage_block_stop_command: Optional[str] = None
-    # Stop / resume a DC's evaluation-server heartbeats (eviction, recovery, fence).
+    # Sever / heal the cross-DC network link (CP-11 eviction, CP-12 recovery). A single
+    # partition models a real DC outage: the isolated DC's Redis goes stale AND its lease
+    # expires (evicted), then heals/recovers. Typically a chaos-mesh NetworkChaos applied
+    # to both clusters.
+    partition_start_command: Optional[str] = None
+    partition_stop_command: Optional[str] = None
+    # Stop / resume a DC's evaluation-server heartbeats (CP-13 local readiness fence).
     heartbeat_stop_command: Optional[str] = None
     heartbeat_resume_command: Optional[str] = None
     # Flip ConsistencyMode and restart services (CP-14 mode toggle / rollback).

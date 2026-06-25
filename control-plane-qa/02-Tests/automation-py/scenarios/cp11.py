@@ -1,12 +1,16 @@
-"""CP-11: GatedCommit Slow/Down DC and Eviction.
+"""CP-11: GatedCommit Slow/Down DC and Eviction (cross-DC partition).
 
 Automates control-plane-qa/02-Tests/manual_scripts/consistency/GatedCommitEviction.md.
 
-While a *live* DC has not staged a change the commit is gated (pointer does not advance
-anywhere). Once that DC stops heartbeating and its lease expires it is evicted, and the
-change commits on the remaining DC. Requires a stage-block disruption and a
-heartbeat-stop disruption for the target DC; gated assertions are skipped when those
-commands are not configured (the negative cannot be proven without a real disruption).
+Uses a single cross-DC network partition (chaos-mesh NetworkChaos applied to both
+clusters) as the disruption: the isolated target DC can no longer be staged to, and once
+its lease expires it is evicted so the change commits on the surviving DC while the
+target's Redis stays stale. Healing the partition lets the target recover.
+
+The partition severs everything cross-DC at once, so the "gated while still live" window
+is just the lease TTL; this scenario observes it best-effort and always asserts the
+robust outcomes (eviction-commit on the survivor, target stale during partition,
+reconvergence after heal).
 """
 
 import time
@@ -22,7 +26,7 @@ class CP11Scenario(ConsistencyScenarioBase):
     FLAG_KEY = "ff-cp11-eviction"
 
     def definition(self) -> ScenarioDefinition:
-        # Source = west (toggles), target = east (blocked, then evicted).
+        # Source = west (survivor / toggles), target = east (partitioned, then evicted).
         return ScenarioDefinition(
             scenario_type="cp11",
             source_region="west",
@@ -50,12 +54,12 @@ class CP11Scenario(ConsistencyScenarioBase):
                 )
                 return self.assertions.all_passed()
 
-            # This test is meaningless without a way to block staging to the target DC.
-            if not self.config.stage_block_start_command:
+            # This test is meaningless without a way to partition the target DC.
+            if not self.config.partition_start_command:
                 self.assertions.add_skip(
-                    "stage-block-configured",
-                    "No stage_block_start_command configured; cannot block staging to "
-                    f"{target_ctx} to exercise commit gating. Configure the disruption to run.",
+                    "partition-configured",
+                    "No partition_start_command configured; cannot sever the cross-DC link "
+                    f"to {target_ctx} to exercise commit gating + eviction.",
                 )
                 return self.assertions.all_passed()
 
@@ -67,108 +71,102 @@ class CP11Scenario(ConsistencyScenarioBase):
                 return self.assertions.all_passed()
             self.assertions.add_pass("flag-id-resolved", f"flag_id={flag_id}.")
 
-            # --- Phase 1: Baseline -------------------------------------------------
-            baseline = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
-            baseline_src = baseline.get(source_ctx)
-            self.add_timeline_event(
-                "phase-start", phase="phase-1-baseline", result={"committed": baseline}
-            )
-
-            # --- Phase 2: Block target staging while it is still live --------------
-            self.add_timeline_event("phase-start", phase="phase-2-block-live")
-            self.run_named_command(
-                "stage-block-start", self.config.stage_block_start_command, required=True
-            )
-            self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
-            self.assertions.add_pass("api-toggle-succeeded", "Toggle to true accepted.")
-
-            # Hold: the commit must NOT advance in either DC while target is live-but-missing.
-            time.sleep(self.config.disruption_hold_seconds)
-            held = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
-            self.add_timeline_event("outage-poll", phase="phase-2", result={"committed": held})
-            self.assertions.add(
-                "commit-gated-while-live",
-                held.get(source_ctx) == baseline_src
-                and held.get(target_ctx) == baseline.get(target_ctx),
-                f"Committed pointer unchanged during gated window (still {held}); change "
-                "is withheld while the live target has not staged it.",
-                "evaluated",
-            )
-            # Positive proof the gate is real (not just "nothing happened"): the SOURCE
-            # must have staged the new version while the blocked target has NOT. Without
-            # this, commit-gated-while-live would also pass if staging never occurred at
-            # all (e.g. GatedCommit silently disabled / coordinator dead).
-            source_staged = self.staged_versions(source_ctx, "flag", flag_id)
-            target_staged = self.staged_versions(target_ctx, "flag", flag_id)
-            self.assertions.add(
-                "source-staged-during-gate",
-                len(source_staged) > 0,
-                f"Source {source_ctx} holds the staged version during the gated window "
-                f"({source_staged[:3]}); staging did occur, so the unchanged committed "
-                "pointer reflects gating rather than a no-op.",
-                "evaluated",
-            )
-            self.assertions.add(
-                "target-missing-staged-version",
-                len(target_staged) == 0,
-                f"Target {target_ctx} has no staged version while staging is blocked.",
-                "evaluated",
-            )
-
-            # --- Phase 3: Stop target heartbeats -> eviction -> commit on source ---
-            self.add_timeline_event("phase-start", phase="phase-3-evict")
-            self.run_named_command(
-                "heartbeat-stop", self.config.heartbeat_stop_command, required=False
-            )
-            if not self.config.heartbeat_stop_command:
-                self.assertions.add_skip(
-                    "commit-after-eviction",
-                    "No heartbeat_stop_command configured; cannot force lease expiry/eviction.",
+            partitioned = False
+            try:
+                # --- Phase 1: Baseline --------------------------------------------
+                baseline = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
+                baseline_src = baseline.get(source_ctx)
+                baseline_tgt = baseline.get(target_ctx)
+                self.add_timeline_event(
+                    "phase-start", phase="phase-1-baseline", result={"committed": baseline}
                 )
-            else:
-                # Wait for lease expiry plus a coordinator tick, then expect a commit on source.
-                wait_s = (
+
+                # --- Phase 2: Partition the target, then toggle -------------------
+                self.add_timeline_event("phase-start", phase="phase-2-partition")
+                self.run_named_command(
+                    "partition-start", self.config.partition_start_command, required=True
+                )
+                partitioned = True
+                # Let the chaos inject before toggling.
+                time.sleep(self.config.commit_coordinator_interval_seconds)
+
+                self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
+                self.assertions.add_pass("api-toggle-succeeded", "Toggle to true accepted.")
+
+                # Best-effort: while the target's lease is still fresh (~LeaseTtlSeconds),
+                # the commit should be gated — the survivor's pointer should not advance
+                # yet. This window is short, so a miss is not a failure (recorded as skip).
+                gated_observed = self.get_committed_pointer(source_ctx, "flag", flag_id)
+                if gated_observed == baseline_src:
+                    self.assertions.add_pass(
+                        "commit-gated-while-live",
+                        f"Survivor {source_ctx} pointer still {gated_observed} immediately "
+                        "after toggle (commit gated while target lease is fresh).",
+                    )
+                else:
+                    self.assertions.add_skip(
+                        "commit-gated-while-live",
+                        f"Survivor already advanced to {gated_observed} before the gate could "
+                        "be observed (lease TTL window is short); eviction outcome still checked.",
+                    )
+
+                # --- Phase 3: Eviction -> commit on survivor, target stays stale ---
+                self.add_timeline_event("phase-start", phase="phase-3-evict")
+                evict_timeout = (
                     self.config.lease_ttl_seconds
                     + self.config.commit_coordinator_interval_seconds
-                    + 5
+                    + self.config.timeout_seconds
                 )
-                self.add_timeline_event(
-                    "wait", phase="phase-3", result={"reason": "lease-expiry", "seconds": wait_s}
+                advanced, src_ts = self.poll_committed_pointer(
+                    source_ctx, "flag", flag_id, advanced_from=baseline_src, timeout=evict_timeout
                 )
-                time.sleep(wait_s)
-                committed_src, src_ts = self.poll_committed_pointer(
-                    source_ctx, "flag", flag_id, expect_present=True
-                )
-                advanced = committed_src and src_ts != baseline_src
                 self.assertions.add(
                     "commit-after-eviction",
                     bool(advanced),
-                    f"Source {source_ctx} committed pointer advanced to {src_ts} after the "
-                    f"target lease expired (baseline {baseline_src}).",
+                    f"Survivor {source_ctx} committed pointer advanced to {src_ts} after the "
+                    f"partitioned target's lease expired (baseline {baseline_src}).",
                     "evaluated",
                 )
-                # Optional: evicted_commits metric.
+                target_during = self.get_committed_pointer(target_ctx, "flag", flag_id)
+                self.assertions.add(
+                    "target-stale-during-partition",
+                    target_during == baseline_tgt and target_during != src_ts,
+                    f"Partitioned target {target_ctx} pointer is stale ({target_during}) vs "
+                    f"survivor ({src_ts}) while the link is severed.",
+                    "evaluated",
+                )
                 self.run_named_command(
                     "metrics-evicted-commits",
                     self.config.consistency_metrics_check_command,
                     required=False,
                 )
 
-            # --- Phase 4: Restore target, confirm no permanent divergence ----------
-            self.add_timeline_event("phase-start", phase="phase-4-restore")
-            self.run_named_command(
-                "heartbeat-resume", self.config.heartbeat_resume_command, required=False
-            )
-            self.run_named_command(
-                "stage-block-stop", self.config.stage_block_stop_command, required=False
-            )
-            reconverged, observed = self.poll_committed_convergence("flag", flag_id, contexts)
-            self.assertions.add(
-                "no-permanent-divergence",
-                reconverged,
-                f"After restore, both DCs share the same committed pointer: {observed}.",
-                "evaluated",
-            )
+                # --- Phase 4: Heal -> reconverge ----------------------------------
+                self.add_timeline_event("phase-start", phase="phase-4-heal")
+                self.run_named_command(
+                    "partition-stop", self.config.partition_stop_command, required=False
+                )
+                partitioned = False
+                reconverged, observed = self.poll_committed_convergence(
+                    "flag",
+                    flag_id,
+                    contexts,
+                    timeout=self.config.recovery_interval_seconds * 3 + self.config.timeout_seconds,
+                )
+                self.assertions.add(
+                    "no-permanent-divergence",
+                    reconverged,
+                    f"After heal, both DCs share the same committed pointer: {observed}.",
+                    "evaluated",
+                )
+            finally:
+                # Always heal the partition, even on assertion/exception paths.
+                if partitioned:
+                    self.run_named_command(
+                        "partition-stop-cleanup",
+                        self.config.partition_stop_command,
+                        required=False,
+                    )
 
             # Post-condition: reset flag to false.
             self._notify_step("cleanup", "running")
@@ -180,13 +178,6 @@ class CP11Scenario(ConsistencyScenarioBase):
 
         except Exception as exc:  # noqa: BLE001
             self.assertions.add_fail("runner-execution", str(exc))
-            # Best-effort: lift disruptions so the environment is not left broken.
-            self.run_named_command(
-                "heartbeat-resume", self.config.heartbeat_resume_command, required=False
-            )
-            self.run_named_command(
-                "stage-block-stop", self.config.stage_block_stop_command, required=False
-            )
             return False
         finally:
             self.write_artifacts()

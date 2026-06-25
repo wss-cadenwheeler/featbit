@@ -521,8 +521,8 @@ def seed(
 @click.option("--segment-key", default=lambda: get_env("SEGMENT_KEY", ""))
 @click.option("--west-eval-readiness-url", default=lambda: get_env("WEST_EVAL_READINESS_URL", ""))
 @click.option("--east-eval-readiness-url", default=lambda: get_env("EAST_EVAL_READINESS_URL", ""))
-@click.option("--stage-block-start", default=lambda: get_env("STAGE_BLOCK_START_COMMAND", ""))
-@click.option("--stage-block-stop", default=lambda: get_env("STAGE_BLOCK_STOP_COMMAND", ""))
+@click.option("--partition-start", default=lambda: get_env("PARTITION_START_COMMAND", ""))
+@click.option("--partition-stop", default=lambda: get_env("PARTITION_STOP_COMMAND", ""))
 @click.option("--heartbeat-stop", default=lambda: get_env("HEARTBEAT_STOP_COMMAND", ""))
 @click.option("--heartbeat-resume", default=lambda: get_env("HEARTBEAT_RESUME_COMMAND", ""))
 @click.option("--set-gatedcommit", default=lambda: get_env("SET_GATEDCOMMIT_COMMAND", ""))
@@ -572,8 +572,8 @@ def scenario(
     segment_key: str,
     west_eval_readiness_url: str,
     east_eval_readiness_url: str,
-    stage_block_start: str,
-    stage_block_stop: str,
+    partition_start: str,
+    partition_stop: str,
     heartbeat_stop: str,
     heartbeat_resume: str,
     set_gatedcommit: str,
@@ -624,8 +624,8 @@ def scenario(
         segment_key=segment_key or None,
         west_eval_readiness_url=west_eval_readiness_url or None,
         east_eval_readiness_url=east_eval_readiness_url or None,
-        stage_block_start_command=stage_block_start or None,
-        stage_block_stop_command=stage_block_stop or None,
+        partition_start_command=partition_start or None,
+        partition_stop_command=partition_stop or None,
         heartbeat_stop_command=heartbeat_stop or None,
         heartbeat_resume_command=heartbeat_resume or None,
         set_gatedcommit_command=set_gatedcommit or None,
