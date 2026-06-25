@@ -152,7 +152,63 @@ mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-
 
 ---
 
-## 7. Known limitations / open follow-ups
+## 7. Automated consistency tests (CP-10 – CP-14)
+
+The validation checklist above is automated by the `control-plane-qa` Python suite
+(`02-Tests/automation-py`) as scenarios **CP-10 – CP-14**. They observe Redis committed
+pointers / staged versions and the eval-server `/health` endpoints directly.
+
+**Prerequisites**
+
+1. **Deploy in GatedCommit mode.** Set `CONSISTENCY_MODE=GatedCommit` in `deployment.env`
+   (or the environment) before `Deploy-FeatBitClusters.ps1`. The deploy script then sets
+   `ControlPlane:ConsistencyMode=GatedCommit` on both control planes + eval servers and
+   labels each Redis instance with its `DcId` (see §2). The test suite does **not** flip
+   cluster mode — it only tells the scenario which mode to expect.
+2. **Install Chaos Mesh** (CP-11/CP-12/CP-13 only). The disruptions are chaos-mesh
+   `NetworkChaos` objects:
+   ```powershell
+   .\01-Infrastructure\extras\Deploy-ChaosMesh.ps1   # both clusters
+   ```
+   Manifests live in `01-Infrastructure/chaos-mesh/`:
+   - `cross-dc-partition.yaml` — severs the east↔west link (CP-11 eviction, CP-12 recovery)
+   - `eval-kafka-partition.yaml` — severs east eval↔kafka (CP-13 readiness fence)
+
+**Running them**
+
+| Scenario | What it asserts | Disruption (auto-wired by the suite) |
+|---|---|---|
+| CP-10 | stage→commit gating, committed-pointer convergence, staged versions | none |
+| CP-11 | gated-while-live, commit-after-eviction, target stale, reconvergence | cross-DC partition |
+| CP-12 | survivor commits while target absent, recovery backfill + convergence | cross-DC partition |
+| CP-13 | readiness 503 when heartbeats stale, liveness stays 200, recovery | eval↔kafka partition |
+| CP-14 | BestEffort vs GatedCommit shape, rollback | none |
+
+```powershell
+# from 02-Tests/automation-py, with the suite's CLI (poetry run automation ...)
+automation suite cp10 --env-id <env> --no-dashboard
+automation suite cp11 --env-id <env> --no-dashboard      # cross-DC partition auto-applied
+automation suite cp12 --env-id <env> --no-dashboard
+# CP-13 needs a host-reachable eval readiness URL (eval /health is ClusterIP-only):
+#   kubectl --context east -n featbit port-forward svc/evaluation-server 5198:5100
+# and a staleness threshold matching the deployment (lower both for a fast trip — see below).
+automation suite cp13 --env-id <env> --no-dashboard `
+  --east-eval-readiness-url http://localhost:5198/health/readiness `
+  --heartbeat-staleness-threshold-seconds 30
+```
+
+> **CP-13 timing:** the fence trips after `ControlPlane:HeartbeatStalenessThresholdSeconds`
+> (default 180s). For a fast test, set it low on the east eval deployment **and** pass the
+> same value to the suite — but keep it **above** `ControlPlane:HeartbeatIntervalSeconds`
+> (default 60s) or the pod looks stale between heartbeats and flaps. E.g. interval=5,
+> threshold=30.
+
+Scenarios that need a disruption **skip** (they do not fail) when their command is not
+configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gracefully.
+
+---
+
+## 8. Known limitations / open follow-ups
 
 - **Connected clients during a recovery** (#54): after a returned DC's Redis is backfilled, SDK
   clients that stayed connected through the outage keep stale values until they reconnect/next
