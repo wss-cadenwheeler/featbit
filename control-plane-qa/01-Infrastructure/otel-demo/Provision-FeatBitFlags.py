@@ -198,6 +198,85 @@ COMPONENTS = {
             },
         ],
     },
+    "accounting": {
+        "project_key": "otel-accounting",
+        "project_name": "otel-accounting",
+        "flags": [
+            {"key": "operational-ledger-persistence-enabled", "type": "boolean",
+             "description": "Ops kill-switch for writing ledger entries. Safe either way; default ON.",
+             "variations": [("true", "true"), ("false", "false")]},
+            {"key": "release-double-entry-bookkeeping", "type": "boolean",
+             "description": "Release gate for the new double-entry bookkeeping path. Default OFF.",
+             "variations": [("false", "false"), ("true", "true")]},
+            {"key": "experiment-currency-rounding", "type": "string",
+             "description": "A/B currency rounding strategy. Default 'bankers'. Unknown value -> error.",
+             "variations": [("bankers", "bankers"), ("half-up", "half-up"),
+                            ("truncate", "truncate"), ("midpoint", "midpoint")]},  # midpoint unhandled -> error
+        ],
+    },
+    "checkout": {
+        "project_key": "otel-checkout",
+        "project_name": "otel-checkout",
+        "flags": [
+            {"key": "operational-checkout-enabled", "type": "boolean",
+             "description": "Master ops kill-switch for checkout. Default ON; OFF returns a clean 'unavailable'.",
+             "variations": [("true", "true"), ("false", "false")]},
+            {"key": "release-express-checkout", "type": "boolean",
+             "description": "Release gate for express/one-click checkout. Default OFF.",
+             "variations": [("false", "false"), ("true", "true")]},
+            {"key": "experiment-shipping-cost-strategy", "type": "string",
+             "description": "A/B shipping cost strategy. Default 'standard'. Unknown value -> error.",
+             "variations": [("standard", "standard"), ("flat-rate", "flat-rate"),
+                            ("free-over-threshold", "free-over-threshold"), ("dynamic", "dynamic")]},  # dynamic unhandled -> error
+        ],
+    },
+    "fraud-detection": {
+        "project_key": "otel-fraud-detection",
+        "project_name": "otel-fraud-detection",
+        "flags": [
+            {"key": "operational-fraud-checks-enabled", "type": "boolean",
+             "description": "Ops kill-switch for fraud scoring. Default ON; OFF approves all (degraded).",
+             "variations": [("true", "true"), ("false", "false")]},
+            {"key": "release-ml-fraud-model-v2", "type": "boolean",
+             "description": "Release gate for the v2 ML fraud model. Default OFF.",
+             "variations": [("false", "false"), ("true", "true")]},
+            {"key": "experiment-fraud-risk-threshold", "type": "number",
+             "description": "A/B risk threshold 0-100. Default 80. Out-of-range (negative / >100) -> error.",
+             "variations": [("80", "80"), ("60", "60"), ("95", "95"), ("150", "150"), ("-1", "-1")]},  # 150/-1 out of range -> error
+        ],
+    },
+    "llm": {
+        "project_key": "otel-llm",
+        "project_name": "otel-llm",
+        "flags": [
+            {"key": "operational-ai-assistant-enabled", "type": "boolean",
+             "description": "Ops kill-switch for the AI assistant (cost/outage control). Default ON.",
+             "variations": [("true", "true"), ("false", "false")]},
+            {"key": "release-streaming-responses", "type": "boolean",
+             "description": "Release gate for streaming LLM responses. Default OFF.",
+             "variations": [("false", "false"), ("true", "true")]},
+            {"key": "experiment-llm-model", "type": "string",
+             "description": "A/B model selection. Default 'default'. Unknown model -> error.",
+             "variations": [("default", "default"), ("fast", "fast"),
+                            ("accurate", "accurate"), ("gpt-5", "gpt-5")]},  # gpt-5 unknown -> error
+        ],
+    },
+    "frontend": {
+        "project_key": "otel-frontend",
+        "project_name": "otel-frontend",
+        "flags": [
+            {"key": "release-redesigned-product-page", "type": "boolean",
+             "description": "Release gate for the redesigned product page. Default OFF.",
+             "variations": [("false", "false"), ("true", "true")]},
+            {"key": "operational-recommendations-enabled", "type": "boolean",
+             "description": "Ops toggle to show/hide the recommendations section. Default ON.",
+             "variations": [("true", "true"), ("false", "false")]},
+            {"key": "experiment-checkout-button-variant", "type": "string",
+             "description": "A/B checkout button variant. Default 'control'. Unknown variant -> error.",
+             "variations": [("control", "control"), ("variant-a", "variant-a"),
+                            ("variant-b", "variant-b"), ("variant-x", "variant-x")]},  # variant-x unhandled -> error
+        ],
+    },
 }
 
 

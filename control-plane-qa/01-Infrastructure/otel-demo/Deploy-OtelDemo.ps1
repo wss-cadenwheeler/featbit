@@ -38,7 +38,8 @@ param(
     [string[]]$Contexts = @("west", "east"),
     [string]$Namespace = "otel-demo",
     [string]$ChartVersion = "0.40.9",
-    [string[]]$FeatBitComponents = @("recommendation", "product-catalog", "cart", "ad", "payment"),
+    [string[]]$FeatBitComponents = @("recommendation", "product-catalog", "cart", "ad", "payment",
+                                     "accounting", "checkout", "fraud-detection", "llm", "frontend"),
     [string]$EvalHost = "featbit-eval.127.0.0.1.sslip.io"
 )
 

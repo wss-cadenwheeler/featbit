@@ -40,3 +40,28 @@ components:
     envOverrides:
       - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
       - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  accounting:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/accounting, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  checkout:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/checkout, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  fraud-detection:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/fraud-detection, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  llm:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/llm, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  frontend:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/frontend, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
