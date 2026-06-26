@@ -32,11 +32,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$FeatBitSecret = $env:FEATBIT_ENV_SECRET,
+    # JSON emitted by Provision-FeatBitFlags.py: [{component, server_secret, ...}].
+    # Each component is its own FeatBit project with its own server secret.
+    [string]$ProvisionFile,
     [string[]]$Contexts = @("west", "east"),
     [string]$Namespace = "otel-demo",
     [string]$ChartVersion = "0.40.9",
-    [string[]]$FeatBitComponents = @("recommendation"),
+    [string[]]$FeatBitComponents = @("recommendation", "product-catalog", "cart", "ad", "payment"),
     [string]$EvalHost = "featbit-eval.127.0.0.1.sslip.io"
 )
 
@@ -46,16 +48,23 @@ function Write-Ok   { param([string]$M) Write-Host "✓ $M" -ForegroundColor Gre
 function Write-Info { param([string]$M) Write-Host "  $M" -ForegroundColor Gray }
 function Write-Fail { param([string]$M) Write-Host "✗ $M" -ForegroundColor Red }
 
-if (-not $FeatBitSecret) {
-    Write-Fail "FeatBit env secret required. Pass -FeatBitSecret or set FEATBIT_ENV_SECRET."
-    Write-Info "Get it from: python3 Provision-FeatBitFlags.py --api http://featbit-api-west.127.0.0.1.sslip.io:8080"
-    exit 1
-}
-
 $root       = $PSScriptRoot
 $valuesMin  = Join-Path $root "values-min.yaml"
 $valuesFb   = Join-Path $root "values-featbit.yaml"
 foreach ($f in @($valuesMin, $valuesFb)) { if (-not (Test-Path $f)) { Write-Fail "Missing $f"; exit 1 } }
+
+# Map component -> server secret from the provision file.
+if (-not $ProvisionFile) { $ProvisionFile = Join-Path $root "build/featbit-otel-provision.json" }
+if (-not (Test-Path $ProvisionFile)) {
+    Write-Fail "Provision file not found: $ProvisionFile"
+    Write-Info "Run: python3 Provision-FeatBitFlags.py --api http://featbit-api-west.127.0.0.1.sslip.io:8080 > $ProvisionFile"
+    exit 1
+}
+$secretByComp = @{}
+foreach ($r in (Get-Content $ProvisionFile -Raw | ConvertFrom-Json)) { $secretByComp[$r.component] = $r.server_secret }
+foreach ($comp in $FeatBitComponents) {
+    if (-not $secretByComp[$comp]) { Write-Fail "No server secret for '$comp' in $ProvisionFile (provision it first)"; exit 1 }
+}
 
 Write-Step "Helm repo"
 & helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts *> $null
@@ -74,11 +83,15 @@ function Get-HostGatewayIp([string]$ctx) {
 foreach ($ctx in $Contexts) {
     Write-Step "Deploying otel-demo to '$ctx'"
 
-    # Secret appended as the next envOverrides entry (values-featbit.yaml uses [0],[1]).
-    $secretArgs = @(
-        "--set-string", "components.recommendation.envOverrides[2].name=FEATBIT_ENV_SECRET",
-        "--set-string", "components.recommendation.envOverrides[2].value=$FeatBitSecret"
-    )
+    # Each FeatBit component's OWN secret, appended as its envOverrides[2]
+    # (values-featbit.yaml supplies [0]=EVENT_URL, [1]=STREAMING_URL).
+    $secretArgs = @()
+    foreach ($comp in $FeatBitComponents) {
+        $secretArgs += @(
+            "--set-string", "components.$comp.envOverrides[2].name=FEATBIT_ENV_SECRET",
+            "--set-string", "components.$comp.envOverrides[2].value=$($secretByComp[$comp])"
+        )
+    }
 
     & helm upgrade --install otel-demo open-telemetry/opentelemetry-demo `
         --version $ChartVersion --kube-context $ctx `

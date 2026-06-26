@@ -95,9 +95,25 @@ foreach ($comp in $Components) {
     Copy-Item -Path (Join-Path $compCustom "*") -Destination $compSrc -Recurse -Force
 
     $image      = "$Registry/$Repo/${comp}:$tag"
-    $dockerfile = "src/$comp/Dockerfile"
-    Write-Info "docker build -f $dockerfile -t $image (context: $buildSrc)"
-    & docker build --pull -f (Join-Path $buildSrc $dockerfile) -t $image $buildSrc
+    # Most components keep their Dockerfile at src/<comp>/Dockerfile, but a few
+    # (e.g. cart) nest it at src/<comp>/src/Dockerfile. Detect it.
+    $dockerfile = @("src/$comp/Dockerfile", "src/$comp/src/Dockerfile") |
+        Where-Object { Test-Path (Join-Path $buildSrc $_) } | Select-Object -First 1
+    if (-not $dockerfile) { Write-Fail "No Dockerfile found for $comp"; exit 1 }
+
+    # Some component Dockerfiles need build args the demo normally sets via its
+    # compose/Makefile (e.g. ad needs OTEL_JAVA_AGENT_VERSION for the agent
+    # download). Source them from the demo's .env so direct docker build works.
+    $buildArgs = @()
+    $envFile = Join-Path $buildSrc ".env"
+    if (Test-Path $envFile) {
+        foreach ($k in @("OTEL_JAVA_AGENT_VERSION")) {
+            $m = Select-String -Path $envFile -Pattern "^$k=(.+)$" | Select-Object -First 1
+            if ($m) { $buildArgs += @("--build-arg", "$k=$($m.Matches[0].Groups[1].Value.Trim())") }
+        }
+    }
+    Write-Info "docker build -f $dockerfile -t $image (context: $buildSrc) $($buildArgs -join ' ')"
+    & docker build --pull -f (Join-Path $buildSrc $dockerfile) -t $image @buildArgs $buildSrc
     if ($LASTEXITCODE -ne 0) { Write-Fail "docker build failed for $comp"; exit 1 }
 
     & docker push $image

@@ -69,6 +69,135 @@ COMPONENTS = {
             },
         ],
     },
+    "ad": {
+        "project_key": "otel-ad",
+        "project_name": "otel-ad",
+        "flags": [
+            {
+                "key": "ad-personalization-enabled",
+                "type": "boolean",
+                "description": "Release flag gating the (safe) personalized-ad code path / span "
+                               "attributes. Safe either way; default OFF preserves current "
+                               "non-personalized behavior.",
+                "variations": [("false", "false"), ("true", "true")],
+                # default OFF = no personalization (safe, current behavior)
+            },
+            {
+                "key": "ad-max-count",
+                "type": "number",
+                "description": "Number of ads returned. Default 2. Applied without validation: "
+                               "a negative or too-large value surfaces a missing input-validation "
+                               "gap (subList out of range -> the service errors).",
+                "variations": [("2", "2"), ("1", "1"), ("4", "4"), ("100", "100"), ("-1", "-1")],
+                # 2 (default), 1, 4 safe; 100 too-large -> error; -1 negative -> error
+            },
+            {
+                "key": "ad-category",
+                "type": "string",
+                "description": "Experiment: which ad category to serve. Default 'all'. An "
+                               "unrecognized category surfaces an unknown-variant handling gap "
+                               "(enum valueOf -> the service errors).",
+                "variations": [
+                    ("all", "all"),
+                    ("telescopes", "telescopes"),
+                    ("accessories", "accessories"),
+                    ("binoculars", "binoculars"),
+                    ("premium", "premium"),  # not a real category -> error
+                ],
+            },
+        ],
+    },
+    "product-catalog": {
+        "project_key": "otel-product-catalog",
+        "project_name": "otel-product-catalog",
+        "flags": [
+            {
+                "key": "catalog-extra-latency-ms",
+                "type": "number",
+                "description": "Config: artificial latency (ms) added to product lookups. "
+                               "Default 0. Applied verbatim (no validation).",
+                "variations": [("0", "0"), ("250", "250"), ("5000", "5000"), ("-1", "-1")],
+            },
+            {
+                "key": "catalog-pricing-promo-enabled",
+                "type": "boolean",
+                "description": "Release flag gating a promotional pricing code path / span "
+                               "attribute. Safe either way; default OFF.",
+                "variations": [("false", "false"), ("true", "true")],
+            },
+            {
+                "key": "catalog-list-max-products",
+                "type": "number",
+                "description": "Config: cap on products returned (0 = all). Default 0. Applied "
+                               "without lower-bound validation: a negative value surfaces a gap "
+                               "(slice out of range -> the service errors).",
+                "variations": [("0", "0"), ("5", "5"), ("-1", "-1")],
+            },
+        ],
+    },
+    "cart": {
+        "project_key": "otel-cart",
+        "project_name": "otel-cart",
+        "flags": [
+            {
+                "key": "cart-persistence-enabled",
+                "type": "boolean",
+                "description": "Ops kill-switch for the Valkey-backed cart store. Safe either "
+                               "way; default ON preserves persistence.",
+                "variations": [("true", "true"), ("false", "false")],
+            },
+            {
+                "key": "cart-max-items",
+                "type": "number",
+                "description": "Config: max items accepted by AddItem. Default 100. Applied "
+                               "without lower-bound validation: a negative value surfaces a gap "
+                               "(the service errors).",
+                "variations": [("100", "100"), ("5", "5"), ("-1", "-1")],
+            },
+            {
+                "key": "cart-readonly-mode",
+                "type": "boolean",
+                "description": "Ops flag: when ON, AddItem is cleanly rejected (deliberate "
+                               "feature, not a crash). Default OFF.",
+                "variations": [("false", "false"), ("true", "true")],
+            },
+        ],
+    },
+    "payment": {
+        "project_key": "otel-payment",
+        "project_name": "otel-payment",
+        "flags": [
+            {
+                "key": "payment-fraud-check-enabled",
+                "type": "boolean",
+                "description": "Ops flag gating the (simulated) fraud-check step. Safe either "
+                               "way; default ON.",
+                "variations": [("true", "true"), ("false", "false")],
+            },
+            {
+                "key": "payment-retry-attempts",
+                "type": "number",
+                "description": "Config: retry attempts on a simulated transient failure. Default "
+                               "0. Applied without validation: a negative value errors "
+                               "(RangeError), an absurd value surfaces a broken loop.",
+                "variations": [("0", "0"), ("1", "1"), ("2", "2"), ("3", "3"),
+                               ("-1", "-1"), ("1000000000000", "1000000000000")],
+            },
+            {
+                "key": "payment-provider",
+                "type": "string",
+                "description": "Experiment: payment provider path. Default 'default'. An "
+                               "unrecognized provider surfaces an unknown-variant gap "
+                               "(undefined handler -> the service errors).",
+                "variations": [
+                    ("default", "default"),
+                    ("visa-direct", "visa-direct"),
+                    ("braintree", "braintree"),
+                    ("stripe", "stripe"),  # no handler -> error
+                ],
+            },
+        ],
+    },
 }
 
 
