@@ -723,9 +723,9 @@ if ($CustomImageRegistry -and $infraImageMap) {
     Write-Host "  Image map       : $($infraImageMap.Count) entries" -ForegroundColor Gray
 }
 $sharedClusterNetwork = "featbit-cluster-network"
-$sharedClusterSubnet = "172.19.0.0/16"
-$westSharedClusterIp = "172.19.0.10"
-$eastSharedClusterIp = "172.19.0.20"
+$sharedClusterSubnet = "172.31.0.0/16"
+$westSharedClusterIp = "172.31.0.10"
+$eastSharedClusterIp = "172.31.0.20"
 
 if (-not $PSBoundParameters.ContainsKey("HostInfraComponents")) {
     if ($DatabaseProvider -eq "Postgres") {

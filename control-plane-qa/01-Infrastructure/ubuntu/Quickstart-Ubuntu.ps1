@@ -333,14 +333,15 @@ function Invoke-RepoSetup([PSCustomObject]$State) {
     }
 
     $qaDir  = Join-Path $repoRoot "control-plane-qa"
-    $envDst = Join-Path $qaDir "deployment.env"
-    $envEx  = Join-Path $qaDir "deployment.env.example"
+    $envDir = Join-Path $qaDir "01-Infrastructure"
+    $envDst = Join-Path $envDir "deployment.env"
+    $envEx  = Join-Path $envDir "deployment.env.example"
     if (-not (Test-Path $envDst)) {
         if (Test-Path $envEx) {
             Copy-Item $envEx $envDst
             Write-Success "Created deployment.env from example"
         } else {
-            Write-Warn "deployment.env.example not found — create deployment.env manually in $qaDir"
+            Write-Warn "deployment.env.example not found — create deployment.env manually in $envDir"
         }
     } else {
         Write-Success "deployment.env already exists"
@@ -448,10 +449,10 @@ function Invoke-ProxyFirstRun([PSCustomObject]$State) {
 function Repair-ClusterNetwork {
     # Defensive: Initialize-LocalRegistry.ps1 historically created featbit-cluster-network
     # without --subnet, causing Docker to auto-assign one (e.g. 172.18.0.0/16).
-    # Deploy-FeatBitClusters.ps1 hard-codes 172.19.0.10 / 172.19.0.20 for the clusters,
+    # Deploy-FeatBitClusters.ps1 hard-codes 172.31.0.10 / 172.31.0.20 for the clusters,
     # so an auto-assigned subnet breaks cluster attachment. Detect & fix before deploying.
     $name       = "featbit-cluster-network"
-    $wantSubnet = "172.19.0.0/16"
+    $wantSubnet = "172.31.0.0/16"
 
     $exists = & docker network ls --filter "name=^$name$" --format "{{.Name}}" 2>$null
     if (-not $exists) {
