@@ -1,0 +1,49 @@
+# Minimal-footprint OpenTelemetry demo overrides for the east/west test clusters.
+# Goal: run alongside FeatBit on a single minikube node (laptop capacity test).
+#
+# Approx reserved memory of the optional pieces (limit == request for these):
+#   load-generator ...... 1500Mi   store traffic driver
+#   opensearch .......... 1100Mi   telemetry log/trace store (NOT application data)
+#   jaeger ..............  600Mi   trace UI / query
+#   prometheus ..........  400Mi   metrics store
+#   grafana .............  300Mi   dashboards (pure UI; cheapest to drop)
+# Flip the observability backends you don't need to `enabled: false` to reclaim it.
+# NOTE: disabling a backend while the collector still exports to it only produces
+# harmless "connection refused" export logs in the collector — not a failure.
+
+default:
+  replicas: 1
+
+components:
+  # Load generator — drives webstore traffic. Needed for load testing (~1.5Gi).
+  load-generator:
+    enabled: true
+
+# --- Observability backend toggles -------------------------------------------
+
+# OpenSearch — telemetry log/trace storage, NOT application data (the demo app
+# uses Kafka + PostgreSQL + Valkey, see "resource sharing" notes). Kept on until
+# we confirm nothing depends on it; ~1.1Gi — the first thing to reconsider.
+opensearch:
+  enabled: true
+
+# Jaeger — distributed-tracing UI/query (~600Mi). Disable if the trace UI isn't needed.
+jaeger:
+  enabled: true
+
+# Prometheus — metrics storage/queries (~400Mi).
+prometheus:
+  enabled: true
+
+# Grafana — dashboards UI (~300Mi).
+grafana:
+  enabled: true
+
+# --- Stability fix -----------------------------------------------------------
+
+# The agent collector OOMKills (exit 137) at the chart's 200Mi default under the
+# demo's telemetry volume. 512Mi is the minimum that keeps it stable.
+opentelemetry-collector:
+  resources:
+    limits:
+      memory: 512Mi
