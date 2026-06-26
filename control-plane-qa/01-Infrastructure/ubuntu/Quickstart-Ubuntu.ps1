@@ -15,31 +15,36 @@
 
     Phases (in order):
       1. ensure-pwsh        — verify PowerShell 7+ is active on Linux
-      2. system-prereqs     — install git via apt                     [root]
+      2. system-prereqs     — install git via apt        [root only if missing]
       3. dev-tools          — Docker Engine, Minikube, kubectl, k9s (optional)
       3b. install-k6        — optional Grafana k6 install for cp09-pod-heartbeats
       4. repo-setup         — clone repo, checkout control-plane, configure deployment.env
       4b. collect-creds     — prompt for registry credentials early (so you can walk away)
       5. build-images       — build FeatBit images and push to localhost:5000  (~10-15 min)
-      6. proxy-first-run    — first run of Setup-FeatBitProxy.ps1     [root]
+      6. proxy-first-run    — pre-pull the proxy container image       [no sudo]
       7. deploy-clusters    — Deploy-FeatBitClusters.ps1 Advanced + MongoDB   (~20 min)
       7b. verify-pull-backoff — assert no ImagePullBackOff in west/east clusters
-      8. proxy-second-run   — second run of Setup-FeatBitProxy.ps1    [root]
+      8. proxy-second-run   — start rootless containerized proxy       [no sudo]
       9. port-forwards      — instructions + launch Start-PortForwards.ps1
      10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
 
     Run the wizard as your normal user (NOT sudo). Minikube's docker driver
-    refuses to run as root, so the wizard refuses too. The few phases that need
-    root (apt install, nginx, /etc/hosts, systemd) acquire it ONCE up front:
-    you're asked for your password a single time at the start, then the entire
-    run — including the ~10-15 min image build and ~20 min deploy — proceeds
-    unattended, like `vagrant up`. If passwordless sudo is configured (or you
-    are already root) there is no prompt at all. If root is required but there
-    is no terminal to prompt on and passwordless sudo isn't set up, the wizard
-    stops in seconds at preflight with guidance rather than failing deep in the
-    deploy.
+    refuses to run as root, so the wizard refuses too. Like `vagrant up`, it is
+    designed to "just work" as a single command:
 
-    For fully unattended / CI use, enable passwordless sudo once:
+      - The reverse proxy is a rootless Docker container (no system nginx, no
+        /etc/nginx, no /etc/hosts, no systemd, no port-80 root bind). It reuses
+        the cluster port-forwards on 127.0.0.1 and routes via *.sslip.io
+        wildcard DNS, so the proxy phase needs NO sudo.
+      - Cluster build / deploy / port-forwards run as your normal user.
+      - The ONLY steps that can need root are first-time prerequisite installs
+        (git, docker, minikube, kubectl). Those acquire sudo on demand — a
+        single prompt, zero prompts with passwordless sudo / root, or a
+        fast-fail with guidance — and only when a tool is actually missing.
+
+    On a machine that already has the prerequisites, the entire run uses zero
+    sudo. For fully unattended / CI use on a fresh machine, enable passwordless
+    sudo once so even prerequisite installs need no prompt:
         echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER
         sudo chmod 440 /etc/sudoers.d/$USER
 
@@ -448,26 +453,20 @@ function Invoke-BuildImages([PSCustomObject]$State) {
 }
 
 function Invoke-ProxyFirstRun([PSCustomObject]$State) {
-    Write-Step "Phase 6 — Nginx Proxy First Run"
+    Write-Step "Phase 6 — Reverse Proxy (pre-pull image)"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 as your user (it self-escalates only"
-    Write-Info "the nginx/hosts/systemd steps via the already-primed sudo session)."
-    Write-Warn "Some failures on the first run are expected — that is normal."
-    Write-Info "The proxy will be fully configured after the second run (Phase 8)."
+    Write-Info "FeatBit uses a rootless, containerized nginx proxy on Linux — no"
+    Write-Info "system nginx, no /etc/nginx, no /etc/hosts, no systemd, no sudo."
+    Write-Info "Pre-pulling the image now so the proxy starts fast after deploy."
     Write-Info ""
 
-    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
-    if (-not (Test-Path $proxyScript)) { throw "Setup-FeatBitProxy.ps1 not found at $proxyScript" }
-
-    if ($PSCmdlet.ShouldProcess("nginx proxy", "First run setup")) {
-        & pwsh -File $proxyScript
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Setup-FeatBitProxy.ps1 exited with code $LASTEXITCODE (expected on first run)"
-        }
+    if ($PSCmdlet.ShouldProcess("nginx image", "docker pull")) {
+        & docker pull nginx:1.27-alpine *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "Could not pre-pull nginx image (non-fatal; it will pull on start)." }
     }
 
     Complete-Phase $State "proxy-first-run"
-    Write-Success "Proxy first run complete"
+    Write-Success "Proxy image ready."
 }
 
 function Repair-ClusterNetwork {
@@ -599,20 +598,34 @@ function Invoke-VerifyPullBackoff([PSCustomObject]$State) {
 }
 
 function Invoke-ProxySecondRun([PSCustomObject]$State) {
-    Write-Step "Phase 8 — Nginx Proxy Second Run"
+    Write-Step "Phase 8 — Reverse Proxy (start container)"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 as your user a second time to apply"
-    Write-Info "the cluster endpoints that were created in the previous phase."
+    $base = "127.0.0.1.sslip.io"
+    $containerProxy = Join-Path $script:SiblingDir "Start-FeatBitProxyContainer.ps1"
+    if (-not (Test-Path $containerProxy)) { throw "Start-FeatBitProxyContainer.ps1 not found at $containerProxy" }
+
+    Write-Info "Starting the FeatBit reverse proxy as a rootless Docker container."
+    Write-Info "No sudo, no /etc/nginx, no /etc/hosts — routes via *.$base wildcard DNS"
+    Write-Info "to the cluster port-forwards on 127.0.0.1."
     Write-Info ""
 
-    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
-    if ($PSCmdlet.ShouldProcess("nginx proxy", "Second run setup")) {
-        & pwsh -File $proxyScript
-        if ($LASTEXITCODE -ne 0) { throw "Setup-FeatBitProxy.ps1 failed on second run" }
+    if ($PSCmdlet.ShouldProcess("nginx proxy", "Start container")) {
+        & pwsh -File $containerProxy -BaseDomain $base
+        if ($LASTEXITCODE -ne 0) { throw "Start-FeatBitProxyContainer.ps1 failed" }
+
+        # Point each cluster's UI at the proxied endpoints (kubectl as you, no sudo).
+        foreach ($c in @(@{ ctx = 'west'; sfx = 'west' }, @{ ctx = 'east'; sfx = 'east' })) {
+            & kubectl --context $c.ctx -n featbit set env deployment/ui `
+                "API_URL=http://featbit-api-$($c.sfx).$base" `
+                "EVALUATION_URL=http://featbit-eval-$($c.sfx).$base" `
+                "DISPLAY_API_URL=http://featbit.$base" `
+                "DISPLAY_EVALUATION_URL=http://featbit.$base" *> $null
+            if ($LASTEXITCODE -ne 0) { Write-Warn "Could not update $($c.ctx) UI endpoints (non-fatal)." }
+        }
     }
 
     Complete-Phase $State "proxy-second-run"
-    Write-Success "Proxy fully configured"
+    Write-Success "Reverse proxy running (containerized, rootless)."
 }
 
 function Stop-StalePortForwards {
@@ -703,11 +716,13 @@ function Invoke-Done {
     Write-Host "  ║          FeatBit Pro is ready!                          ║" -ForegroundColor Green
     Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Access URLs (port forwards must be running):" -ForegroundColor White
-    Write-Host "    West cluster UI  →  http://localhost:8081" -ForegroundColor Cyan
-    Write-Host "    East cluster UI  →  http://localhost:8082" -ForegroundColor Cyan
-    Write-Host "    West API         →  http://localhost:15000" -ForegroundColor Cyan
-    Write-Host "    East API         →  http://localhost:15001" -ForegroundColor Cyan
+    Write-Host "  Access URLs via the containerized proxy (port forwards must be running):" -ForegroundColor White
+    Write-Host "    Load-balanced UI →  http://featbit.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    West cluster UI  →  http://featbit-west.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    East cluster UI  →  http://featbit-east.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    West API         →  http://featbit-api-west.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    East API         →  http://featbit-api-east.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    (direct, no proxy:  http://localhost:8081 / 8082 UI, 15000 / 15001 API)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Default credentials:" -ForegroundColor White
     Write-Host "    Email:    test@featbit.com" -ForegroundColor Gray
@@ -750,21 +765,13 @@ $allPhases = @(
     @{ Key = "mongo-replica-set"; Fn = { Invoke-MongoReplicaSet $state } }
 )
 
-# ── Privilege preflight (vagrant-up: one password, then unattended) ─────────────
-# The nginx proxy phases always need root (writes /etc/nginx, /etc/hosts, reloads
-# systemd). Acquire root ONCE now — before the ~10-15 min image build and ~20 min
-# deploy — so the run never stalls on a password later. In a non-interactive
-# environment with no passwordless sudo, this fails in seconds with guidance
-# instead of ~40 minutes in at the proxy phase. Phases that run as the normal
-# user (build, deploy, port-forwards) are unaffected.
-$rootPhases = @('proxy-first-run', 'proxy-second-run')
-$willNeedRoot = $false
-foreach ($rp in $rootPhases) {
-    if (-not (Test-PhaseComplete $state $rp)) { $willNeedRoot = $true; break }
-}
-if ($willNeedRoot) {
-    [void](Initialize-FbSudoSession -Required -Purpose "configuring the nginx proxy (/etc/nginx, /etc/hosts, systemd)")
-}
+# No privilege preflight: the reverse proxy is now a rootless Docker container
+# (no /etc/nginx, /etc/hosts, systemd or port-80 root bind), and cluster
+# build/deploy/port-forwards run as the normal user. The only steps that can
+# need root are first-time prerequisite installs (git, docker, minikube,
+# kubectl), which acquire sudo on demand — a single prompt, passwordless sudo,
+# or fast-fail — only when something is actually missing. On a machine that
+# already has the prerequisites, the whole run uses zero sudo.
 
 $allComplete = $true
 foreach ($phase in $allPhases) {
