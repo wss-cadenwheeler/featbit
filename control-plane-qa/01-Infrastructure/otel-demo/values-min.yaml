@@ -18,6 +18,16 @@ components:
   # Load generator — drives webstore traffic. Needed for load testing (~1.5Gi).
   load-generator:
     enabled: true
+  # These JVM services + the OpenTelemetry Java agent OOMKill (exit 137) at the
+  # chart's 300Mi default; 512Mi keeps them stable.
+  ad:
+    resources:
+      limits:
+        memory: 512Mi
+  fraud-detection:
+    resources:
+      limits:
+        memory: 512Mi
 
 # --- Observability backend toggles -------------------------------------------
 
