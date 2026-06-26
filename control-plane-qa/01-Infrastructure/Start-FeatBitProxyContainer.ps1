@@ -124,6 +124,24 @@ $cfg = (Get-Content $sourceConf -Raw) `
     -replace 'listen 80;',    "listen $HostPort;" `
     -replace 'access_log logs/access\.log upstream;', 'access_log /dev/stdout upstream;'
 
+# Replace the static $cors_origin map with a regex that echoes back ANY origin
+# under the base domain regardless of port. The browser's Origin header includes
+# the port (e.g. http://featbit-west.<base>:8080), but the static map keys are
+# portless, so logins fail CORS. Echoing the matched origin (not "*") is required
+# because the API responses set Access-Control-Allow-Credentials: true.
+$escapedBase = [regex]::Escape($BaseDomain)
+$corsMap =
+    '    map $http_origin $cors_origin {' + "`n" +
+    '        default "";' + "`n" +
+    '        "~^http://([a-z0-9-]+\.)?' + $escapedBase + '(:[0-9]+)?$" $http_origin;' + "`n" +
+    '    }'
+# Use a MatchEvaluator so $ in the replacement is treated literally (not as a
+# .NET substitution token). The map block contains no nested braces.
+$cfg = [regex]::Replace(
+    $cfg,
+    '(?s)map\s+\$http_origin\s+\$cors_origin\s*\{.*?\}',
+    { param($m) $corsMap })
+
 # Persist the config where the container can mount it for its whole lifetime
 # (a temp file could be reaped; the container re-reads this on restart).
 $confDir  = Join-Path $HOME ".featbit/proxy"
@@ -135,11 +153,16 @@ Write-Success "Config written to $confPath (listen $HostPort, base $BaseDomain).
 # ── Run the container ──────────────────────────────────────────────────────────
 Write-Step "Starting containerized proxy"
 
-# Pre-flight: if the port is already held by a NON-docker process (e.g. a leftover
-# system nginx from the old model), --network host can't bind it. Detect early.
+# Remove any previous instance of OUR container first, so its --network host
+# listener (which appears as an 'nginx' process, not 'docker') frees the port
+# before the conflict check and a restart picks up regenerated config.
+& docker rm -f $Name *> $null
+
+# Pre-flight: if the port is still held after that, something else owns it (e.g. a
+# leftover system nginx from the old model); --network host can't bind it.
 $portOwner = (& bash -c "ss -ltnp 2>/dev/null | grep -E ':$HostPort\b' | head -1" | Out-String).Trim()
-if ($portOwner -and $portOwner -notmatch 'docker') {
-    Write-Warn "Port $HostPort is already in use:"
+if ($portOwner) {
+    Write-Warn "Port $HostPort is already in use by another process:"
     Write-Info "  $portOwner"
     Write-Info "If this is a leftover system nginx from the old proxy model, remove it once:"
     Write-Info "  sudo systemctl disable --now nginx"
@@ -147,7 +170,6 @@ if ($portOwner -and $portOwner -notmatch 'docker') {
     exit 1
 }
 
-& docker rm -f $Name *> $null
 & docker run -d --name $Name `
     --network host `
     --restart unless-stopped `
