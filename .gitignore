@@ -44,6 +44,9 @@ benchmark/k6-scripts/test-results/
 control-plane-qa/.quickstart-state-*.json
 control-plane-qa/**/.quickstart-state-*.json
 
+# otel-demo upstream source clone (fetched on demand by Build-OtelDemoImages.ps1)
+control-plane-qa/01-Infrastructure/otel-demo/build/
+
 # Automation test artifacts (scenario run outputs, timelines, assertion results)
 control-plane-qa/artifacts/
 control-plane-qa/01-Infrastructure/windows-hyperv/.quickstart-state-hyperv.json
