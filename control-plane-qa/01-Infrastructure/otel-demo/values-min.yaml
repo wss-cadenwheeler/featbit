@@ -39,11 +39,49 @@ prometheus:
 grafana:
   enabled: true
 
-# --- Stability fix -----------------------------------------------------------
-
-# The agent collector OOMKills (exit 137) at the chart's 200Mi default under the
-# demo's telemetry volume. 512Mi is the minimum that keeps it stable.
+# --- Collector: receive-and-drop, minimum footprint -------------------------
+#
+# We don't need the telemetry for the capacity test, so the collector accepts
+# OTLP from the demo services (so their SDKs don't error) and discards
+# everything via the `nop` exporter. All metric-scraping presets and the heavy
+# transform / spanmetrics / kafkametrics work are removed, so it runs in ~128Mi
+# instead of OOMKilling at the chart's 200Mi default.
 opentelemetry-collector:
   resources:
     limits:
-      memory: 512Mi
+      memory: 128Mi          # minimum that runs reliably (~96Mi likely also OK)
+  # Turn off all scraping presets — pure telemetry generation we don't want.
+  presets:
+    hostMetrics:
+      enabled: false
+    kubernetesAttributes:
+      enabled: false
+    kubeletMetrics:
+      enabled: false
+    clusterMetrics:
+      enabled: false
+    annotationDiscovery:
+      metrics:
+        enabled: false
+  config:
+    exporters:
+      nop: {}              # discards everything routed to it
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [nop]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [nop]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [nop]
+      # Stop the collector exporting its own internal metrics (extra load).
+      telemetry:
+        metrics:
+          level: none
+          readers: []
