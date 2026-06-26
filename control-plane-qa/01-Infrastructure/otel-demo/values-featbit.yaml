@@ -1,0 +1,25 @@
+# FeatBit overlay for the OpenTelemetry Demo — applied on top of values-min.yaml.
+#
+# Points instrumented components at our custom (FeatBit-wired) images on Harbor
+# and at the FeatBit evaluation server via the load-balanced eval endpoint. The
+# env SECRET is NOT stored here — Deploy-OtelDemo.ps1 injects it at deploy time
+# (--set-string) so it stays out of git.
+#
+# Client URIs are featbit-eval.127.0.0.1.sslip.io based (per the active/passive,
+# west-active topology). otel-demo pods resolve that name to the host proxy via a
+# hostAlias added by the deploy script (-> the cluster's host gateway), and the
+# host proxy load-balances to the eval-servers (west primary / east failover).
+
+components:
+  recommendation:
+    imageOverride:
+      repository: harbor.tekgeek.io/apps/otel-demo/recommendation
+      tag: featbit-2.2.0
+      pullPolicy: IfNotPresent
+    # envOverrides append to / override the component's default env. The secret
+    # is appended at deploy time as envOverrides[<next>].
+    envOverrides:
+      - name: FEATBIT_EVENT_URL
+        value: "http://featbit-eval.127.0.0.1.sslip.io:8080"
+      - name: FEATBIT_STREAMING_URL
+        value: "ws://featbit-eval.127.0.0.1.sslip.io:8080"
