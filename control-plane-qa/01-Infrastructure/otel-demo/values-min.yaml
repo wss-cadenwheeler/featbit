@@ -18,6 +18,13 @@ components:
   # Load generator — drives webstore traffic. Needed for load testing (~1.5Gi).
   load-generator:
     enabled: true
+    # Disable the Playwright/Chromium browser-traffic user. The HTTP user already
+    # covers the full backend API surface; browser traffic only adds client-side
+    # RUM telemetry (which the nop collector discards anyway) and fails 100% in
+    # this constrained env. Turning it off cleans up metrics and frees ~0.4Gi.
+    envOverrides:
+      - name: LOCUST_BROWSER_TRAFFIC_ENABLED
+        value: "false"
   # These JVM services + the OpenTelemetry Java agent OOMKill (exit 137) at the
   # chart's 300Mi default; 512Mi keeps them stable.
   ad:
