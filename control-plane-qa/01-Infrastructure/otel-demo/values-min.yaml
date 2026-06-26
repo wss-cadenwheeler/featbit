@@ -15,26 +15,52 @@ default:
   replicas: 1
 
 components:
-  # Load generator — drives webstore traffic. Needed for load testing (~1.5Gi).
+  # This chart has no global default.resources and sets only *memory* limits per
+  # component — CPU is unbounded, which let the checkout pod spin to ~6 cores and
+  # starve the node's network/DNS. So we cap CPU per component here.
+  #
+  # Each gets a small cpu *request* AND a cpu *limit*. The request is what keeps
+  # them schedulable: a bare cpu limit makes Kubernetes default the request to
+  # the limit, so ~22 components x 1 core would demand 22 cores on a 10-core node
+  # and go unschedulable. The 1-core limit bounds any single runaway so it can't
+  # take the node down with it. load-generator and kafka get 2 cores (the load
+  # driver and the JVM broker legitimately burst). Memory limits are inherited
+  # from the chart except where noted (ad/fraud-detection bumped to 512Mi: their
+  # JVM + OTel Java agent OOMKilled (exit 137) at the chart's 300Mi default).
+  accounting:      { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  ad:              { resources: { requests: { cpu: 25m }, limits: { cpu: "1", memory: 512Mi } } }
+  cart:            { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  checkout:        { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  currency:        { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  email:           { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  flagd:           { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  fraud-detection: { resources: { requests: { cpu: 25m }, limits: { cpu: "1", memory: 512Mi } } }
+  frontend:        { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  frontend-proxy:  { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  image-provider:  { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  llm:             { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  payment:         { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  product-catalog: { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  product-reviews: { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  quote:           { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  recommendation:  { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  shipping:        { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  postgresql:      { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  valkey-cart:     { resources: { requests: { cpu: 25m }, limits: { cpu: "1" } } }
+  kafka:           { resources: { requests: { cpu: 50m }, limits: { cpu: "2" } } }
   load-generator:
     enabled: true
     # Disable the Playwright/Chromium browser-traffic user. The HTTP user already
     # covers the full backend API surface; browser traffic only adds client-side
-    # RUM telemetry (which the nop collector discards anyway) and fails 100% in
-    # this constrained env. Turning it off cleans up metrics and frees ~0.4Gi.
+    # RUM telemetry (discarded by the nop collector) and fails 100% here.
     envOverrides:
       - name: LOCUST_BROWSER_TRAFFIC_ENABLED
         value: "false"
-  # These JVM services + the OpenTelemetry Java agent OOMKill (exit 137) at the
-  # chart's 300Mi default; 512Mi keeps them stable.
-  ad:
     resources:
+      requests:
+        cpu: 50m
       limits:
-        memory: 512Mi
-  fraud-detection:
-    resources:
-      limits:
-        memory: 512Mi
+        cpu: "2"
 
 # --- Observability backend toggles -------------------------------------------
 
@@ -65,7 +91,10 @@ grafana:
 # instead of OOMKilling at the chart's 200Mi default.
 opentelemetry-collector:
   resources:
+    requests:
+      cpu: 25m
     limits:
+      cpu: 500m
       memory: 128Mi          # minimum that runs reliably (~96Mi likely also OK)
   # Turn off all scraping presets — pure telemetry generation we don't want.
   presets:
