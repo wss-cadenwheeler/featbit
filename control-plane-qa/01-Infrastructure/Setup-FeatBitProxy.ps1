@@ -43,7 +43,12 @@
 .NOTES
     Requires elevated privileges:
     - Windows: run from an Administrator PowerShell session
-    - Linux:   run as root, or as a user with sudo access
+    - Linux:   run as your normal user. The script acquires root ONCE (a single
+               password prompt, passwordless sudo, or already-root) and escalates
+               only the nginx/hosts/systemd commands via `sudo -n`; kubectl runs
+               as you so it uses your kubeconfig. Do NOT prefix with sudo — that
+               makes kubectl use root's kubeconfig. If root is needed but there's
+               no terminal and no passwordless sudo, it fails fast with guidance.
 
     On Linux, nginx is managed as a systemd service and configuration is
     written to /etc/nginx/sites-available/featbit (symlinked into sites-enabled).
@@ -66,6 +71,16 @@ if (-not $script:onWindows -and -not $script:onLinux)
 {
     Write-Host "✗ This script supports Windows and Ubuntu/Debian Linux only." -ForegroundColor Red
     exit 1
+}
+
+# ── Shared privilege/sudo-session helpers (Linux) ───────────────────────────────
+# Provides Initialize-FbSudoSession / Invoke-FbSudo so root is acquired at most
+# once per run and never prompts mid-run. The helper is a no-op on Windows.
+if ($script:onLinux)
+{
+    $privHelper = Join-Path $PSScriptRoot "Common-Privilege.ps1"
+    if (-not (Test-Path $privHelper)) { Write-Host "✗ Common-Privilege.ps1 not found at $privHelper" -ForegroundColor Red; exit 1 }
+    . $privHelper
 }
 
 # ── Console helpers ───────────────────────────────────────────────────────────
@@ -117,7 +132,10 @@ function Invoke-Elevated
 
     if ($script:onLinux -and -not (Test-Administrator))
     {
-        & sudo @ArgumentList
+        # Non-interactive (-n): the sudo session was primed once up front by
+        # Initialize-FbSudoSession, so this reuses the cached ticket (or NOPASSWD)
+        # and never stops to prompt mid-run.
+        & sudo -n @ArgumentList
     }
     else
     {
@@ -129,19 +147,25 @@ function Invoke-Elevated
 
 # ── Privilege check ───────────────────────────────────────────────────────────
 
-if (-not (Test-Administrator))
+if ($script:onWindows)
 {
-    if ($script:onWindows)
+    if (-not (Test-Administrator))
     {
         Write-Fail "This script requires an Administrator PowerShell session."
         Write-Info "Re-run from an elevated prompt."
+        exit 1
     }
-    else
-    {
-        Write-Fail "This script requires root or sudo access."
-        Write-Info "Re-run as root, or ensure your account has sudo privileges."
-    }
-    exit 1
+}
+else
+{
+    # Linux: acquire root ONCE up front — interactive prompt (single password),
+    # passwordless sudo, or already-root — and keep the ticket warm for the run.
+    # If root is needed but there's no terminal and no passwordless sudo, fail
+    # fast here with guidance instead of part-applying config. Only the specific
+    # nginx/hosts/systemd commands escalate (Invoke-Elevated -> sudo -n); the
+    # kubectl UI-deploy calls run as the normal user so they use the caller's
+    # kubeconfig rather than root's.
+    [void](Initialize-FbSudoSession -Required -Purpose "nginx config, /etc/hosts, and the nginx reload")
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

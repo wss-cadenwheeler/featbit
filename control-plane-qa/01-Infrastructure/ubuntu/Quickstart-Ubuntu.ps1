@@ -28,9 +28,20 @@
       9. port-forwards      — instructions + launch Start-PortForwards.ps1
      10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
 
-    Run the wizard as your normal user (NOT sudo). Phases that need root
-    (apt install, nginx, /etc/hosts) call sudo themselves. Minikube's docker
-    driver refuses to run as root, so the wizard refuses too.
+    Run the wizard as your normal user (NOT sudo). Minikube's docker driver
+    refuses to run as root, so the wizard refuses too. The few phases that need
+    root (apt install, nginx, /etc/hosts, systemd) acquire it ONCE up front:
+    you're asked for your password a single time at the start, then the entire
+    run — including the ~10-15 min image build and ~20 min deploy — proceeds
+    unattended, like `vagrant up`. If passwordless sudo is configured (or you
+    are already root) there is no prompt at all. If root is required but there
+    is no terminal to prompt on and passwordless sudo isn't set up, the wizard
+    stops in seconds at preflight with guidance rather than failing deep in the
+    deploy.
+
+    For fully unattended / CI use, enable passwordless sudo once:
+        echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER
+        sudo chmod 440 /etc/sudoers.d/$USER
 
 .PARAMETER InstallK6
     Installs Grafana k6 as an optional prerequisite; required for full
@@ -174,6 +185,11 @@ $k6Helper = Join-Path $script:SiblingDir "Install-K6Prerequisite.ps1"
 if (-not (Test-Path $k6Helper)) { throw "Install-K6Prerequisite.ps1 not found at $k6Helper" }
 . $k6Helper
 
+# Shared privilege/sudo-session helpers — acquire root once, run the rest unattended.
+$privHelper = Join-Path $script:SiblingDir "Common-Privilege.ps1"
+if (-not (Test-Path $privHelper)) { throw "Common-Privilege.ps1 not found at $privHelper" }
+. $privHelper
+
 # ── Pause helpers ─────────────────────────────────────────────────────────────
 
 function Wait-UserConfirm([string]$Prompt = "Press Enter to continue...") {
@@ -243,11 +259,12 @@ function Invoke-SystemPrereqs([PSCustomObject]$State) {
     if ($gitInstalled) {
         Write-Success "Git is already installed ($((git --version) -replace 'git version ', ''))"
     } else {
-        Write-Info "Installing git via sudo apt-get..."
+        Write-Info "Installing git via apt-get..."
         if ($PSCmdlet.ShouldProcess("git", "sudo apt-get install")) {
-            & sudo apt-get update
-            if ($LASTEXITCODE -ne 0) { throw "sudo apt-get update failed" }
-            & sudo apt-get install -y git
+            if (-not (Get-FbSudoMode)) { [void](Initialize-FbSudoSession -Required -Purpose "installing git via apt") }
+            & sudo -n apt-get update
+            if ($LASTEXITCODE -ne 0) { throw "apt-get update failed" }
+            & sudo -n apt-get install -y git
             if ($LASTEXITCODE -ne 0) { throw "git installation failed" }
         }
         Write-Success "Git installed"
@@ -271,11 +288,17 @@ function Invoke-DevTools([PSCustomObject]$State) {
         if ($k9s) {
             Write-Success "k9s is already installed"
         } elseif (Get-Command snap -ErrorAction SilentlyContinue) {
-            Write-Info "Installing k9s via sudo snap (optional, useful for troubleshooting)..."
-            if ($PSCmdlet.ShouldProcess("k9s", "sudo snap install")) {
-                & sudo snap install k9s
-                if ($LASTEXITCODE -eq 0) { Write-Success "k9s installed" }
-                else { Write-Warn "sudo snap install k9s exited $LASTEXITCODE — skipping" }
+            # k9s is optional. Only attempt it if root is already available
+            # (primed earlier / passwordless / root) so it never adds a prompt.
+            if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') {
+                Write-Info "Installing k9s via snap (optional, useful for troubleshooting)..."
+                if ($PSCmdlet.ShouldProcess("k9s", "sudo snap install")) {
+                    & sudo -n snap install k9s
+                    if ($LASTEXITCODE -eq 0) { Write-Success "k9s installed" }
+                    else { Write-Warn "snap install k9s exited $LASTEXITCODE — skipping" }
+                }
+            } else {
+                Write-Warn "Skipping optional k9s (no sudo session). Install later: sudo snap install k9s"
             }
         } else {
             Write-Warn "snap not available — skipping k9s. See https://k9scli.io/ for install options."
@@ -427,7 +450,8 @@ function Invoke-BuildImages([PSCustomObject]$State) {
 function Invoke-ProxyFirstRun([PSCustomObject]$State) {
     Write-Step "Phase 6 — Nginx Proxy First Run"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh (first run)."
+    Write-Info "Running Setup-FeatBitProxy.ps1 as your user (it self-escalates only"
+    Write-Info "the nginx/hosts/systemd steps via the already-primed sudo session)."
     Write-Warn "Some failures on the first run are expected — that is normal."
     Write-Info "The proxy will be fully configured after the second run (Phase 8)."
     Write-Info ""
@@ -436,7 +460,7 @@ function Invoke-ProxyFirstRun([PSCustomObject]$State) {
     if (-not (Test-Path $proxyScript)) { throw "Setup-FeatBitProxy.ps1 not found at $proxyScript" }
 
     if ($PSCmdlet.ShouldProcess("nginx proxy", "First run setup")) {
-        & sudo pwsh -File $proxyScript
+        & pwsh -File $proxyScript
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Setup-FeatBitProxy.ps1 exited with code $LASTEXITCODE (expected on first run)"
         }
@@ -577,13 +601,13 @@ function Invoke-VerifyPullBackoff([PSCustomObject]$State) {
 function Invoke-ProxySecondRun([PSCustomObject]$State) {
     Write-Step "Phase 8 — Nginx Proxy Second Run"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh a second time to apply"
+    Write-Info "Running Setup-FeatBitProxy.ps1 as your user a second time to apply"
     Write-Info "the cluster endpoints that were created in the previous phase."
     Write-Info ""
 
     $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
     if ($PSCmdlet.ShouldProcess("nginx proxy", "Second run setup")) {
-        & sudo pwsh -File $proxyScript
+        & pwsh -File $proxyScript
         if ($LASTEXITCODE -ne 0) { throw "Setup-FeatBitProxy.ps1 failed on second run" }
     }
 
@@ -593,8 +617,10 @@ function Invoke-ProxySecondRun([PSCustomObject]$State) {
 
 function Stop-StalePortForwards {
     # Clears any leftover Start-PortForwards.ps1 supervisors and their kubectl
-    # port-forward workers. They're usually root-owned (Setup-FeatBitProxy.ps1
-    # starts some under sudo), so we use sudo pkill.
+    # port-forward workers. These now run as the normal user (the proxy no longer
+    # starts anything under sudo), so a plain pkill suffices; we additionally try
+    # sudo -n only when a root session already exists, to sweep up any legacy
+    # root-owned workers from older runs without ever prompting.
     # Parents must die before children, otherwise the supervisor respawns them.
     $svcCount = @(& pgrep -f 'Start-PortForwards\.ps1' 2>$null).Count
     $pfCount  = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
@@ -606,15 +632,17 @@ function Stop-StalePortForwards {
 
     Write-Info "Cleaning up stale port-forward processes..."
     if ($svcCount -gt 0) {
-        Write-Info "  Stopping $svcCount Start-PortForwards supervisor(s) (sudo)..."
-        & sudo pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null
+        Write-Info "  Stopping $svcCount Start-PortForwards supervisor(s)..."
+        & pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null
+        if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') { & sudo -n pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null }
         Start-Sleep -Seconds 2
     }
 
     $pfCount = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
     if ($pfCount -gt 0) {
-        Write-Info "  Stopping $pfCount kubectl port-forward worker(s) (sudo)..."
-        & sudo pkill -f 'kubectl.*port-forward' 2>$null | Out-Null
+        Write-Info "  Stopping $pfCount kubectl port-forward worker(s)..."
+        & pkill -f 'kubectl.*port-forward' 2>$null | Out-Null
+        if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') { & sudo -n pkill -f 'kubectl.*port-forward' 2>$null | Out-Null }
         Start-Sleep -Seconds 1
     }
 
@@ -721,6 +749,22 @@ $allPhases = @(
     @{ Key = "port-forwards";     Fn = { Invoke-PortForwards $state } }
     @{ Key = "mongo-replica-set"; Fn = { Invoke-MongoReplicaSet $state } }
 )
+
+# ── Privilege preflight (vagrant-up: one password, then unattended) ─────────────
+# The nginx proxy phases always need root (writes /etc/nginx, /etc/hosts, reloads
+# systemd). Acquire root ONCE now — before the ~10-15 min image build and ~20 min
+# deploy — so the run never stalls on a password later. In a non-interactive
+# environment with no passwordless sudo, this fails in seconds with guidance
+# instead of ~40 minutes in at the proxy phase. Phases that run as the normal
+# user (build, deploy, port-forwards) are unaffected.
+$rootPhases = @('proxy-first-run', 'proxy-second-run')
+$willNeedRoot = $false
+foreach ($rp in $rootPhases) {
+    if (-not (Test-PhaseComplete $state $rp)) { $willNeedRoot = $true; break }
+}
+if ($willNeedRoot) {
+    [void](Initialize-FbSudoSession -Required -Purpose "configuring the nginx proxy (/etc/nginx, /etc/hosts, systemd)")
+}
 
 $allComplete = $true
 foreach ($phase in $allPhases) {
