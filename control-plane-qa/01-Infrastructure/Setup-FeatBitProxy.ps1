@@ -306,9 +306,14 @@ else
     Write-Info "Writing nginx config to $sitesAvailable..."
 
     # nginx.conf is a full standalone config (worker_processes/events/http{})
-    # valid for Windows nginx.  For Ubuntu sites-available we need ONLY the
-    # server {} blocks — the system nginx.conf's http {} context already
-    # provides mime.types, default_type, sendfile, etc.
+    # valid for Windows nginx.  For Ubuntu sites-available we keep the
+    # http{}-context blocks the server blocks DEPEND ON — the upstream {}
+    # groups (referenced via proxy_pass http://featbit_ui|api|eval) and the
+    # $cors_origin map {} — alongside the server {} blocks themselves.
+    # Dropping the upstream/map blocks (server-only extraction) makes nginx
+    # treat "featbit_ui" as a DNS name => "host not found in upstream".
+    # The system nginx.conf's http {} already provides mime.types,
+    # default_type, sendfile, etc., so those scalars are left out.
     # Use brace-depth counting so we don't need a full parser.
     $lines = Get-Content $sourceNginxConf
     $serverBlocks = [System.Collections.Generic.List[string]]::new()
@@ -318,7 +323,13 @@ else
 
     foreach ($line in $lines)
     {
-        if (-not $inServer -and $line -match '^\s*server\s*(\{|$)')
+        # Match the opening line of a top-level http{} block we need to keep:
+        # server {}, upstream <name> {}, or map <args> {}. The \b after the
+        # keyword prevents matching the map_hash_bucket_size /
+        # server_names_hash_bucket_size scalar directives. Inner "server
+        # 127.0.0.1:..." lines of an upstream block are skipped because the
+        # match is guarded by -not $inServer (we're already capturing).
+        if (-not $inServer -and $line -match '^\s*(server|upstream|map)\b.*\{')
         {
             $inServer = $true
             $depth = 0
