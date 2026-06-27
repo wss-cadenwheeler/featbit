@@ -116,6 +116,10 @@ param(
     # (e.g. 172.31.128.1) because host.minikube.internal resolves to the Hyper-V virtual
     # switch address (192.168.127.254) which is not reachable from within pods.
     [string]$CrossClusterRedisHost = "host.minikube.internal",
+    # Deploy a per-cluster in-cluster Redis + Sentinel (no shared redis between DCs)
+    # and point each cluster's FeatBit at its own Sentinel. Default on. Set
+    # -UseRedisSentinel:$false to keep the legacy single/host redis topology.
+    [bool]$UseRedisSentinel = $true,
     # When set, skips caching infra images (redis, kafka, mongo, clickhouse, etc.) in
     # the local registry. By default all mapped infra images are pulled from the remote
     # source once and cached at localhost:5000/infra/* so subsequent deploys don't need
@@ -1809,6 +1813,26 @@ else {
         Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
     }
     Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
+}
+
+# ── Per-cluster Redis + Sentinel ────────────────────────────────────────────────
+# Give each cluster its OWN HA Redis (1 master + 2 replicas + 3 Sentinels) in-cluster
+# and point that cluster's FeatBit (api/eval/control-plane) at its own Sentinel
+# (Redis__ConnectionString=featbit-redis:26379,serviceName=mymaster). No shared redis
+# between DCs. This runs AFTER the redis connection-string config above so it
+# overrides the host-redis defaults with the Sentinel endpoint; the host redis, if
+# still deployed by HostInfraComponents, is left orphaned (harmless). FeatBit needs
+# no code change — StackExchange.Redis resolves the master from serviceName=.
+if ($UseRedisSentinel) {
+    Write-Step "Per-Cluster Redis + Sentinel"
+    $redisSentinelScript = Join-Path $PSScriptRoot "redis-sentinel/Deploy-RedisSentinel.ps1"
+    if (Test-Path $redisSentinelScript) {
+        & $redisSentinelScript -Contexts @("west", "east") -Namespace "featbit"
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Per-cluster Redis+Sentinel setup reported an error; review output above." }
+    }
+    else {
+        Write-Warning "redis-sentinel/Deploy-RedisSentinel.ps1 not found — skipping per-cluster Sentinel (FeatBit will use the host redis)."
+    }
 }
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
