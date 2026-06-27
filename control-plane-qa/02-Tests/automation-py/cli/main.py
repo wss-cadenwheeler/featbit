@@ -28,6 +28,7 @@ from scenarios import (
     CP12Scenario,
     CP13Scenario,
     CP14Scenario,
+    CP15Scenario,
 )
 from scripts import seed_data as seed_module
 
@@ -387,6 +388,7 @@ def seed(
             "cp12-gatedcommit-recovery",
             "cp13-gatedcommit-degraded-health",
             "cp14-consistency-mode-toggle",
+            "cp15-cross-dc-cache-selfheal",
         ]
     ),
 )
@@ -659,8 +661,10 @@ def scenario(
         scenario_obj = CP12Scenario(config)
     elif scenario.startswith("cp13"):
         scenario_obj = CP13Scenario(config)
-    else:
+    elif scenario.startswith("cp14"):
         scenario_obj = CP14Scenario(config)
+    else:
+        scenario_obj = CP15Scenario(config)
 
     click.echo(f"Running {scenario}...")
     passed = scenario_obj.run()
@@ -773,6 +777,7 @@ class _null_context:
             "cp12",
             "cp13",
             "cp14",
+            "cp15",
         ]
     ),
 )
@@ -1007,6 +1012,8 @@ def suite(
         scenario_names = ["cp12-gatedcommit-recovery"]
     elif suite == "cp13":
         scenario_names = ["cp13-gatedcommit-degraded-health"]
+    elif suite == "cp15":
+        scenario_names = ["cp15-cross-dc-cache-selfheal"]
     else:
         scenario_names = ["cp14-consistency-mode-toggle"]
 
@@ -1212,8 +1219,10 @@ def suite(
                 scenario_obj = CP12Scenario(config)
             elif scenario_name.startswith("cp13"):
                 scenario_obj = CP13Scenario(config)
-            else:
+            elif scenario_name.startswith("cp14"):
                 scenario_obj = CP14Scenario(config)
+            else:
+                scenario_obj = CP15Scenario(config)
 
             if use_dashboard:
                 _sname = scenario_name
