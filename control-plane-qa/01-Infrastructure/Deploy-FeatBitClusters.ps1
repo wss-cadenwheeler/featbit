@@ -1820,9 +1820,13 @@ else {
 # and point that cluster's FeatBit (api/eval/control-plane) at its own Sentinel
 # (Redis__ConnectionString=featbit-redis:26379,serviceName=mymaster). No shared redis
 # between DCs. This runs AFTER the redis connection-string config above so it
-# overrides the host-redis defaults with the Sentinel endpoint; the host redis, if
-# still deployed by HostInfraComponents, is left orphaned (harmless). FeatBit needs
-# no code change — StackExchange.Redis resolves the master from serviceName=.
+# overrides the host-redis defaults: Instances__0 -> local Sentinel, and Instances__1
+# -> the PEER cluster's master forwarder (<peer-node-ip>:31649), superseding the
+# host.minikube.internal cross-cluster defaults set above. The host redis, if still
+# deployed by HostInfraComponents, is left orphaned (harmless). FeatBit needs no code
+# change — StackExchange.Redis resolves the master from serviceName= (local) and the
+# forwarder gives a master-only cross-reachable endpoint (remote). See
+# redis-sentinel/README.md for why the peer Sentinel can't be used directly.
 if ($UseRedisSentinel) {
     Write-Step "Per-Cluster Redis + Sentinel"
     $redisSentinelScript = Join-Path $PSScriptRoot "redis-sentinel/Deploy-RedisSentinel.ps1"
