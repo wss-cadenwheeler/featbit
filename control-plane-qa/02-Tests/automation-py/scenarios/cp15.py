@@ -75,24 +75,40 @@ class CP15Scenario(BaseScenario):
             f"kubectl --context {ctx} -n {ns} rollout status deploy/featbit-redis-master-fwd --timeout=120s"
         )
 
-    def _read_cache_enabled(self, flag_id: str) -> "bool | None":
-        """Read isEnabled for the flag's cache key from the TARGET DC's Redis.
-
-        Returns True/False, or None if the key is missing / unreadable.
-        """
+    def _redis_get(self, key: str) -> "str | None":
+        """GET a key from the TARGET DC's Redis (None if missing/unreadable)."""
         result = self._run_kubectl(
             [
                 "--context", self.TARGET_CONTEXT,
                 "-n", self.NAMESPACE,
                 "exec", self.REDIS_POD, "-c", self.REDIS_CONTAINER, "--",
-                "redis-cli", "-p", "6379", "GET", f"featbit:flag:{flag_id}",
+                "redis-cli", "-p", "6379", "GET", key,
             ],
             timeout=20,
         )
         text = (result.stdout or "").strip()
         if result.returncode != 0 or not text or "(nil)" in text.lower():
             return None
-        low = text.lower()
+        return text
+
+    def _read_cache_enabled(self, flag_id: str) -> "bool | None":
+        """Read isEnabled for the flag from the TARGET DC's Redis, the way the eval does.
+
+        Mode-agnostic (mirrors evaluation-server RedisStore): if the committed pointer
+        ``featbit:flag-committed:{id}`` exists (GatedCommit), the authoritative value is the
+        versioned snapshot ``featbit:flag:{id}:v{pointer}``; otherwise (BestEffort) it is the
+        legacy ``featbit:flag:{id}`` key.
+
+        Returns True/False, or None if the value is missing / unreadable.
+        """
+        pointer = self._redis_get(f"featbit:flag-committed:{flag_id}")
+        if pointer and pointer.isdigit():
+            value = self._redis_get(f"featbit:flag:{flag_id}:v{pointer}")
+        else:
+            value = self._redis_get(f"featbit:flag:{flag_id}")
+        if not value:
+            return None
+        low = value.lower()
         if '"isenabled":true' in low:
             return True
         if '"isenabled":false' in low:
