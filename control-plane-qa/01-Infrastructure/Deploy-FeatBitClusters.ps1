@@ -1712,27 +1712,23 @@ foreach ($clusterContext in @("west", "east")) {
     }
 
     # evaluation-server: ControlPlane__Enabled enables the heartbeat service.
+    # DcId/Region are set UNCONDITIONALLY (both consistency modes), NOT only under GatedCommit:
+    # the heartbeat MUST carry a DcId so the control plane records DC leases keyed by cluster
+    # ("west"/"east"). Without it the lease falls back to PodId (HeartbeatMessageHandler:
+    # DcId ?? PodId), so a deployment brought up in BestEffort and later flipped to GatedCommit
+    # has broken commit-coordination/recovery (it targets pod-GUID "DCs"). DcId MUST equal this
+    # cluster's control-plane Redis DcId (set below). Harmless under BestEffort (no leases recorded).
+    $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
     kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
         "MqProvider=Kafka" `
         "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
         "Kafka__Consumer__bootstrap.servers=$kafkaConsumerServers" `
-        "ControlPlane__Enabled=true" | Out-Null
+        "ControlPlane__Enabled=true" `
+        "ControlPlane__DcId=$clusterContext" `
+        "ControlPlane__Region=$clusterContext" `
+        "ControlPlane__ConsistencyMode=$consistencyMode" | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
-    }
-
-    # Cross-DC consistency (gated commit): the eval server must report its DC
-    # identity so the control plane can build the per-DC live set and gate commits.
-    # DcId = cluster name ("west"/"east"); MUST match the control-plane Redis DcId.
-    $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
-    if ($consistencyMode -eq 'GatedCommit') {
-        kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
-            "ControlPlane__ConsistencyMode=GatedCommit" `
-            "ControlPlane__DcId=$clusterContext" `
-            "ControlPlane__Region=$clusterContext" | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to set consistency (DcId) config on evaluation-server in $clusterContext"
-        }
+        Write-Warning "Failed to set Kafka/ControlPlane config on evaluation-server in $clusterContext"
     }
 
     # Scale evaluation-server to 3 replicas so cp09 can exercise intra-cluster
