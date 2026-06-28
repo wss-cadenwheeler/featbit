@@ -71,9 +71,15 @@ thing actually under test is whether **east's per-cluster Redis cache** reconcil
 - eval `0→3` ✓, api `0→1` ✓, control-plane `0→1` ✓.
 
 ### Phase 4 — Heal check (data layer)
-- East Redis: all 3 flags `false`; **DBSIZE 102, 39 `featbit:flag:*` keys** —
-  fully repopulated. → **Heal mechanism B: shared-Mongo repopulation** on api-server
-  restart (`RedisPopulatingService`) retained the changed values.
+- East Redis: all 3 flags `false`; DBSIZE 102, 39 `featbit:flag:*` keys present.
+- ⚠️ **Correction (see sim #2, cross-cluster-heal-blocked-redis-2026-06-27.md):** the
+  original reading here — "mechanism B: shared-Mongo repopulation (39 keys)" — was
+  **wrong**. `RedisPopulatingService` *skips* repopulation when
+  `featbit:redis-is-populated="true"`, and east Redis was never wiped, so the 39 keys
+  were the pre-existing populated set, NOT a repopulation. The Redis cache here was
+  healed by **mechanism A (live cross-DC replication)** while east compute was down
+  (east Redis was reachable), and **eval serving** by the shared Kafka replay. Sim #2
+  isolates this by blocking the cross-DC path.
 
 ### Phase 5 — Cutover to east (≈01:44Z)
 - LB repointed west→**east**; west load-gen `1→0`, east `0→1`; cycled east otel-demo
@@ -112,10 +118,12 @@ thing actually under test is whether **east's per-cluster Redis cache** reconcil
    forwarder. East's cache never went stale during the outage. This validates the
    cross-cluster `Instances__1` wiring end-to-end under a real outage.
 
-2. **Shared-Mongo cache repopulation (mechanism B).** On east api-server restart,
-   `RedisPopulatingService` rebuilt east Redis from the shared MongoDB (39 flag keys),
-   carrying the changes made while east was offline. Even if mechanism A hadn't run,
-   recovery alone heals the cache from the source of truth.
+2. **Eval serving heal via shared Kafka (mechanism C).** East eval reconciles its
+   in-memory serving state from the shared `featbit-feature-flag-change` topic on
+   recovery, independent of the Redis cache. *(Originally this slot claimed "mechanism
+   B: shared-Mongo repopulation" — retracted; see the Phase 4 correction and sim #2.
+   `RedisPopulatingService` skips when Redis is already populated, so recovery does
+   NOT rebuild the cache unless Redis was wiped.)*
 
 3. **Clean cutover, safe serving.** Post-cutover, east eval served the changed flags
    with no continuity errors; the disabled `payment-provider` resolved to a known
@@ -123,10 +131,13 @@ thing actually under test is whether **east's per-cluster Redis cache** reconcil
 
 ## Caveat / follow-up (honest scope)
 - This run took east **compute** down but left **east Redis + forwarder up**, which is
-  what made mechanism A observable. A **full** east outage (Redis down too) would
-  cause the live cross-DC writes to be **BestEffort-dropped** while east is offline,
-  and east would then heal **solely** via mechanism B (Mongo repopulation) on
-  recovery. That fuller-outage variant was not separately exercised here.
+  what made mechanism A (live cross-DC) observable. **Sim #2** blocks the cross-DC
+  path (forwarder down) with east Redis still **populated**, and finds the Redis cache
+  does NOT self-heal on recovery (populate-guard skip) while eval serving still heals
+  via Kafka (mechanism C). A genuinely **wiped** east Redis (data lost → guard key
+  gone) is the one case where `RedisPopulatingService` *would* rebuild the cache from
+  shared Mongo on api-server restart — that distinct "Redis destroyed" variant has not
+  been run.
 - Because Mongo+Kafka are shared, the source of truth is never actually lost in this
   harness; the test specifically validated the **per-cluster Redis cache**
   reconciliation, not a source-of-truth rebuild.
