@@ -190,10 +190,16 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
         _producer = new RecordingMessageProducer();
 
-        return new RecoveryWorker(
+        // The per-DC backfill body now lives in the shared DcBackfiller; the worker delegates to it.
+        var backfiller = new DcBackfiller(
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
             _producer,
+            NullLogger<DcBackfiller>.Instance);
+
+        return new RecoveryWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            backfiller,
             configuration,
             logger ?? NullLogger<RecoveryWorker>.Instance);
     }
