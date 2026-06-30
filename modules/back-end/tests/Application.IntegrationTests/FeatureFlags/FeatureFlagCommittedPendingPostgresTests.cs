@@ -17,6 +17,7 @@ namespace Application.IntegrationTests.FeatureFlags;
 /// committed_version (bigint) and pending (jsonb) columns — so this also proves the
 /// FeatureFlagConfiguration mapping is valid. Skips automatically if no Postgres is reachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class FeatureFlagCommittedPendingPostgresTests : IAsyncLifetime
 {
     // The throwaway Postgres container is started on 5434 with database "featbit".

@@ -5,6 +5,7 @@ using Streaming.Messages;
 namespace Application.IntegrationTests.WebSockets;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class PingTests
 {
     private readonly TestApp _app;

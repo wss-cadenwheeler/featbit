@@ -13,6 +13,7 @@ namespace Application.IntegrationTests.ControlPlane;
 /// (EnsureCreated) and the <c>dc_leases</c> table is truncated between tests so state never leaks.
 /// The Npgsql data source mirrors production (snake_case naming + dynamic json for the jsonb map).
 /// </summary>
+[Trait("Category", "Integration")]
 public class PostgresLeaseStoreTests : IAsyncLifetime
 {
     private const string ConnectionString =

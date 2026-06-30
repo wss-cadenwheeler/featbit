@@ -11,6 +11,7 @@ namespace Application.IntegrationTests.ControlPlane;
 /// Integration tests for <see cref="MongoLeaseStore"/> that run against a real MongoDB instance.
 /// Each run uses a throwaway database that is dropped on disposal so shared state is never polluted.
 /// </summary>
+[Trait("Category", "Integration")]
 public class MongoLeaseStoreTests : IAsyncLifetime
 {
     private const string ConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";

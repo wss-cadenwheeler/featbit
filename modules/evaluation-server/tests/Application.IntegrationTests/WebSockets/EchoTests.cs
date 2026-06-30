@@ -4,6 +4,7 @@ using System.Text;
 namespace Application.IntegrationTests.WebSockets;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class EchoTests
 {
     private readonly TestApp _app;

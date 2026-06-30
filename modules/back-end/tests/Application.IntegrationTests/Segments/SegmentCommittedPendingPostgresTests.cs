@@ -19,6 +19,7 @@ namespace Application.IntegrationTests.Segments;
 /// and pending (jsonb) columns — so this also proves the SegmentConfiguration mapping is valid.
 /// Fails loudly if no Postgres is reachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class SegmentCommittedPendingPostgresTests : IAsyncLifetime
 {
     private const string BaseConnectionString =

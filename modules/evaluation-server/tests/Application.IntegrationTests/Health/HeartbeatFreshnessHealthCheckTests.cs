@@ -10,6 +10,7 @@ namespace Application.IntegrationTests.Health;
 /// publish-status singleton are injected so freshness can be exercised deterministically without
 /// timers.
 /// </summary>
+[Trait("Category", "Integration")]
 public class HeartbeatFreshnessHealthCheckTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 6, 20, 12, 0, 0, TimeSpan.Zero);

@@ -1,8 +1,9 @@
-﻿using System.Net;
+using System.Net;
 
 namespace Application.IntegrationTests;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class SmokeTests
 {
     private readonly TestApp _app;

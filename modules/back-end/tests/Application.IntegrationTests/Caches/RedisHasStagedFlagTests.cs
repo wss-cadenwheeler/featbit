@@ -11,6 +11,7 @@ namespace Application.IntegrationTests.Caches;
 /// Requires a real Redis instance. The orchestrating issue spins one up on a NON-default
 /// port (6383). Override via the C3B1_REDIS env var. Fails loudly if Redis is unreachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public class RedisHasStagedFlagTests : IAsyncLifetime
 {
     private const string DefaultConnection = "localhost:6383";

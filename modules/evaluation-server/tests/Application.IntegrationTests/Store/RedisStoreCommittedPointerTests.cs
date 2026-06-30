@@ -13,6 +13,7 @@ namespace Application.IntegrationTests.Store;
 /// Requires a throwaway Redis on port 6386:
 ///   docker run -d --rm -p 6386:6379 --name d2-redis redis:7-alpine
 /// </summary>
+[Trait("Category", "Integration")]
 public class RedisStoreCommittedPointerTests : IDisposable
 {
     private const string ConnectionString = "localhost:6386,abortConnect=false,connectTimeout=2000";

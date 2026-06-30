@@ -6,6 +6,7 @@ using Streaming.Connections;
 namespace Application.IntegrationTests.Configuration;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class DefaultTests
 {
     private readonly TestApp _app;

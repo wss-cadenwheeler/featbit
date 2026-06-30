@@ -10,6 +10,7 @@ using Moq;
 namespace Application.IntegrationTests.WebSockets;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class AuthenticationTests
 {
     private readonly TestApp _app;

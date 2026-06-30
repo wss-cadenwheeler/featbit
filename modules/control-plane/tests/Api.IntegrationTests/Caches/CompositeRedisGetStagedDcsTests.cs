@@ -17,6 +17,7 @@ namespace Api.IntegrationTests.Caches;
 /// Requires a real Redis on a NON-default port (6383). Override via C3B1_REDIS env var. Fails
 /// loudly if Redis is unreachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public class CompositeRedisGetStagedDcsTests : IAsyncLifetime
 {
     private const string DefaultConnection = "localhost:6383";
