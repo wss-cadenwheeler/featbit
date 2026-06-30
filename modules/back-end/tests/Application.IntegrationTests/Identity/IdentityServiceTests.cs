@@ -7,6 +7,7 @@ using Moq;
 
 namespace Application.IntegrationTests.Identity;
 
+[Trait("Category", "Integration")]
 public class IdentityServiceTests
 {
     private readonly Mock<IPasswordHasher<User>> _passwordHasherMock = new();

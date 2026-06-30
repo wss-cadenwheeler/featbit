@@ -120,4 +120,105 @@ public class FeatureFlagService(AppDbContext dbContext)
                 .SetProperty(f => f.UpdatorId, operatorId)
             );
     }
+
+    // Committed-vs-pending, Postgres/EF parity with the Mongo FeatureFlagService.
+    // Matches the Mongo behavior exactly (including its current limitations); no
+    // concurrency/monotonicity guards here — those are tracked as #33/#34.
+
+    public async Task<FeatureFlag> GetCommittedAsync(Guid envId, string key)
+    {
+        // No-tracking so stripping the pending slot below is purely a read-shaping
+        // operation and never accidentally persisted on a later SaveChanges.
+        var flag = await Queryable
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.EnvId == envId && x.Key == key);
+        if (flag == null)
+        {
+            throw new EntityNotFoundException(nameof(FeatureFlag), $"{envId}-{key}");
+        }
+
+        // The committed read must NEVER expose a pending (staged) change. The top-level
+        // row is the committed value; drop the pending slot before returning it.
+        flag.Pending = null;
+
+        return flag;
+    }
+
+    public async Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version)
+    {
+        // load the committed row (left otherwise untouched)
+        var flag = await GetAsync(envId, key);
+
+        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+        // than both the already-staged pending version (if any) AND the committed version. An
+        // out-of-order/stale stage carrying a lower version (but still above committed) must not
+        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+        if (version <= flag.CommittedVersion || (flag.Pending != null && version <= flag.Pending.Version))
+        {
+            // stale / out-of-order stage — leave the existing pending (or lack of one) intact
+            return;
+        }
+
+        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
+        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync staging a
+        // newer pending in that window could be overwritten. The in-memory version check narrows
+        // but does not close it for the EF provider; closing it requires an optimistic-concurrency
+        // token (tracked in #33). The Mongo provider closes it via a version-filtered UpdateOneAsync.
+
+        // write ONLY the pending data; committed fields stay as they are
+        flag.SetPending(pendingValue, version);
+
+        await UpdateAsync(flag);
+    }
+
+    public async Task<bool> PromotePendingAsync(Guid envId, string key, long expectedVersion)
+    {
+        var flag = await GetAsync(envId, key);
+
+        // Version guard (#33/#34): only promote if the pending change still matches the version
+        // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
+        // or already promoted (null), do nothing.
+        if (flag.Pending?.Version != expectedVersion)
+        {
+            return false;
+        }
+
+        // promote pending -> committed, then persist the full row so the committed
+        // value advances and the pending slot is cleared.
+        flag.PromotePending();
+
+        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
+        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync committing in
+        // that window could be overwritten. The in-memory version check narrows but does not close
+        // it for the EF provider; closing it requires an optimistic-concurrency token (tracked in
+        // #33). The Mongo provider closes it via a version-filtered ReplaceOneAsync.
+        await UpdateAsync(flag);
+        return true;
+    }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()
+    {
+        // Pending is the jsonb column (B4). Postgres translates "pending IS NOT NULL"
+        // for the whole jsonb document, so this is a server-side scan across all envs.
+        return await Queryable
+            .Where(f => f.Pending != null)
+            .ToListAsync();
+    }
+
+    public async Task<IReadOnlyList<FeatureFlag>> GetAllCommittedAsync()
+    {
+        // enumerate every flag (across all envs), mirroring how RedisPopulatingService loads all
+        // flags, then strip the pending slot so only the COMMITTED value is exposed (mirroring
+        // GetCommittedAsync). AsNoTracking so the strip is purely read-shaping and never persisted.
+        var flags = await Queryable
+            .AsNoTracking()
+            .ToListAsync();
+
+        foreach (var flag in flags)
+        {
+            flag.Pending = null;
+        }
+
+        return flags;
+    }
 }

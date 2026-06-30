@@ -5,6 +5,7 @@ using Domain.Shared;
 namespace Application.IntegrationTests.Http;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class HttpAuthenticationTests
 {
     private readonly TestApp _app;

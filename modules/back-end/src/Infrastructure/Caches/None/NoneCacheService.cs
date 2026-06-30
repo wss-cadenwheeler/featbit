@@ -1,6 +1,8 @@
 using Application.Caches;
+using Domain.Connections;
 using Domain.Environments;
 using Domain.FeatureFlags;
+using Domain.Health;
 using Domain.Segments;
 using Domain.Workspaces;
 
@@ -10,9 +12,21 @@ public class NoneCacheService : ICacheService
 {
     public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
 
+    public Task StageFlagAsync(FeatureFlag flag, long ts) => Task.CompletedTask;
+
+    public Task CommitFlagAsync(Guid envId, string flagId, long ts) => Task.CompletedTask;
+
+    public Task<bool> HasStagedFlagAsync(Guid id, long ts) => Task.FromResult(false);
+
     public Task DeleteFlagAsync(Guid envId, Guid flagId) => Task.CompletedTask;
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
+
+    public Task StageSegmentAsync(Segment segment, long ts) => Task.CompletedTask;
+
+    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) => Task.CompletedTask;
+
+    public Task<bool> HasStagedSegmentAsync(Guid id, long ts) => Task.FromResult(false);
 
     public Task DeleteSegmentAsync(ICollection<Guid> envIds, Guid segmentId) => Task.CompletedTask;
 
@@ -28,4 +42,18 @@ public class NoneCacheService : ICacheService
 
         return license;
     }
+
+    public Task UpsertConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
+     
+    public Task DeleteConnectionMadeAsync(ConnectionMessage connectionMessage) => Task.CompletedTask;
+
+    public Task UpsertPodHeartbeat(HealthMessage healthMessage) => Task.CompletedTask;
+
+    public Task DeletePodConnection(Guid podId) => Task.CompletedTask;
+
+    public async Task<List<HealthMessage>> GetAllHealthMessages()
+    {
+        return new List<HealthMessage>();
+    }
+
 }

@@ -1,5 +1,8 @@
 using Application.Caches;
+using Application.Configuration;
 using Domain.Environments;
+using Domain.Messages;
+using Microsoft.Extensions.Configuration;
 
 namespace Application.Environments;
 
@@ -13,17 +16,16 @@ public class OnSecretDeleted : INotification
     }
 }
 
-public class OnSecretDeletedHandler : INotificationHandler<OnSecretDeleted>
+public class OnSecretDeletedHandler(ICacheService cache, IConfiguration configuration, IMessageProducer messageProducer)
+    : INotificationHandler<OnSecretDeleted>
 {
-    private readonly ICacheService _cache;
-
-    public OnSecretDeletedHandler(ICacheService cache)
-    {
-        _cache = cache;
-    }
-
     public async Task Handle(OnSecretDeleted notification, CancellationToken cancellationToken)
     {
-        await _cache.DeleteSecretAsync(notification.Secret);
+        await cache.DeleteSecretAsync(notification.Secret);
+        if (configuration.UseControlPlane())
+        {
+            var message = ControlPlaneSecretHelpers.CreateDeleteMessage(notification.Secret);
+            await messageProducer.PublishAsync(ControlPlaneTopics.ControlPlaneSecretChange, message);
+        }
     }
 }

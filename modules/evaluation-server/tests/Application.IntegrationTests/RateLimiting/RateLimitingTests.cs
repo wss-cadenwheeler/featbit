@@ -11,6 +11,7 @@ using Microsoft.Extensions.Internal;
 namespace Application.IntegrationTests.RateLimiting;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class RateLimitingTests
 {
     private readonly TestApp _app;

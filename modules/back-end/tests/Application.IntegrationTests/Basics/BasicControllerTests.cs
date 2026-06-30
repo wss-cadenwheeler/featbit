@@ -3,6 +3,7 @@ using Api.Controllers;
 namespace Application.IntegrationTests.Basics;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class BasicControllerTests
 {
     private readonly TestApp _app;

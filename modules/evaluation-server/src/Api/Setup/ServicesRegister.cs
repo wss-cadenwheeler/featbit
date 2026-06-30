@@ -1,5 +1,7 @@
 using Api.Authentication;
+using Api.Configuration;
 using Api.Cors;
+using Api.Health;
 using Api.RateLimiting;
 using Api.Services;
 using Domain.Shared.Authentication;
@@ -11,6 +13,7 @@ using Microsoft.AspNetCore.Authorization;
 using Serilog;
 using Streaming;
 using Streaming.DependencyInjection;
+using Streaming.Health;
 
 namespace Api.Setup;
 
@@ -31,7 +34,7 @@ public static class ServicesRegister
         services.AddSwaggerGen();
 
         // health check dependencies
-        services.AddHealthChecks().AddReadinessChecks(configuration);
+        var healthChecks = services.AddHealthChecks().AddReadinessChecks(configuration);
 
         // cors
         builder.AddCustomCors();
@@ -68,6 +71,35 @@ public static class ServicesRegister
         LicenseVerifier.ImportPublicKey(configuration["PublicKey"]);
         services.AddTransient<IRelayProxyAppService, RelayProxyAppService>();
         services.AddTransient<IFeatureFlagService, FeatureFlagService>();
+
+        if (configuration.UseControlPlane())
+        {
+            // The control-plane topology requires the local DC Redis: the control-plane writes
+            // flag/segment changes into per-DC Redis, and the eval server's heartbeat derives the
+            // applied watermark from that same Redis via RedisAppliedWatermarkReader. Ensure
+            // IRedisClient is registered here so the heartbeat can resolve even when the
+            // MqProvider/CacheProvider paths haven't already registered Redis (e.g. MqProvider=Kafka
+            // with CacheProvider=None, which is the standard control-plane QA configuration).
+            services.TryAddRedis(configuration);
+
+            // Applied watermark reader (per-env, derived on demand from the local DC Redis flag
+            // index so all pods in a DC agree and a fresh pod is immediately correct). Only the
+            // HeartbeatService consumes this, so registration is gated on UseControlPlane to keep
+            // hosts without control-plane wiring from requiring IRedisClient at DI validation time.
+            services.AddSingleton<IAppliedWatermarkReader, RedisAppliedWatermarkReader>();
+
+            // D5 (#22): shared singleton recording the last successful heartbeat publish, plus the
+            // freshness health check that surfaces a Degraded (not Unhealthy) self-fence signal under
+            // GatedCommit. Tagged Readiness so it appears on /health/readiness; ASP.NET Core maps
+            // Degraded -> HTTP 200 by default (only Unhealthy -> 503), so a Degraded result is
+            // observational and does NOT fail readiness.
+            services.AddSingleton<IHeartbeatPublishStatus, HeartbeatPublishStatus>();
+            healthChecks.AddCheck<HeartbeatFreshnessHealthCheck>(
+                "heartbeat-freshness",
+                tags: new[] { HealthCheckBuilderExtensions.ReadinessTag });
+
+            services.AddHostedService<HeartbeatService>();
+        }
 
         return builder;
     }

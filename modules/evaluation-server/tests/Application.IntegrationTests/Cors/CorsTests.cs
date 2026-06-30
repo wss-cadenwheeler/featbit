@@ -3,6 +3,7 @@ using Microsoft.Net.Http.Headers;
 namespace Application.IntegrationTests.Cors;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class CorsTests
 {
     private readonly TestApp _app;

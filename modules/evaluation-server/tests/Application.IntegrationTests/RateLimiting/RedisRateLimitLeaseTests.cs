@@ -3,6 +3,7 @@ using Api.RateLimiting;
 
 namespace Application.IntegrationTests.RateLimiting;
 
+[Trait("Category", "Integration")]
 public class RedisRateLimitLeaseTests
 {
     [Fact]

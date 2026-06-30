@@ -19,5 +19,11 @@ public class SegmentConfiguration : IEntityTypeConfiguration<Segment>
         builder.Property(x => x.IsArchived).IsRequired();
 
         builder.Property(x => x.Rules).HasColumnType("jsonb");
+
+        // Committed-vs-pending (parity with the Mongo path). CommittedVersion is a plain
+        // bigint column; Pending is a complex object stored as jsonb, mirroring how the
+        // other complex properties above (Rules) are persisted.
+        builder.Property(x => x.CommittedVersion).IsRequired();
+        builder.Property(x => x.Pending).HasColumnType("jsonb");
     }
 }

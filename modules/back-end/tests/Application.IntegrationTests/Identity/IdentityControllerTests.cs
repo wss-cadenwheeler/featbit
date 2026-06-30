@@ -3,6 +3,7 @@ using Application.Identity;
 namespace Application.IntegrationTests.Identity;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class IdentityControllerTests
 {
     private readonly TestApp _app;

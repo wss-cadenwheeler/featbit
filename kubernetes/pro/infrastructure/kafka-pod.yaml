@@ -9,9 +9,11 @@ spec:
     runAsUser: 1001
     runAsGroup: 1001
     fsGroup: 1001
+  imagePullSecrets:
+    - name: registry-credentials
   initContainers:
     - name: volume-permissions
-      image: bitnamilegacy/kafka:3.5
+      image: bitnamilegacy/kafka:3.8
       command:
         - /bin/bash
       args:
@@ -38,7 +40,7 @@ spec:
           mountPath: /bitnami/kafka
   containers:
     - name: kafka
-      image: bitnamilegacy/kafka:3.5
+      image: bitnamilegacy/kafka:3.8
       ports:
         - containerPort: 9092
         - containerPort: 29092
@@ -97,6 +99,15 @@ spec:
               /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-segment-change;
               /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-endusers;
               /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-insights;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-feature-flag-change;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-segment-change;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-secret-change;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-license-change;        
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-command;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-control-plane-web-hooks;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-connection-made;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-connection-closed;
+              /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1 --topic featbit-pod-heartbeat;
               echo "Seed kafka topic finished."
       securityContext:
           runAsUser: 1001
