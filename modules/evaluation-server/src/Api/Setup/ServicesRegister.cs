@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Authorization;
 using Serilog;
 using Streaming;
 using Streaming.DependencyInjection;
+using Streaming.Health;
 
 namespace Api.Setup;
 
@@ -80,6 +81,12 @@ public static class ServicesRegister
             // MqProvider/CacheProvider paths haven't already registered Redis (e.g. MqProvider=Kafka
             // with CacheProvider=None, which is the standard control-plane QA configuration).
             services.TryAddRedis(configuration);
+
+            // Applied watermark reader (per-env, derived on demand from the local DC Redis flag
+            // index so all pods in a DC agree and a fresh pod is immediately correct). Only the
+            // HeartbeatService consumes this, so registration is gated on UseControlPlane to keep
+            // hosts without control-plane wiring from requiring IRedisClient at DI validation time.
+            services.AddSingleton<IAppliedWatermarkReader, RedisAppliedWatermarkReader>();
 
             // D5 (#22): shared singleton recording the last successful heartbeat publish, plus the
             // freshness health check that surfaces a Degraded (not Unhealthy) self-fence signal under

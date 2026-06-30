@@ -46,7 +46,7 @@ public class ControlPlaneCommandMessageConsumerTests
 
         await sut.HandleAsync(message, CancellationToken.None);
 
-        _adminService.Verify(x => x.PushFullSyncToAllActiveClients(), Times.Once);
+        _adminService.Verify(x => x.PushFullSyncToAllActiveSdks(), Times.Once);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class ControlPlaneCommandMessageConsumerTests
 
         await sut.HandleAsync(message, CancellationToken.None);
 
-        _adminService.Verify(x => x.PushFullSyncToAllActiveClients(), Times.Never);
+        _adminService.Verify(x => x.PushFullSyncToAllActiveSdks(), Times.Never);
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class ControlPlaneCommandMessageConsumerTests
 
         await sut.HandleAsync(message, CancellationToken.None);
 
-        _adminService.Verify(x => x.PushFullSyncToAllActiveClients(), Times.Once);
+        _adminService.Verify(x => x.PushFullSyncToAllActiveSdks(), Times.Once);
     }
 
     [Fact]
@@ -81,6 +81,6 @@ public class ControlPlaneCommandMessageConsumerTests
 
         await sut.HandleAsync(message, CancellationToken.None);
 
-        _adminService.Verify(x => x.PushFullSyncToAllActiveClients(), Times.Never);
+        _adminService.Verify(x => x.PushFullSyncToAllActiveSdks(), Times.Never);
     }
 }
