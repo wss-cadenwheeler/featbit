@@ -3,6 +3,7 @@ using Domain.Shared;
 using Infrastructure.Caches.Redis;
 using Infrastructure.IntegrationTests.Fixtures;
 using Infrastructure.Store;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using StackExchange.Redis;
 
@@ -38,7 +39,7 @@ public class RedisStoreTests : IntegrationTestBase, IAsyncLifetime
         clientMock.Setup(x => x.GetDatabase()).Returns(() => _connection.GetDatabase());
         clientMock.Setup(x => x.IsHealthyAsync()).ReturnsAsync(true);
 
-        _sut = new RedisStore(clientMock.Object);
+        _sut = new RedisStore(clientMock.Object, NullLogger<RedisStore>.Instance);
     }
 
     public Task DisposeAsync()
