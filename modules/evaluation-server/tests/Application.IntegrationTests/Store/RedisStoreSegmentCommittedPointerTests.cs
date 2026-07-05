@@ -2,6 +2,7 @@ using System.Text;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Store;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using StackExchange.Redis;
 
 namespace Application.IntegrationTests.Store;
@@ -35,7 +36,7 @@ public class RedisStoreSegmentCommittedPointerTests : IDisposable
 
         _redisClient = new RedisClient(configuration);
         _db = _redisClient.GetDatabase();
-        _sut = new RedisStore(_redisClient);
+        _sut = new RedisStore(_redisClient, NullLogger<RedisStore>.Instance);
     }
 
     private static byte[] SegmentValue(string id, long ts) =>
