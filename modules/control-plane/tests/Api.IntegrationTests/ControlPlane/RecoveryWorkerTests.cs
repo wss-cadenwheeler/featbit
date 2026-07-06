@@ -36,6 +36,7 @@ namespace Api.IntegrationTests.ControlPlane;
 ///      docker run -d --rm -p 6387:6379 --name cp-e1-recovery-redis redis:7-alpine
 /// Fails loudly (not silently skips) if either is unreachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class RecoveryWorkerTests : IAsyncLifetime
 {
     private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";

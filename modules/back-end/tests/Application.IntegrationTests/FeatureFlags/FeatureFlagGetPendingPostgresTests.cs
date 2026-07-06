@@ -16,6 +16,7 @@ namespace Application.IntegrationTests.FeatureFlags;
 /// EnsureCreated() materializes the EF model (incl. committed_version/pending). Fails loudly
 /// if no Postgres is reachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class FeatureFlagGetPendingPostgresTests : IAsyncLifetime
 {
     private const string BaseConnectionString =

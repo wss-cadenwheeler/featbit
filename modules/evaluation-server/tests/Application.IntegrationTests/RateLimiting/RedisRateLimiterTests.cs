@@ -7,6 +7,7 @@ using StackExchange.Redis;
 
 namespace Application.IntegrationTests.RateLimiting;
 
+[Trait("Category", "Integration")]
 public class RedisRateLimiterTests
 {
     private static readonly ILogger<RedisRateLimiter> NullLogger =

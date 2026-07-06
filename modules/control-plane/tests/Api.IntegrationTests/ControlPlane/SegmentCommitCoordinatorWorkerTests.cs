@@ -39,6 +39,7 @@ namespace Api.IntegrationTests.ControlPlane;
 /// The segment publish is spied via a fake <see cref="ISegmentMessageService"/> so the tests assert
 /// the per-env segment change fires ONLY on commit.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
 {
     private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";

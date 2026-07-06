@@ -41,6 +41,7 @@ namespace Api.IntegrationTests.ControlPlane;
 ///      docker run -d --rm -p 6390:6379 --name f1-redis redis:7-alpine
 /// Fails loudly (not silently skips) if either is unreachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class ConsistencyMetricsTests : IAsyncLifetime
 {
     private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";

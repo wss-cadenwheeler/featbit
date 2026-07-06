@@ -12,6 +12,7 @@ namespace Application.IntegrationTests.FeatureFlags;
 /// Integration test against a real MongoDB instance. Uses a UNIQUE throwaway database that
 /// is dropped on dispose. Fails loudly if no Mongo is reachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class FeatureFlagGetPendingTests : IAsyncLifetime
 {
     private const string ConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";

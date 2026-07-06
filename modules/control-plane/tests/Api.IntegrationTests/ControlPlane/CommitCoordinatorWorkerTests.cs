@@ -32,6 +32,7 @@ namespace Api.IntegrationTests.ControlPlane;
 ///      docker run -d --rm -p 6384:6379 --name c3b2-redis redis:7-alpine
 /// Fails loudly (not silently skips) if either is unreachable.
 /// </summary>
+[Trait("Category", "Integration")]
 public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 {
     private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
@@ -313,15 +314,14 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         var pendingValue = CreateFlag(key, isEnabled: false);
         pendingValue.Id = committed.Id;
         await _flagService.SetPendingAsync(_envId, key, pendingValue, version: 2);
-        var flag = await _flagService.GetAsync(_envId, key);
 
         var now = DateTimeOffset.UtcNow;
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
         // even if both DCs have it staged, the stale version must not be committed
-        await _dcaCache.StageFlagAsync(flag.Pending!.Value, 2);
-        await _dcbCache.StageFlagAsync(flag.Pending!.Value, 2);
+        await _dcaCache.StageFlagAsync(pendingValue, 2);
+        await _dcbCache.StageFlagAsync(pendingValue, 2);
 
         var producer = new SpyMessageProducer();
         var sut = CreateSut(producer);

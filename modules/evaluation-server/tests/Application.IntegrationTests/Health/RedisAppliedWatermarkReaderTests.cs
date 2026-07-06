@@ -17,6 +17,7 @@ namespace Application.IntegrationTests.Health;
 /// Requires a throwaway Redis on port 6394:
 ///   docker run -d --rm -p 6394:6379 --name issue46-redis redis:7-alpine
 /// </summary>
+[Trait("Category", "Integration")]
 public class RedisAppliedWatermarkReaderTests : IDisposable
 {
     private const string ConnectionString = "localhost:6394,abortConnect=false,connectTimeout=2000";

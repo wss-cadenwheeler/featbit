@@ -16,6 +16,7 @@ namespace Application.IntegrationTests.Caches;
 /// Assert.Skip, so if Redis is unreachable the tests fail loudly with a clear message rather
 /// than passing silently — the orchestrating issue requires verification against a real Redis.
 /// </summary>
+[Trait("Category", "Integration")]
 public class RedisSegmentStageCommitTests : IAsyncLifetime
 {
     private const string DefaultConnection = "localhost:6381";

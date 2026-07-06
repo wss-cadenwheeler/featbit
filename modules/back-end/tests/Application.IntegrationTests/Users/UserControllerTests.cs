@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 namespace Application.IntegrationTests.Users;
 
 [Collection(nameof(TestApp))]
+[Trait("Category", "Integration")]
 public class UserControllerTests
 {
     private readonly TestApp _app;
