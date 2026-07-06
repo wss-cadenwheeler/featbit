@@ -1,0 +1,67 @@
+# FeatBit overlay for the OpenTelemetry Demo — applied on top of values-min.yaml.
+#
+# Points the instrumented components at our custom (FeatBit-wired) images on
+# Harbor and at the FeatBit evaluation server via the load-balanced eval
+# endpoint. Each component is a SEPARATE FeatBit project with its OWN server
+# secret — Deploy-OtelDemo.ps1 injects each component's secret at deploy time
+# (--set-string components.<c>.envOverrides[2]) so secrets stay out of git.
+#
+# Client URIs are featbit-eval.127.0.0.1.sslip.io based (active/passive,
+# west-active). otel-demo pods resolve that name to the host proxy via a
+# hostAlias added by the deploy script (-> the cluster's host gateway); the host
+# proxy load-balances to the eval-servers (west primary / east failover).
+#
+# (envOverrides repeated per component rather than YAML-anchored: the chart's
+# values schema rejects unknown top-level keys, so we can't park an anchor here.)
+
+components:
+  recommendation:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/recommendation, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  product-catalog:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/product-catalog, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  cart:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/cart, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  ad:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/ad, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  payment:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/payment, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  accounting:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/accounting, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  checkout:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/checkout, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  fraud-detection:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/fraud-detection, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  llm:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/llm, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }
+  frontend:
+    imageOverride: { repository: harbor.tekgeek.io/apps/otel-demo/frontend, tag: featbit-2.2.0, pullPolicy: IfNotPresent }
+    envOverrides:
+      - { name: FEATBIT_EVENT_URL, value: "http://featbit-eval.127.0.0.1.sslip.io:8080" }
+      - { name: FEATBIT_STREAMING_URL, value: "ws://featbit-eval.127.0.0.1.sslip.io:8080" }

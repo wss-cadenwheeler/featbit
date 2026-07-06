@@ -96,6 +96,15 @@ def seed(
         profile_data = extract_data(profile_response)
 
         workspace_id = profile_data.get("workspaceId") or profile_data.get("WorkspaceId")
+        if not workspace_id:
+            # /user/profile no longer always carries the workspace id; fall back
+            # to /user/workspaces (same pattern as core/auth.py and provision_uat.py).
+            workspaces = _as_list(extract_data(client.get(f"/api/v{api_version}/user/workspaces", headers=headers)))
+            match = _find_by_key_or_name(workspaces, organization_key, organization_key)
+            ws = match or (workspaces[0] if workspaces else None)
+            workspace_id = (ws or {}).get("id") or (ws or {}).get("Id")
+        if not workspace_id:
+            raise RuntimeError("Unable to resolve workspace id from /user/profile or /user/workspaces.")
         headers["Workspace"] = workspace_id
         logger.info("seed.profile.resolved", workspace_id=workspace_id)
         if on_flag:

@@ -116,6 +116,10 @@ param(
     # (e.g. 172.31.128.1) because host.minikube.internal resolves to the Hyper-V virtual
     # switch address (192.168.127.254) which is not reachable from within pods.
     [string]$CrossClusterRedisHost = "host.minikube.internal",
+    # Deploy a per-cluster in-cluster Redis + Sentinel (no shared redis between DCs)
+    # and point each cluster's FeatBit at its own Sentinel. Default on. Set
+    # -UseRedisSentinel:$false to keep the legacy single/host redis topology.
+    [bool]$UseRedisSentinel = $true,
     # When set, skips caching infra images (redis, kafka, mongo, clickhouse, etc.) in
     # the local registry. By default all mapped infra images are pulled from the remote
     # source once and cached at localhost:5000/infra/* so subsequent deploys don't need
@@ -723,9 +727,9 @@ if ($CustomImageRegistry -and $infraImageMap) {
     Write-Host "  Image map       : $($infraImageMap.Count) entries" -ForegroundColor Gray
 }
 $sharedClusterNetwork = "featbit-cluster-network"
-$sharedClusterSubnet = "172.19.0.0/16"
-$westSharedClusterIp = "172.19.0.10"
-$eastSharedClusterIp = "172.19.0.20"
+$sharedClusterSubnet = "172.31.0.0/16"
+$westSharedClusterIp = "172.31.0.10"
+$eastSharedClusterIp = "172.31.0.20"
 
 if (-not $PSBoundParameters.ContainsKey("HostInfraComponents")) {
     if ($DatabaseProvider -eq "Postgres") {
@@ -1523,10 +1527,14 @@ Write-Success "Control-plane API key configured (api-key)"
 
 Write-Step "Configuring Database Connections"
 
+# Application services that use the app database (flags/segments/users).
+# da-server is intentionally NOT here: it is the OLAP/insights store and is
+# configured separately below (ClickHouse when deployed) — forcing it onto the
+# app DB while the API runs IS_PRO=true (which delegates insight queries to
+# da-server) leaves the FeatBit UI Insights empty.
 $databaseDeployments = @(
     "api-server",
     "control-plane",
-    "da-server",
     "evaluation-server"
 )
 
@@ -1612,6 +1620,35 @@ else {
     Write-Success "PostgreSQL connection strings configured"
 }
 
+# ── Analytics store (da-server) ─────────────────────────────────────────────────
+# da-server is the OLAP/insights backend. With IS_PRO=true the API server delegates
+# flag-evaluation insight queries to da-server, so da-server must point at the store
+# that actually ingests the featbit-insights stream. When ClickHouse is deployed,
+# that's ClickHouse — its Kafka-engine table drains featbit-insights into queryable
+# tables (created by `flask migrate-database` on start). CLICKHOUSE_REPLICATION=false
+# because this topology runs a SINGLE-NODE ClickHouse (no cluster/Keeper), so the
+# default replicated/ON CLUSTER migrations would fail. Without ClickHouse, da-server
+# falls back to the app database so insights still ingest in non-pro setups.
+Write-Step "Configuring Analytics Store (da-server)"
+$clickhouseDeployed = ($hostComponentSet -and $hostComponentSet.Contains("clickhouse")) -or `
+                      ($clusterInfraComponentSet -and $clusterInfraComponentSet.Contains("clickhouse"))
+foreach ($ctx in @("west", "east")) {
+    if ($clickhouseDeployed) {
+        kubectl --context $ctx -n featbit set env deployment/da-server `
+            DB_PROVIDER=ClickHouse DbProvider=ClickHouse CLICKHOUSE_REPLICATION=false | Out-Null
+    }
+    elseif ($DatabaseProvider -eq "MongoDb") {
+        $connStr = if ($mongoConnectionString) { $mongoConnectionString } else { "mongodb://mongodb-headless:27017/?replicaSet=rs-featbit" }
+        kubectl --context $ctx -n featbit set env deployment/da-server CHECK_DB_LIVNESS=false DB_PROVIDER=MongoDb DbProvider=MongoDb MongoDb__ConnectionString=$connStr | Out-Null
+    }
+    else {
+        kubectl --context $ctx -n featbit set env deployment/da-server CHECK_DB_LIVNESS=false DB_PROVIDER=Postgres DbProvider=Postgres Postgres__ConnectionString=$postgreSqlConnectionString | Out-Null
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Error "Failed to configure da-server analytics store on $ctx"; exit 1 }
+}
+if ($clickhouseDeployed) { Write-Success "da-server analytics store -> ClickHouse (single-node, ingests featbit-insights)" }
+else { Write-Success "da-server analytics store -> $DatabaseProvider" }
+
 Write-Step "Configuring App MQ Provider"
 
 # All scripts in control-plane-qa always target a Kafka MQ topology.
@@ -1675,27 +1712,23 @@ foreach ($clusterContext in @("west", "east")) {
     }
 
     # evaluation-server: ControlPlane__Enabled enables the heartbeat service.
+    # DcId/Region are set UNCONDITIONALLY (both consistency modes), NOT only under GatedCommit:
+    # the heartbeat MUST carry a DcId so the control plane records DC leases keyed by cluster
+    # ("west"/"east"). Without it the lease falls back to PodId (HeartbeatMessageHandler:
+    # DcId ?? PodId), so a deployment brought up in BestEffort and later flipped to GatedCommit
+    # has broken commit-coordination/recovery (it targets pod-GUID "DCs"). DcId MUST equal this
+    # cluster's control-plane Redis DcId (set below). Harmless under BestEffort (no leases recorded).
+    $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
     kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
         "MqProvider=Kafka" `
         "Kafka__Producer__bootstrap.servers=$kafkaProducerServers" `
         "Kafka__Consumer__bootstrap.servers=$kafkaConsumerServers" `
-        "ControlPlane__Enabled=true" | Out-Null
+        "ControlPlane__Enabled=true" `
+        "ControlPlane__DcId=$clusterContext" `
+        "ControlPlane__Region=$clusterContext" `
+        "ControlPlane__ConsistencyMode=$consistencyMode" | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Failed to set Kafka config on evaluation-server in $clusterContext"
-    }
-
-    # Cross-DC consistency (gated commit): the eval server must report its DC
-    # identity so the control plane can build the per-DC live set and gate commits.
-    # DcId = cluster name ("west"/"east"); MUST match the control-plane Redis DcId.
-    $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
-    if ($consistencyMode -eq 'GatedCommit') {
-        kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
-            "ControlPlane__ConsistencyMode=GatedCommit" `
-            "ControlPlane__DcId=$clusterContext" `
-            "ControlPlane__Region=$clusterContext" | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to set consistency (DcId) config on evaluation-server in $clusterContext"
-        }
+        Write-Warning "Failed to set Kafka/ControlPlane config on evaluation-server in $clusterContext"
     }
 
     # Scale evaluation-server to 3 replicas so cp09 can exercise intra-cluster
@@ -1776,6 +1809,30 @@ else {
         Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
     }
     Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
+}
+
+# ── Per-cluster Redis + Sentinel ────────────────────────────────────────────────
+# Give each cluster its OWN HA Redis (1 master + 2 replicas + 3 Sentinels) in-cluster
+# and point that cluster's FeatBit (api/eval/control-plane) at its own Sentinel
+# (Redis__ConnectionString=featbit-redis:26379,serviceName=mymaster). No shared redis
+# between DCs. This runs AFTER the redis connection-string config above so it
+# overrides the host-redis defaults: Instances__0 -> local Sentinel, and Instances__1
+# -> the PEER cluster's master forwarder (<peer-node-ip>:31649), superseding the
+# host.minikube.internal cross-cluster defaults set above. The host redis, if still
+# deployed by HostInfraComponents, is left orphaned (harmless). FeatBit needs no code
+# change — StackExchange.Redis resolves the master from serviceName= (local) and the
+# forwarder gives a master-only cross-reachable endpoint (remote). See
+# redis-sentinel/README.md for why the peer Sentinel can't be used directly.
+if ($UseRedisSentinel) {
+    Write-Step "Per-Cluster Redis + Sentinel"
+    $redisSentinelScript = Join-Path $PSScriptRoot "redis-sentinel/Deploy-RedisSentinel.ps1"
+    if (Test-Path $redisSentinelScript) {
+        & $redisSentinelScript -Contexts @("west", "east") -Namespace "featbit"
+        if ($LASTEXITCODE -ne 0) { Write-Warning "Per-cluster Redis+Sentinel setup reported an error; review output above." }
+    }
+    else {
+        Write-Warning "redis-sentinel/Deploy-RedisSentinel.ps1 not found — skipping per-cluster Sentinel (FeatBit will use the host redis)."
+    }
 }
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."

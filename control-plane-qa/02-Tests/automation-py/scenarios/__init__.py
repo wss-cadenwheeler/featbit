@@ -13,6 +13,7 @@ from .cp11 import CP11Scenario
 from .cp12 import CP12Scenario
 from .cp13 import CP13Scenario
 from .cp14 import CP14Scenario
+from .cp15 import CP15Scenario
 
 __all__ = [
     "CP01Scenario",
@@ -29,4 +30,5 @@ __all__ = [
     "CP12Scenario",
     "CP13Scenario",
     "CP14Scenario",
+    "CP15Scenario",
 ]
