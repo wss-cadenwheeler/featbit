@@ -1,14 +1,9 @@
-using Application.Caches;
 using Application.Configuration;
 using Application.ControlPlane;
-using Application.Services;
-using Api.Infrastructure.Caches;
-using Domain.Messages;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Action = Domain.Messages.Action;
 
 namespace Api.Application.ControlPlane;
 
@@ -55,8 +50,7 @@ public sealed class RecoveryWorker : BackgroundService
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(10);
 
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly ICacheService _compositeCache;
-    private readonly IMessageProducer _messageProducer;
+    private readonly IDcBackfiller _backfiller;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<RecoveryWorker> _logger;
@@ -68,14 +62,12 @@ public sealed class RecoveryWorker : BackgroundService
 
     public RecoveryWorker(
         IServiceScopeFactory scopeFactory,
-        [FromKeyedServices("compositeCache")] ICacheService compositeCache,
-        IMessageProducer messageProducer,
+        IDcBackfiller backfiller,
         IConfiguration configuration,
         ILogger<RecoveryWorker> logger)
     {
         _scopeFactory = scopeFactory;
-        _compositeCache = compositeCache;
-        _messageProducer = messageProducer;
+        _backfiller = backfiller;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -127,11 +119,9 @@ public sealed class RecoveryWorker : BackgroundService
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
-        // ILeaseStore / IFeatureFlagService are scoped (per-request) in DI; resolve them inside a
-        // scope so the singleton BackgroundService does not capture a scoped/disposed instance.
+        // ILeaseStore is scoped (per-request) in DI; resolve it inside a scope so the singleton
+        // BackgroundService does not capture a scoped/disposed instance.
         using var scope = _scopeFactory.CreateScope();
-        var featureFlagService = scope.ServiceProvider.GetRequiredService<IFeatureFlagService>();
-        var segmentService = scope.ServiceProvider.GetRequiredService<ISegmentService>();
         var leaseStore = scope.ServiceProvider.GetRequiredService<ILeaseStore>();
 
         // Live DCs = distinct DcIds that currently hold at least one unexpired lease.
@@ -153,101 +143,19 @@ public sealed class RecoveryWorker : BackgroundService
             return 0;
         }
 
-        // StageFlagToDcAsync / CommitFlagToDcAsync are coordinator-only targeted writes that live on
-        // CompositeRedisCacheService, not on the ICacheService contract. In the Redis path the keyed
-        // "compositeCache" service is always a CompositeRedisCacheService; guard the cast so a
-        // misconfiguration (e.g. None cache) degrades to a clear log instead of a crash loop.
-        if (_compositeCache is not CompositeRedisCacheService composite)
-        {
-            _logger.LogWarning(
-                "Recovery worker requires the composite Redis cache (got {CacheType}); skipping tick.",
-                _compositeCache.GetType().FullName);
-            return 0;
-        }
-
-        var allCommitted = await featureFlagService.GetAllCommittedAsync();
-        var allCommittedSegments = await segmentService.GetAllCommittedAsync();
-
-        // Resolve each committed segment's target env ids ONCE (not per returned DC): the env ids of a
-        // segment are a function of the segment, independent of which DC is being repaired. Mirrors the
-        // flag loop deriving its own ts but reuses the same envIds across DCs.
-        var segmentEnvIds = new Dictionary<string, ICollection<Guid>>(allCommittedSegments.Count);
-        foreach (var segment in allCommittedSegments)
-        {
-            segmentEnvIds[segment.Id.ToString()] = await segmentService.GetEnvironmentIdsAsync(segment);
-        }
-
         var backfilled = 0;
         foreach (var dcId in returned)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            foreach (var flag in allCommitted)
-            {
-                // The committed value's version token, mirroring how FeatureFlagChangeMessageHandler
-                // derives the staged version from the flag's UpdatedAt.
-                var ts = new DateTimeOffset(flag.UpdatedAt).ToUnixTimeMilliseconds();
-
-                // Stage the versioned value, then flip the committed pointer + index — both targeted
-                // at ONLY the returned DC. Idempotent: re-applying an already-present version no-ops.
-                await composite.StageFlagToDcAsync(dcId, flag, ts);
-                await composite.CommitFlagToDcAsync(dcId, flag.EnvId, flag.Id.ToString(), ts);
-            }
-
-            foreach (var segment in allCommittedSegments)
-            {
-                // Same shape as the flag backfill: the committed segment's version token (unix-ms of
-                // UpdatedAt, mirroring SegmentChangeMessageHandler), then stage the versioned value +
-                // flip the committed pointer + per-env index — targeted at ONLY the returned DC.
-                // Idempotent: re-applying an already-present version no-ops.
-                var ts = new DateTimeOffset(segment.UpdatedAt).ToUnixTimeMilliseconds();
-                var envIds = segmentEnvIds[segment.Id.ToString()];
-
-                await composite.StageSegmentToDcAsync(dcId, segment, ts);
-                await composite.CommitSegmentToDcAsync(dcId, envIds, segment.Id.ToString(), ts);
-            }
-
-            _logger.LogInformation(
-                "Recovery: backfilled returning DC {DcId} with {FlagCount} committed flag(s) and " +
-                "{SegmentCount} committed segment(s).",
-                dcId,
-                allCommitted.Count,
-                allCommittedSegments.Count);
-
-            // D (per-DC client refresh): the returned DC's Redis is now current, but SDK clients still
-            // connected to that DC's eval servers hold stale values until they reconnect. Publish a
-            // PushFullSync command TARGETED at this DcId so only that DC's eval servers refresh their
-            // clients (others ignore the TargetDcId-scoped command). Best-effort: a publish failure is
-            // logged but does NOT fail the backfill — the Redis repair already succeeded.
-            await PublishClientRefreshAsync(dcId);
-
+            // GatedCommit backfill of the returned DC from the source of truth (staged versioned
+            // value + committed pointer + index) followed by a targeted PushFullSync — delegated to
+            // the shared backfiller, which CacheReconciler also uses (with the mode-appropriate
+            // write path).
+            await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, cancellationToken);
             backfilled++;
         }
 
         return backfilled;
-    }
-
-    /// <summary>
-    /// Best-effort: publish a <see cref="Action.PushFullSync"/> command scoped to <paramref name="dcId"/>
-    /// (<see cref="ControlPlaneCommand.TargetDcId"/>) so only that DC's eval servers refresh their
-    /// connected SDK clients after the backfill. A publish failure is logged and swallowed — it must
-    /// not fail the backfill that already repaired the DC's Redis.
-    /// </summary>
-    private async Task PublishClientRefreshAsync(string dcId)
-    {
-        try
-        {
-            await _messageProducer.PublishAsync(
-                ControlPlaneTopics.ControlPlaneCommand,
-                new ControlPlaneCommand { Action = Action.PushFullSync, TargetDcId = dcId });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(
-                ex,
-                "Recovery: failed to publish per-DC client refresh (PushFullSync) for returning DC {DcId}. " +
-                "Backfill succeeded; clients on that DC will refresh on their next reconnect.",
-                dcId);
-        }
     }
 }
