@@ -41,12 +41,12 @@ spec:
             - containerPort: 5200
           resources:
             requests:
-              memory: 1Gi
-              cpu: 500m
+              memory: 256Mi
+              cpu: 50m
               ephemeral-storage: 2Gi
             limits:
-              memory: 2Gi
-              cpu: 500m
+              memory: 512Mi
+              cpu: 1500m
               ephemeral-storage: 4Gi
       restartPolicy: Always
 status: {}

@@ -47,7 +47,7 @@ public class ControlPlaneCommandMessageConsumer(
             switch (command.Action)
             {
                 case Action.PushFullSync:
-                    await adminService.PushFullSyncToAllActiveClients();
+                    await adminService.PushFullSyncToAllActiveSdks();
                     break;
                 default:
                     throw new ArgumentOutOfRangeException($"Invalid action: {command.Action}");

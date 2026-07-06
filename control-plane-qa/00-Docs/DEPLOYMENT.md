@@ -181,6 +181,7 @@ Key settings (all optional — see comments in the file for defaults):
 | `TRUST_CERTIFICATES`                                    | Corporate CA certs to install at runtime (if not using a custom base image)                                                                                                                                                                                                                |
 | `DEPLOYMENT_MODE`                                       | `Basic` (default) or `Advanced`                                                                                                                                                                                                                                                            |
 | `DATABASE_PROVIDER`                                     | `MongoDb` (default) or `Postgres`                                                                                                                                                                                                                                                          |
+| `CONSISTENCY_MODE`                                      | `BestEffort` (default) or `GatedCommit`. GatedCommit enables cross-DC staged commits and labels each Redis instance with its `DcId` — required for the CP-10 – CP-14 consistency tests. See [GATED-COMMIT-CONSISTENCY.md](./GATED-COMMIT-CONSISTENCY.md).                                    |
 | `WEST_CPUS` / `WEST_MEMORY`                             | Cluster resource overrides                                                                                                                                                                                                                                                                 |
 
 ### Step 1: Build and Push FeatBit Images
@@ -290,6 +291,26 @@ After this, FeatBit is accessible at http://featbit.west.local and http://featbi
 >
 > Nginx proxies to the kubectl port-forward ports (8081, 8082, etc.), so both nginx **and** port forwards must be running simultaneously.
 
+### Step 7 (Optional): GatedCommit Consistency Testing
+
+Required only to run the cross-DC consistency scenarios (CP-10 – CP-14). See
+[GATED-COMMIT-CONSISTENCY.md](./GATED-COMMIT-CONSISTENCY.md) for the full operator guide.
+
+1. **Deploy in GatedCommit mode.** Set `CONSISTENCY_MODE=GatedCommit` in `deployment.env`
+   **before** Step 2. The deploy script then enables `ControlPlane:ConsistencyMode=GatedCommit`
+   on both control planes + eval servers and labels each Redis instance with its `DcId`.
+   (Default `BestEffort` leaves behavior unchanged.) To flip an already-deployed environment,
+   set it and re-run `.\Deploy-FeatBitClusters.ps1 -SkipClusterCreation`.
+
+2. **Install Chaos Mesh** (CP-11/CP-12/CP-13 disruptions only):
+
+   ```powershell
+   .\extras\Deploy-ChaosMesh.ps1
+   ```
+
+3. **Run the scenarios** from `02-Tests/automation-py`, e.g. `automation suite cp11 --env-id <env> --no-dashboard`.
+   The suite auto-applies the chaos-mesh partitions from `01-Infrastructure/chaos-mesh/`.
+
 ---
 
 ## Script Reference
@@ -363,6 +384,29 @@ All parameters can also be set in `deployment.env` (see `deployment.env.example`
 
 # Custom resources
 .\Deploy-FeatBitClusters.ps1 -WestCpus 6 -WestMemory 16384
+```
+
+### extras\Deploy-ChaosMesh.ps1
+
+**Purpose:** Installs Chaos Mesh (via Helm) on both Minikube clusters. Required only for the
+network-partition disruptions used by the CP-11/CP-12/CP-13 consistency tests (and CP-03).
+
+**Parameters:**
+
+- `-Clusters` — `east`, `west`, or both (default)
+- `-ChartVersion` — Chaos Mesh chart version (default: latest)
+- `-Namespace` — Namespace for Chaos Mesh (default: `chaos-mesh`)
+- `-SkipInotifyTuning` — Skip the node inotify sysctl tuning
+- `-TimeoutSeconds` — Seconds to wait for pods ready (default: 120)
+
+**Examples:**
+
+```powershell
+# Install on both clusters
+.\extras\Deploy-ChaosMesh.ps1
+
+# East only, pinned version
+.\extras\Deploy-ChaosMesh.ps1 -Clusters east -ChartVersion 2.8.2
 ```
 
 ### Start-PortForwards.ps1

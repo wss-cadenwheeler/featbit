@@ -9,7 +9,7 @@ namespace Api.Controllers;
 public class AdminController : ApiControllerBase
 {
     [HttpPost("push-eval-full-sync")]
-    public async Task<ApiResponse<bool>> PushFullSyncToAllActiveClients()
+    public async Task<ApiResponse<bool>> PushFullSyncToAllActiveSdks()
     {
         var request = new PushFullSync();
 

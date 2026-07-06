@@ -1039,6 +1039,22 @@ foreach ($clusterContext in @("west", "east")) {
 
 Write-Success "Both clusters are reachable"
 
+# Ensure the metrics-server addon is enabled on both clusters so `kubectl top`
+# (and any resource-usage tooling) works out of the box. Idempotent, so it is
+# safe to run on every invocation, including -SkipClusterCreation / existing
+# clusters where the create-time addon block above does not run.
+Write-Step "Ensuring metrics-server Addon"
+foreach ($clusterProfile in @("west", "east")) {
+    Write-Info "Enabling metrics-server on $clusterProfile cluster..."
+    minikube -p $clusterProfile addons enable metrics-server | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Failed to enable metrics-server on $clusterProfile cluster; 'kubectl top' may be unavailable."
+    }
+    else {
+        Write-Success "metrics-server enabled on $clusterProfile cluster"
+    }
+}
+
 Write-Step "Configuring Shared Cluster Network"
 Ensure-SharedClusterNetwork -NetworkName $sharedClusterNetwork -Subnet $sharedClusterSubnet
 Connect-ClusterToSharedNetwork -ClusterName "west" -NetworkName $sharedClusterNetwork -NodeIp $westSharedClusterIp
@@ -1730,19 +1746,36 @@ if ($consistencyMode -eq 'GatedCommit') {
     Write-Success "GatedCommit: cross-cluster Redis labeled with DcIds (west 0=west/1=east, east 0=east/1=west); ConsistencyMode=GatedCommit on both control planes + eval servers"
 }
 else {
+    # BestEffort MUST use the SAME object-form keys (__ConnectionString / __DcId) as the
+    # GatedCommit branch. The control-plane binds Redis:Instances to RedisInstanceConfig[]
+    # (see CacheServiceCollectionExtensions), whose connection comes from the __ConnectionString
+    # sub-key. The scalar form ("Redis__Instances__0=host:port") does NOT bind to
+    # RedisInstanceConfig.ConnectionString, so the composite cache ends up with empty
+    # connection strings and the remote-DC (Instance 1) write SILENTLY no-ops — the remote
+    # cluster's Redis never receives flag/secret changes. DcId labels are not required under
+    # BestEffort (an empty DcId falls back to the ordinal index with a warning) but are set
+    # here for parity with the GatedCommit branch and to suppress that warning.
+    #   west control-plane: 0 = local west redis (DcId=west), 1 = remote east redis (DcId=east)
+    #   east control-plane: 0 = local east redis (DcId=east), 1 = remote west redis (DcId=west)
     kubectl --context west -n featbit set env deployment/control-plane `
-        "Redis__Instances__0=redis:6379" `
-        "Redis__Instances__1=${CrossClusterRedisHost}:6380" | Out-Null
+        "ControlPlane__ConsistencyMode=BestEffort" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=west" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6380" `
+        "Redis__Instances__1__DcId=east" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Redis cross-cluster instance on control-plane in west"
     }
     kubectl --context east -n featbit set env deployment/control-plane `
-        "Redis__Instances__0=redis:6379" `
-        "Redis__Instances__1=${CrossClusterRedisHost}:6379" | Out-Null
+        "ControlPlane__ConsistencyMode=BestEffort" `
+        "Redis__Instances__0__ConnectionString=redis:6379" `
+        "Redis__Instances__0__DcId=east" `
+        "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6379" `
+        "Redis__Instances__1__DcId=west" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
     }
-    Write-Success "Cross-cluster Redis configured (west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
+    Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
 }
 
 Write-Info "Waiting 45 seconds for application pods to pull images and start..."
