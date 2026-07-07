@@ -346,6 +346,157 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         }
     }
 
+    // ----- UpsertSegmentIfNewerAsync: multi-env desync cases (#103) -----
+    //
+    // These reproduce the #98 review finding: the pre-fix script gated on ONLY the FIRST env index
+    // (KEYS[2]) instead of the max across every passed index, and moved every other index with a
+    // plain (non-GT) ZADD. Per-env index desync is reachable in production because the normal
+    // UpsertSegmentAsync writes each env's index in a separate round trip (a crash mid-loop desyncs
+    // them), and envIds ordering from the caller is not guaranteed stable.
+
+    [Fact]
+    public async Task UpsertSegmentIfNewerAsync_DesyncedIndexesLaggingEnvFirst_DoesNotRevertValueAndNeverMovesAnIndexBackward()
+    {
+        var sut = _sut!;
+        var db = _mux!.GetDatabase();
+
+        var envA = Guid.NewGuid(); // already fresh, at ts=200
+        var envB = Guid.NewGuid(); // desynced/lagging behind, at ts=50
+        var segmentId = Guid.NewGuid();
+        var segmentIdString = segmentId.ToString();
+
+        var valueKey = RedisKeys.Segment(segmentId);
+        var indexKeyA = RedisKeys.SegmentIndex(envA);
+        var indexKeyB = RedisKeys.SegmentIndex(envB);
+
+        try
+        {
+            // envA is genuinely at ts=200 (value + index written together, in sync).
+            var ts200 = 200L;
+            var segmentAtTs200 = NewSegment(envA, segmentId, included: ["alice", "bob"], ts200);
+            await sut.UpsertSegmentAsync([envA], segmentAtTs200);
+            Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
+
+            // envB's index is desynced (e.g. a crash mid-loop left it behind at ts=50).
+            var ts50 = 50L;
+            await db.SortedSetAddAsync(indexKeyB, segmentIdString, ts50);
+
+            // A backfill holding a stale ts=100 snapshot arrives, envIds ordered lagging-env-first.
+            var ts100 = 100L;
+            var segmentAtTs100 = NewSegment(envA, segmentId, included: ["alice"], ts100);
+            await sut.UpsertSegmentIfNewerAsync([envB, envA], segmentAtTs100);
+
+            // ACCEPTANCE: ts=100 is not strictly newer than EVERY env's index (envA is at 200), so the
+            // value key must NOT be overwritten with the stale ts=100 content.
+            var storedJson = (string?)await db.StringGetAsync(valueKey);
+            Assert.Contains("bob", storedJson);
+
+            // ACCEPTANCE: envA's index must never move backward (100 < 200, so it stays at 200).
+            Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
+
+            // envB's own index is still free to independently catch up toward ts=100 (100 > its own
+            // 50) via per-key GT, even though the value write was blocked by the *other* (fresher) env.
+            Assert.Equal(ts100, await db.SortedSetScoreAsync(indexKeyB, segmentIdString));
+        }
+        finally
+        {
+            await db.KeyDeleteAsync(valueKey);
+            await db.SortedSetRemoveAsync(indexKeyA, segmentIdString);
+            await db.SortedSetRemoveAsync(indexKeyB, segmentIdString);
+        }
+    }
+
+    [Fact]
+    public async Task UpsertSegmentIfNewerAsync_GenuinelyStaleAcrossAllEnvs_AdvancesEveryIndexAndWritesValue()
+    {
+        var sut = _sut!;
+        var db = _mux!.GetDatabase();
+
+        var envA = Guid.NewGuid();
+        var envB = Guid.NewGuid();
+        var segmentId = Guid.NewGuid();
+        var segmentIdString = segmentId.ToString();
+
+        var valueKey = RedisKeys.Segment(segmentId);
+        var indexKeyA = RedisKeys.SegmentIndex(envA);
+        var indexKeyB = RedisKeys.SegmentIndex(envB);
+
+        try
+        {
+            // Both envs are stale relative to the incoming write (desynced at different low scores).
+            await db.SortedSetAddAsync(indexKeyA, segmentIdString, 50L);
+            await db.SortedSetAddAsync(indexKeyB, segmentIdString, 80L);
+
+            var ts200 = 200L;
+            var segmentAtTs200 = NewSegment(envA, segmentId, included: ["alice", "bob"], ts200);
+            await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs200);
+
+            // ACCEPTANCE: ts=200 is strictly newer than every env's index (max(50, 80) = 80), so the
+            // value key IS written and every env's index advances to ts=200.
+            var storedJson = (string?)await db.StringGetAsync(valueKey);
+            Assert.Contains("bob", storedJson);
+            Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
+            Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyB, segmentIdString));
+        }
+        finally
+        {
+            await db.KeyDeleteAsync(valueKey);
+            await db.SortedSetRemoveAsync(indexKeyA, segmentIdString);
+            await db.SortedSetRemoveAsync(indexKeyB, segmentIdString);
+        }
+    }
+
+    [Fact]
+    public async Task UpsertSegmentIfNewerAsync_MixedFreshness_PerKeyGtAdvancesOnlyTheLaggingIndex()
+    {
+        var sut = _sut!;
+        var db = _mux!.GetDatabase();
+
+        var envA = Guid.NewGuid(); // already fresh, at ts=300 (ahead of the incoming write)
+        var envB = Guid.NewGuid(); // desynced/lagging behind, at ts=50
+        var segmentId = Guid.NewGuid();
+        var segmentIdString = segmentId.ToString();
+
+        var valueKey = RedisKeys.Segment(segmentId);
+        var indexKeyA = RedisKeys.SegmentIndex(envA);
+        var indexKeyB = RedisKeys.SegmentIndex(envB);
+
+        try
+        {
+            // envA is genuinely at ts=300 (value + index written together, in sync).
+            var ts300 = 300L;
+            var segmentAtTs300 = NewSegment(envA, segmentId, included: ["alice", "bob"], ts300);
+            await sut.UpsertSegmentAsync([envA], segmentAtTs300);
+
+            // envB's index is desynced, lagging far behind at ts=50.
+            var ts50 = 50L;
+            await db.SortedSetAddAsync(indexKeyB, segmentIdString, ts50);
+
+            // A write for ts=150 arrives: newer than envB's index but older than envA's.
+            var ts150 = 150L;
+            var segmentAtTs150 = NewSegment(envA, segmentId, included: ["carol"], ts150);
+            await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs150);
+
+            // ACCEPTANCE (value-key decision, documented invariant): ts=150 is NOT strictly newer than
+            // EVERY env's index (envA is at 300), so the value key must NOT be overwritten.
+            var storedJson = (string?)await db.StringGetAsync(valueKey);
+            Assert.Contains("bob", storedJson);
+            Assert.DoesNotContain("carol", storedJson);
+
+            // ACCEPTANCE: envA's already-fresher index is left untouched by GT (150 < 300).
+            Assert.Equal(ts300, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
+
+            // ACCEPTANCE: envB's lagging index still independently advances via per-key GT (150 > 50).
+            Assert.Equal(ts150, await db.SortedSetScoreAsync(indexKeyB, segmentIdString));
+        }
+        finally
+        {
+            await db.KeyDeleteAsync(valueKey);
+            await db.SortedSetRemoveAsync(indexKeyA, segmentIdString);
+            await db.SortedSetRemoveAsync(indexKeyB, segmentIdString);
+        }
+    }
+
     private static FeatureFlag NewFlag(Guid envId, Guid flagId, bool isEnabled, long ts)
     {
         var enabledVariationId = Guid.NewGuid().ToString();
