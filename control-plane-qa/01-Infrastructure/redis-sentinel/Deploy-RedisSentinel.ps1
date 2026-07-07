@@ -56,6 +56,19 @@ function Write-Ok   { param([string]$M) Write-Host "✓ $M" -ForegroundColor Gre
 function Write-Info { param([string]$M) Write-Host "  $M" -ForegroundColor Gray }
 function Write-Fail { param([string]$M) Write-Host "✗ $M" -ForegroundColor Red }
 
+# Runs a kubectl/helm invocation and checks $LASTEXITCODE afterward. On non-zero
+# exit, Write-Fail's the given message and exits 1 immediately — this is what
+# makes sure an early failure in a pass can never be masked by a later call's
+# exit code (or an unconditional Write-Ok downstream).
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Command,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+    & $Command
+    if ($LASTEXITCODE -ne 0) { Write-Fail $FailureMessage; exit 1 }
+}
+
 $valuesFile = Join-Path $PSScriptRoot "values.yaml"
 $fwdFile    = Join-Path $PSScriptRoot "redis-master-forward.yaml"
 if (-not (Test-Path $valuesFile)) { Write-Fail "values.yaml not found next to this script"; exit 1 }
@@ -87,18 +100,39 @@ foreach ($ctx in $Contexts) {
     Write-Ok "redis+sentinel ready on $ctx (3 nodes)"
 
     Write-Step "Deploying cross-cluster master-forwarder to '$ctx'"
-    & kubectl --context $ctx -n $Namespace apply -f $fwdFile | Out-Null
-    & kubectl --context $ctx -n $Namespace rollout status deploy/featbit-redis-master-fwd --timeout=120s | Out-Null
+    Invoke-Checked -FailureMessage "master-forwarder apply failed on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace apply -f $fwdFile | Out-Null
+    }
+    Invoke-Checked -FailureMessage "master-forwarder rollout not ready on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace rollout status deploy/featbit-redis-master-fwd --timeout=120s | Out-Null
+    }
     Write-Ok "master-forwarder ready on $ctx (NodePort $ForwarderNodePort -> current master)"
 
     Write-Step "Pointing $ctx FeatBit at its Sentinel"
     # api-server first: it repopulates redis from MongoDB on startup.
-    & kubectl --context $ctx -n $Namespace set env deploy/api-server "Redis__ConnectionString=$sentinelConn" | Out-Null
-    & kubectl --context $ctx -n $Namespace set env deploy/control-plane "Redis__Instances__0__ConnectionString=$sentinelConn" | Out-Null
-    & kubectl --context $ctx -n $Namespace rollout status deploy/api-server --timeout=180s | Out-Null
-    & kubectl --context $ctx -n $Namespace set env deploy/evaluation-server "Redis__ConnectionString=$sentinelConn" | Out-Null
-    & kubectl --context $ctx -n $Namespace rollout status deploy/evaluation-server --timeout=180s | Out-Null
-    Write-Ok "$ctx api/eval/control-plane Instances__0 -> $sentinelConn (local sentinel)"
+    Invoke-Checked -FailureMessage "set env deploy/api-server failed on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace set env deploy/api-server "Redis__ConnectionString=$sentinelConn" | Out-Null
+    }
+    # DcId is required alongside the ConnectionString (per README) — without it,
+    # standalone/re-run deploys leave Instances__0__DcId unset and the
+    # DcIdConsistencyChecker reports persistent 'unknownDcs' warnings.
+    Invoke-Checked -FailureMessage "set env deploy/control-plane failed on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace set env deploy/control-plane `
+            "Redis__Instances__0__ConnectionString=$sentinelConn" "Redis__Instances__0__DcId=$ctx" | Out-Null
+    }
+    Invoke-Checked -FailureMessage "api-server rollout not ready on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace rollout status deploy/api-server --timeout=180s | Out-Null
+    }
+    Invoke-Checked -FailureMessage "control-plane rollout not ready on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace rollout status deploy/control-plane --timeout=180s | Out-Null
+    }
+    Invoke-Checked -FailureMessage "set env deploy/evaluation-server failed on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace set env deploy/evaluation-server "Redis__ConnectionString=$sentinelConn" | Out-Null
+    }
+    Invoke-Checked -FailureMessage "evaluation-server rollout not ready on $ctx" -Command {
+        kubectl --context $ctx -n $Namespace rollout status deploy/evaluation-server --timeout=180s | Out-Null
+    }
+    Write-Ok "$ctx api/eval/control-plane Instances__0 -> $sentinelConn (local sentinel, DcId=$ctx)"
 }
 
 # ---- Pass 2: cross-cluster control-plane Instances__1 -> PEER master forwarder ----
@@ -111,13 +145,21 @@ if ($Contexts.Count -eq 2) {
     Write-Info "$a node=$ipA  |  $b node=$ipB  |  forwarder NodePort=$ForwarderNodePort"
 
     # $a control-plane -> peer ($b) ; $b control-plane -> peer ($a)
-    & kubectl --context $a -n $Namespace set env deploy/control-plane `
-        "Redis__Instances__1__ConnectionString=${ipB}:$ForwarderNodePort" "Redis__Instances__1__DcId=$b" | Out-Null
-    & kubectl --context $b -n $Namespace set env deploy/control-plane `
-        "Redis__Instances__1__ConnectionString=${ipA}:$ForwarderNodePort" "Redis__Instances__1__DcId=$a" | Out-Null
+    Invoke-Checked -FailureMessage "set env deploy/control-plane (Instances__1) failed on $a" -Command {
+        kubectl --context $a -n $Namespace set env deploy/control-plane `
+            "Redis__Instances__1__ConnectionString=${ipB}:$ForwarderNodePort" "Redis__Instances__1__DcId=$b" | Out-Null
+    }
+    Invoke-Checked -FailureMessage "set env deploy/control-plane (Instances__1) failed on $b" -Command {
+        kubectl --context $b -n $Namespace set env deploy/control-plane `
+            "Redis__Instances__1__ConnectionString=${ipA}:$ForwarderNodePort" "Redis__Instances__1__DcId=$a" | Out-Null
+    }
 
-    & kubectl --context $a -n $Namespace rollout status deploy/control-plane --timeout=180s | Out-Null
-    & kubectl --context $b -n $Namespace rollout status deploy/control-plane --timeout=180s | Out-Null
+    Invoke-Checked -FailureMessage "control-plane rollout not ready on $a (Instances__1)" -Command {
+        kubectl --context $a -n $Namespace rollout status deploy/control-plane --timeout=180s | Out-Null
+    }
+    Invoke-Checked -FailureMessage "control-plane rollout not ready on $b (Instances__1)" -Command {
+        kubectl --context $b -n $Namespace rollout status deploy/control-plane --timeout=180s | Out-Null
+    }
     Write-Ok "$a CP Instances__1 -> ${ipB}:$ForwarderNodePort (DcId=$b)"
     Write-Ok "$b CP Instances__1 -> ${ipA}:$ForwarderNodePort (DcId=$a)"
 }

@@ -49,6 +49,12 @@ function Write-Ok   { param([string]$M) Write-Host "✓ $M" -ForegroundColor Gre
 function Write-Info { param([string]$M) Write-Host "  $M" -ForegroundColor Gray }
 function Write-Fail { param([string]$M) Write-Host "✗ $M" -ForegroundColor Red }
 
+# Tracks whether any per-component step failed so the script's own exit code
+# reflects the whole run, not just the last kubectl call (a failure earlier in
+# the per-component loop must not be silently overwritten/masked by later
+# successful calls).
+$script:hadFailure = $false
+
 $root       = $PSScriptRoot
 $valuesMin  = Join-Path $root "values-min.yaml"
 $valuesFb   = Join-Path $root "values-featbit.yaml"
@@ -108,8 +114,10 @@ foreach ($ctx in $Contexts) {
         $patch = @{ spec = @{ template = @{ spec = @{ hostAliases = @(@{ ip = $gw; hostnames = @($EvalHost) }) } } } } | ConvertTo-Json -Depth 10 -Compress
         & kubectl --context $ctx -n $Namespace patch deployment $comp --type merge -p $patch *> $null
         if ($LASTEXITCODE -eq 0) { Write-Ok "hostAlias patched on $comp ($ctx)" }
-        else { Write-Fail "hostAlias patch failed on $comp ($ctx)" }
+        else { Write-Fail "hostAlias patch failed on $comp ($ctx)"; $script:hadFailure = $true }
         & kubectl --context $ctx -n $Namespace rollout status deployment/$comp --timeout=180s *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "rollout ready: $comp ($ctx)" }
+        else { Write-Fail "rollout not ready: $comp ($ctx)"; $script:hadFailure = $true }
     }
     Write-Ok "$ctx deploy complete"
 }
@@ -117,3 +125,8 @@ foreach ($ctx in $Contexts) {
 Write-Step "Done"
 Write-Info "Access (host proxy): http://featbit.127.0.0.1.sslip.io:8080"
 Write-Info "Recommendation flags: otel-recommendation project in FeatBit"
+
+if ($script:hadFailure) {
+    Write-Fail "One or more components failed to patch/roll out (see ✗ lines above) — exiting non-zero."
+    exit 1
+}

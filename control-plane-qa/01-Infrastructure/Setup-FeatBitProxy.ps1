@@ -110,6 +110,24 @@ function Write-Fail {
     Write-Host "✗ $Message" -ForegroundColor Red
 }
 
+# Runs a kubectl invocation and checks $LASTEXITCODE afterward. On non-zero
+# exit, Write-Fail's the given message and exits 1 immediately — without this,
+# an early failure (e.g. apply) is masked once a later call (e.g. rollout
+# status) in the same block runs and overwrites $LASTEXITCODE.
+function Invoke-Checked
+{
+    param(
+        [Parameter(Mandatory)][scriptblock]$Command,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+    & $Command
+    if ($LASTEXITCODE -ne 0)
+    {
+        Write-Fail $FailureMessage
+        exit 1
+    }
+}
+
 # ── Privilege helpers ─────────────────────────────────────────────────────────
 
 function Test-Administrator
@@ -528,15 +546,15 @@ spec:
 '@
 
 Write-Info "Updating west UI..."
-$westUIYaml | kubectl --context west apply -f - | Out-Null
-kubectl --context west -n featbit rollout restart deployment/ui | Out-Null
-kubectl --context west -n featbit rollout status deployment/ui --timeout=180s | Out-Null
+Invoke-Checked -FailureMessage "west UI apply failed" -Command { $westUIYaml | kubectl --context west apply -f - | Out-Null }
+Invoke-Checked -FailureMessage "west UI rollout restart failed" -Command { kubectl --context west -n featbit rollout restart deployment/ui | Out-Null }
+Invoke-Checked -FailureMessage "west UI rollout not ready" -Command { kubectl --context west -n featbit rollout status deployment/ui --timeout=180s | Out-Null }
 Write-Success "West UI updated."
 
 Write-Info "Updating east UI..."
-$eastUIYaml | kubectl --context east apply -f - | Out-Null
-kubectl --context east -n featbit rollout restart deployment/ui | Out-Null
-kubectl --context east -n featbit rollout status deployment/ui --timeout=180s | Out-Null
+Invoke-Checked -FailureMessage "east UI apply failed" -Command { $eastUIYaml | kubectl --context east apply -f - | Out-Null }
+Invoke-Checked -FailureMessage "east UI rollout restart failed" -Command { kubectl --context east -n featbit rollout restart deployment/ui | Out-Null }
+Invoke-Checked -FailureMessage "east UI rollout not ready" -Command { kubectl --context east -n featbit rollout status deployment/ui --timeout=180s | Out-Null }
 Write-Success "East UI updated."
 
 Write-Info "Waiting for UI pods to restart..."
