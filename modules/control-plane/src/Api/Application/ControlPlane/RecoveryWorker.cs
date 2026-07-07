@@ -28,8 +28,11 @@ namespace Api.Application.ControlPlane;
 ///       Best-effort: a publish failure is logged but does NOT fail the backfill.
 ///
 /// Idempotent: re-staging/re-committing an already-present version is a no-op (the staged value key
-/// and committed pointer are version-keyed). It does NOT publish <c>Topics.FeatureFlagChange</c> —
-/// the committed value did not change globally, only one DC's Redis is being repaired.
+/// and committed pointer are version-keyed), AND, since #89, the committed-pointer flip itself is
+/// only-advance-guarded — a stale/duplicate backfill run can never revert a fresher pointer a
+/// concurrent commit or another backfill already wrote, even outside the exact-version-match case.
+/// It does NOT publish <c>Topics.FeatureFlagChange</c> — the committed value did not change
+/// globally, only one DC's Redis is being repaired.
 ///
 /// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
 /// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency

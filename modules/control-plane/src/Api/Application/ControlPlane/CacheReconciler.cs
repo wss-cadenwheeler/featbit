@@ -27,7 +27,10 @@ namespace Api.Application.ControlPlane;
 /// never throws/caches a permanent failure). A poll covers startup + reconnect + a safety net with
 /// one mechanism and is straightforward to test. Backfill is via <see cref="IDcBackfiller"/>
 /// (mode-appropriate writes + a per-DC client refresh) and is idempotent, so redundant runs and the
-/// overlap with <see cref="RecoveryWorker"/> (GatedCommit lease-return trigger) are harmless.
+/// overlap with <see cref="RecoveryWorker"/> (GatedCommit lease-return trigger) are harmless — the
+/// only-advance guard (#89) on the underlying targeted writes is what actually makes them so: two
+/// concurrent backfillers (or a backfiller racing a normal commit) can never revert each other's
+/// pointer/index to an older snapshot, they just converge on whichever version is newest.
 /// Disable via <c>ControlPlane:CacheReconcile:Enabled=false</c>.
 /// </summary>
 public sealed class CacheReconciler : BackgroundService

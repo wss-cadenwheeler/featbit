@@ -12,6 +12,16 @@ public interface ICacheService
     Task UpsertFlagAsync(FeatureFlag flag);
 
     /// <summary>
+    /// Only-advance targeted upsert (#89): behaves like <see cref="UpsertFlagAsync"/> but guarded by
+    /// the env flag index score (the UpdatedAt-unix-ms version register every normal upsert/commit
+    /// already maintains), so a write for a stale/older flag value can never revert a fresher one.
+    /// Intended ONLY for the backfiller's targeted per-DC writes (a returning/lagging DC's Redis can
+    /// race a concurrent normal write); the normal broadcast <see cref="UpsertFlagAsync"/> is left
+    /// unconditional.
+    /// </summary>
+    Task UpsertFlagIfNewerAsync(FeatureFlag flag);
+
+    /// <summary>
     /// Stages a new flag version (B1 stage/commit storage) without moving the committed
     /// pointer or touching the env flag index, so the previously committed value stays
     /// readable until <see cref="CommitFlagAsync"/> is called.
@@ -34,6 +44,15 @@ public interface ICacheService
     Task DeleteFlagAsync(Guid envId, Guid flagId);
 
     Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment);
+
+    /// <summary>
+    /// Only-advance targeted upsert (#89, segment counterpart of <see cref="UpsertFlagIfNewerAsync"/>):
+    /// behaves like <see cref="UpsertSegmentAsync"/> but guarded by a segment index score as the
+    /// version register, so a write for a stale/older segment value can never revert a fresher one.
+    /// Intended ONLY for the backfiller's targeted per-DC writes; the normal broadcast
+    /// <see cref="UpsertSegmentAsync"/> is left unconditional.
+    /// </summary>
+    Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment);
 
     /// <summary>
     /// Stages a new segment version (B2 stage/commit storage) without moving the committed

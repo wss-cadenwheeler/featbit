@@ -12,6 +12,8 @@ public class NoneCacheService : ICacheService
 {
     public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
 
+    public Task UpsertFlagIfNewerAsync(FeatureFlag flag) => Task.CompletedTask;
+
     public Task StageFlagAsync(FeatureFlag flag, long ts) => Task.CompletedTask;
 
     public Task CommitFlagAsync(Guid envId, string flagId, long ts) => Task.CompletedTask;
@@ -21,6 +23,8 @@ public class NoneCacheService : ICacheService
     public Task DeleteFlagAsync(Guid envId, Guid flagId) => Task.CompletedTask;
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
+
+    public Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 
     public Task StageSegmentAsync(Segment segment, long ts) => Task.CompletedTask;
 

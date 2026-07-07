@@ -22,6 +22,16 @@ namespace Api.Application.ControlPlane;
 /// committed pointer (so the eval reads the versioned snapshot); BestEffort upserts the legacy
 /// <c>featbit:flag:{id}</c> key the BestEffort eval reads. All writes are targeted at the one DC
 /// (never broadcast) and idempotent, so re-running is safe.
+///
+/// This method snapshots the source of truth once up front (<c>GetAllCommittedAsync</c>) and then
+/// awaits per-item writes, so a version committed AFTER the snapshot was taken can land on the
+/// target DC before this backfill's write for the same flag/segment does. Without a guard that
+/// race would let a stale snapshot revert a fresher pointer (#89) — every targeted write this method
+/// makes (<see cref="CompositeRedisCacheService.CommitFlagToDcAsync"/>,
+/// <see cref="CompositeRedisCacheService.CommitSegmentToDcAsync"/>,
+/// <see cref="CompositeRedisCacheService.UpsertFlagToDcAsync"/>,
+/// <see cref="CompositeRedisCacheService.UpsertSegmentToDcAsync"/>) is only-advance guarded at the
+/// Redis layer, so a stale write from this snapshot is a no-op instead of a regression.
 /// </summary>
 public interface IDcBackfiller
 {
