@@ -106,9 +106,9 @@ foreach ($f in @($valuesMin, $valuesFb)) { if (-not (Test-Path $f)) { Write-Fail
 
 # Ensure-CustomRegistryImagePullSecret / Ensure-DefaultServiceAccountImagePullSecret,
 # shared with Deploy-FeatBitClusters.ps1 so both scripts wire pull secrets identically.
-. (Join-Path $infraRoot "Registry-PullSecrets.ps1")
-# Get-OtelImageArgs — see OtelImageArgs.ps1 for why it's split out (testability).
-. (Join-Path $root "OtelImageArgs.ps1")
+. (Join-Path $infraRoot "Set-RegistryPullSecrets.ps1")
+# Get-OtelImageArgs — see Get-OtelImageArgs.ps1 for why it's split out (testability).
+. (Join-Path $root "Get-OtelImageArgs.ps1")
 
 # Single source of truth for the component list: every directory under ./custom
 # (the same list Build-OtelDemoImages.ps1 builds images for by default), so the

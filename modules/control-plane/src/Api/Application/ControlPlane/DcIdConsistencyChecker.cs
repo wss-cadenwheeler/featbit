@@ -54,29 +54,22 @@ public sealed class DcIdConsistencyChecker : BackgroundService
 
     private static readonly Meter Meter = new(CommitCoordinatorWorker.MeterName);
 
-    // Most recent unmatched counts, refreshed at the end of each tick. Static + volatile so a single
-    // gauge registration on the shared meter survives across worker instances and the gauge callback
-    // may run on a different thread than the tick that updates the fields (matching the coordinator).
-    private static volatile int _missingLeaseCount;
-    private static volatile int _unknownDcCount;
+    /// <summary>One (direction, count) row captured for the unmatched-DC-count gauge below.</summary>
+    private readonly record struct DirectionCount(string Direction, long Count);
 
-    private static readonly ObservableGauge<long> UnmatchedDcCountGauge = Meter.CreateObservableGauge(
+    // Most recent unmatched counts, refreshed at the end of each tick, via the shared
+    // ObservableGaugeSnapshot helper (#108 item 5; previously a hand-rolled pair of static volatile
+    // ints + an ObservableGauge iterator method, matching what CommitCoordinatorWorker had).
+    private static readonly ObservableGaugeSnapshot<DirectionCount> UnmatchedDcCountSnapshot = new(
+        m => new Measurement<long>(m.Count, new KeyValuePair<string, object?>("direction", m.Direction)));
+
+    private static readonly ObservableGauge<long> UnmatchedDcCountGauge = UnmatchedDcCountSnapshot.CreateGauge(
+        Meter,
         UnmatchedDcCountGaugeName,
-        ObserveUnmatchedDcCount,
         unit: "{dc}",
         description:
         "Count of DCs whose configured Redis DcId and reporting ELS lease DcId do not line up, " +
         "tagged direction = missing_lease | unknown_dc.");
-
-    private static IEnumerable<Measurement<long>> ObserveUnmatchedDcCount()
-    {
-        yield return new Measurement<long>(
-            _missingLeaseCount,
-            new KeyValuePair<string, object?>("direction", "missing_lease"));
-        yield return new Measurement<long>(
-            _unknownDcCount,
-            new KeyValuePair<string, object?>("direction", "unknown_dc"));
-    }
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
@@ -194,18 +187,14 @@ public sealed class DcIdConsistencyChecker : BackgroundService
         // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
         // expected steady-state on every non-leader replica, not an error).
         //
-        // #105: also ZERO the static gauge fields here. ObserveUnmatchedDcCount reads these fields
-        // on every export with no leader filter of its own, and they are refreshed only AFTER this
+        // #105: also RESET the gauge snapshot here. The ObservableGauge callback reads this snapshot
+        // on every export with no leader filter of its own, and it is refreshed only AFTER this
         // gate — so a replica that loses leadership would otherwise keep exporting its stale
         // last-leader snapshot indefinitely. Latent today (no exporter wired up), but activates the
         // moment metrics are exported from more than one replica.
-        if (!_leaderElection.IsLeader)
+        if (!_leaderElection.ShouldRunAsLeader(_logger, "DcId consistency checker"))
         {
-            _logger.LogDebug(
-                "DcId consistency checker: instance {InstanceId} is not leader; skipping tick.",
-                _leaderElection.InstanceId);
-            _missingLeaseCount = 0;
-            _unknownDcCount = 0;
+            UnmatchedDcCountSnapshot.Reset();
             return null;
         }
 
@@ -232,8 +221,11 @@ public sealed class DcIdConsistencyChecker : BackgroundService
 
         // Refresh the observable gauge from this tick regardless of mismatch, so a return to a
         // matched state resets the reported count back to zero.
-        _missingLeaseCount = result.MissingLeases.Count;
-        _unknownDcCount = result.UnknownDcs.Count;
+        UnmatchedDcCountSnapshot.Update(
+        [
+            new DirectionCount("missing_lease", result.MissingLeases.Count),
+            new DirectionCount("unknown_dc", result.UnknownDcs.Count)
+        ]);
 
         if (result.MissingLeases.Count > 0)
         {

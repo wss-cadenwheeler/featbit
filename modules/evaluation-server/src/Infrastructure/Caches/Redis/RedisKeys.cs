@@ -19,17 +19,13 @@ public static class RedisKeys
     /// The glob pattern matching every per-env flag index key (<c>featbit:flag-index:*</c>),
     /// for use with Redis <c>SCAN</c> when enumerating envs that have a committed flag index.
     /// </summary>
-    public static string FlagIndexScanPattern => $"{FlagIndexPrefix}*";
+    public static string FlagIndexScanPattern => ScanPattern(FlagIndexPrefix);
 
     /// <summary>
     /// Extracts the environment id from a flag index key (<c>featbit:flag-index:{envId}</c>),
     /// or <c>null</c> if the key does not match the expected shape.
     /// </summary>
-    public static Guid? TryParseFlagIndexEnvId(string key)
-        => key.StartsWith(FlagIndexPrefix, StringComparison.Ordinal)
-           && Guid.TryParse(key.AsSpan(FlagIndexPrefix.Length), out var envId)
-            ? envId
-            : null;
+    public static Guid? TryParseFlagIndexEnvId(string key) => TryParseIndexEnvId(key, FlagIndexPrefix);
 
     public static RedisKey Flag(string id) => new($"{FlagPrefix}{id}");
 
@@ -58,17 +54,13 @@ public static class RedisKeys
     /// The glob pattern matching every per-env segment index key (<c>featbit:segment-index:*</c>),
     /// for use with Redis <c>SCAN</c> when enumerating envs that have a committed segment index.
     /// </summary>
-    public static string SegmentIndexScanPattern => $"{SegmentIndexPrefix}*";
+    public static string SegmentIndexScanPattern => ScanPattern(SegmentIndexPrefix);
 
     /// <summary>
     /// Extracts the environment id from a segment index key (<c>featbit:segment-index:{envId}</c>),
     /// or <c>null</c> if the key does not match the expected shape.
     /// </summary>
-    public static Guid? TryParseSegmentIndexEnvId(string key)
-        => key.StartsWith(SegmentIndexPrefix, StringComparison.Ordinal)
-           && Guid.TryParse(key.AsSpan(SegmentIndexPrefix.Length), out var envId)
-            ? envId
-            : null;
+    public static Guid? TryParseSegmentIndexEnvId(string key) => TryParseIndexEnvId(key, SegmentIndexPrefix);
 
     public static RedisKey Segment(string id) => new($"{SegmentPrefix}{id}");
 
@@ -96,4 +88,26 @@ public static class RedisKeys
     public static RedisKey Secret(string secretString) => new($"{SecretPrefix}{secretString}");
 
     public static RedisKey RateLimit(string type, string partitionKey) => new($"{RateLimitPrefix}{type}:{partitionKey}");
+
+    // --- Shared index scan-pattern / TryParse helpers ---------------------------------------------
+    // The flag-index and segment-index keys share the exact same "prefix + env-id" shape (only the
+    // prefix differs), so the SCAN-pattern and TryParse logic above is factored into these two
+    // helpers rather than duplicated per resource type (#108 item 3).
+
+    /// <summary>
+    /// The glob pattern matching every key under <paramref name="prefix"/>, for use with Redis
+    /// <c>SCAN</c>.
+    /// </summary>
+    private static string ScanPattern(string prefix) => $"{prefix}*";
+
+    /// <summary>
+    /// Extracts the environment id from a <paramref name="prefix"/>-prefixed index key
+    /// (<c>{prefix}{envId}</c>), or <c>null</c> if <paramref name="key"/> does not match the
+    /// expected shape.
+    /// </summary>
+    private static Guid? TryParseIndexEnvId(string key, string prefix)
+        => key.StartsWith(prefix, StringComparison.Ordinal)
+           && Guid.TryParse(key.AsSpan(prefix.Length), out var envId)
+            ? envId
+            : null;
 }

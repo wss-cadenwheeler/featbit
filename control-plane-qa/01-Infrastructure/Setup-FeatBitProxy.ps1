@@ -78,8 +78,8 @@ if (-not $script:onWindows -and -not $script:onLinux)
 # once per run and never prompts mid-run. The helper is a no-op on Windows.
 if ($script:onLinux)
 {
-    $privHelper = Join-Path $PSScriptRoot "Common-Privilege.ps1"
-    if (-not (Test-Path $privHelper)) { Write-Host "✗ Common-Privilege.ps1 not found at $privHelper" -ForegroundColor Red; exit 1 }
+    $privHelper = Join-Path $PSScriptRoot "Initialize-Privilege.ps1"
+    if (-not (Test-Path $privHelper)) { Write-Host "✗ Initialize-Privilege.ps1 not found at $privHelper" -ForegroundColor Red; exit 1 }
     . $privHelper
 }
 

@@ -135,8 +135,8 @@ function Test-Administrator
 # / Get-FbSudoMode so root is acquired at most once and never prompts mid-run.
 if ($script:onLinux)
 {
-    $privHelper = Join-Path $PSScriptRoot "Common-Privilege.ps1"
-    if (-not (Test-Path $privHelper)) { Write-Fail "Common-Privilege.ps1 not found at $privHelper"; exit 1 }
+    $privHelper = Join-Path $PSScriptRoot "Initialize-Privilege.ps1"
+    if (-not (Test-Path $privHelper)) { Write-Fail "Initialize-Privilege.ps1 not found at $privHelper"; exit 1 }
     . $privHelper
 }
 

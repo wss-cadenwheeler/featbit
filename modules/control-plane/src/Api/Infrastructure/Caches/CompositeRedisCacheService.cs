@@ -188,23 +188,8 @@ public class CompositeRedisCacheService(
     /// swallow-and-continue resilience as <see cref="BroadcastAsync"/>: a DC whose probe throws
     /// is reported as <c>false</c> rather than failing the whole call.
     /// </summary>
-    public async Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts)
-    {
-        var instances = cacheServices.ToList();
-        var tasks = instances
-            .Select(dc => ProbeStagedSafelyAsync(dc, id, ts))
-            .ToList();
-
-        var outcomes = await Task.WhenAll(tasks);
-
-        var results = new Dictionary<string, bool>(outcomes.Length);
-        for (var i = 0; i < outcomes.Length; i++)
-        {
-            results[instances[i].DcId] = outcomes[i];
-        }
-
-        return results;
-    }
+    public Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts) =>
+        ProbeStagedAsync(s => s.HasStagedFlagAsync(id, ts), "Staged-flag");
 
     /// <summary>
     /// Coordinator-facing probe (segment counterpart of <see cref="GetStagedDcsAsync"/>):
@@ -213,11 +198,22 @@ public class CompositeRedisCacheService(
     /// <see cref="HasStagedSegmentAsync"/>) with the same swallow-and-continue resilience: a DC
     /// whose probe throws is reported as <c>false</c> rather than failing the whole call.
     /// </summary>
-    public async Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts)
+    public Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts) =>
+        ProbeStagedAsync(s => s.HasStagedSegmentAsync(id, ts), "Staged-segment");
+
+    /// <summary>
+    /// Shared fan-out for the staged-probe methods above (#108 item 4): parameterizes the per-DC
+    /// probe the same way <see cref="BroadcastAsync"/> parameterizes its per-DC action, instead of
+    /// each probe re-implementing its own identical instances/tasks/outcomes-map plumbing. A DC
+    /// whose probe throws is caught and reported as <c>false</c> (never fails the whole call).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, bool>> ProbeStagedAsync(
+        Func<ICacheService, Task<bool>> probe,
+        string probeName)
     {
         var instances = cacheServices.ToList();
         var tasks = instances
-            .Select(dc => ProbeStagedSegmentSafelyAsync(dc, id, ts))
+            .Select(dc => ProbeStagedSafelyAsync(dc, probe, probeName))
             .ToList();
 
         var outcomes = await Task.WhenAll(tasks);
@@ -370,11 +366,16 @@ public class CompositeRedisCacheService(
         return await ExecuteSafelyAsync(dc, action, operationName);
     }
 
-    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
+    /// <summary>
+    /// #108 item 4: shared per-DC probe execution for <see cref="ProbeStagedAsync"/>, parameterized
+    /// by <paramref name="probe"/> (previously duplicated once per resource type as
+    /// ProbeStagedSafelyAsync / ProbeStagedSegmentSafelyAsync).
+    /// </summary>
+    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Func<ICacheService, Task<bool>> probe, string probeName)
     {
         try
         {
-            return await dc.Service.HasStagedFlagAsync(id, ts);
+            return await probe(dc.Service);
         }
         catch (OperationCanceledException)
         {
@@ -384,28 +385,8 @@ public class CompositeRedisCacheService(
         {
             logger.LogError(
                 ex,
-                "Staged-flag probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
-                dc.DcId,
-                dc.Service.GetType().FullName);
-            return false;
-        }
-    }
-
-    private async Task<bool> ProbeStagedSegmentSafelyAsync(DcCacheService dc, Guid id, long ts)
-    {
-        try
-        {
-            return await dc.Service.HasStagedSegmentAsync(id, ts);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(
-                ex,
-                "Staged-segment probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                "{ProbeName} probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                probeName,
                 dc.DcId,
                 dc.Service.GetType().FullName);
             return false;

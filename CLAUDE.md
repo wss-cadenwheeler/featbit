@@ -134,13 +134,21 @@ subdirectories:
 - **`01-Infrastructure/`** — deployment scripts, platform quickstarts (`ubuntu/`,
   `windows-wsl/`, `windows-hyperv/`), config files, and `extras/` for infrequently-used
   utilities.
-- **`02-Tests/`** — automated scenarios (`automation-py/scenarios/cp01–cp08.py`), manual
-  procedures (`manual_scripts/`), test applications (`test-app/`, `quick-test/`), and UAT
-  orchestration (`Run-UATTests.ps1`).
+- **`02-Tests/`** — automated scenarios (`automation-py/scenarios/cp01–cp15.py`), manual
+  procedures (`manual_scripts/`), test applications (`test-app/`, `quick-test/`), curated run
+  reports (`simulations/`, see below), and UAT orchestration (`Run-UATTests.ps1`).
 
 Artifacts are gitignored — test output goes to `artifacts/`, excluded from version control.
 Configuration lives in `01-Infrastructure/deployment.env` (copied from
 `deployment.env.example`); never commit credentials.
+
+**`artifacts/` vs `02-Tests/simulations/`:** these look similar (both hold test-run output) but
+follow opposite conventions. `artifacts/` is machine-generated, disposable automation output —
+gitignored, never committed. `02-Tests/simulations/*.md` are CURATED, git-tracked run reports —
+a human-authored (or human-reviewed) writeup of a specific test/simulation session, kept in
+version control as a durable record. When adding a new simulation writeup, put it under
+`02-Tests/simulations/` and commit it; when a script/tool needs a scratch output location, use
+`artifacts/`.
 
 PowerShell scripts in `control-plane-qa/` use approved PowerShell verbs in their names (e.g.
 `Deploy-`, `Initialize-`, `Start-`) and target multi-cluster Minikube deployments.

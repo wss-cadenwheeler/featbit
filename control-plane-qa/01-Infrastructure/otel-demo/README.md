@@ -12,7 +12,7 @@ realistic multi-service flag-evaluation traffic during continuity/failover testi
 |------|---------|
 | `Build-OtelDemoImages.ps1` | Shallow-clones upstream at a pinned tag (default `2.2.0`) into `build/otel-demo-src/`, applies the `custom/` overlays, and builds `featbit-*` images. |
 | `Deploy-OtelDemo.ps1` | Installs the demo via the upstream Helm chart with the FeatBit values overrides. |
-| `OtelImageArgs.ps1` | `Get-OtelImageArgs`, the pure function that renders per-component Helm `--set-string` image args; dot-sourced by `Deploy-OtelDemo.ps1` (and by tests, without a cluster). |
+| `Get-OtelImageArgs.ps1` | `Get-OtelImageArgs`, the pure function that renders per-component Helm `--set-string` image args; dot-sourced by `Deploy-OtelDemo.ps1` (and by tests, without a cluster). |
 | `Provision-FeatBitFlags.py` | Creates the demo's feature flags in a FeatBit environment. |
 | `custom/` | Per-service overlay files copied over the upstream source before building. |
 | `values-featbit.yaml`, `values-min.yaml` | Helm values for the FeatBit-instrumented deployment. |

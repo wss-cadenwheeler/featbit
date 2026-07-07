@@ -123,12 +123,12 @@ Four hardening items on top of the shared `IDcBackfiller`, all applying to **bot
   failing — and RecoveryWorker/CacheReconciler write every flag/segment/secret for a DC
   **sequentially** within a tick, so that stall accumulates linearly for the whole outage.
   `CacheServiceCollectionExtensions.AddRedis` now appends explicit `connectTimeout`/`syncTimeout`
-  (default **1500ms** each, see `ControlPlane:Redis:ConnectTimeoutMs` /
-  `ControlPlane:Redis:SyncTimeoutMs` in §3) to every per-DC connection string, UNLESS that option is
-  already present in the instance's configured `ConnectionString` (an operator override always
-  wins). Trade-off: 1500ms is deliberately generous relative to a healthy Redis's normal latency to
-  avoid false-positive command failures under real but slow load, while still bounding the worst
-  case far below the unbounded default.
+  (default **1500ms** each, see `Redis:ConnectTimeoutMs` / `Redis:SyncTimeoutMs` in §3 — #108:
+  moved from `ControlPlane:Redis:*`, which is still read as a back-compat fallback) to every per-DC
+  connection string, UNLESS that option is already present in the instance's configured
+  `ConnectionString` (an operator override always wins). Trade-off: 1500ms is deliberately generous
+  relative to a healthy Redis's normal latency to avoid false-positive command failures under real
+  but slow load, while still bounding the worst case far below the unbounded default.
 
 ---
 
@@ -170,16 +170,16 @@ territory, not a config change.
   "CacheReconcile": {
     "IntervalSeconds": 10,
     "MinBackfillIntervalSeconds": 300  // #92: per-DC reconnect-flap cooldown
-  },
-  "Redis": {
-    "ConnectTimeoutMs": 1500,          // #92: per-DC connection-string timeout overrides
-    "SyncTimeoutMs": 1500
   }
 }
 ```
-And one `Redis:Instances` entry **per DC**, each labeled with its `DcId`:
+And one `Redis:Instances` entry **per DC**, each labeled with its `DcId`, plus (optional) the
+connect/sync timeout overrides:
 ```jsonc
 "Redis": {
+  "ConnectTimeoutMs": 1500,          // #92/#108: per-DC connection-string timeout overrides
+  "SyncTimeoutMs": 1500,             // (#108: moved from ControlPlane:Redis:* — old keys still
+                                      // read as a back-compat fallback, see §3)
   "Instances": [
     { "DcId": "west", "ConnectionString": "redis-west:6379", "Password": "" },
     { "DcId": "east", "ConnectionString": "redis-east:6379", "Password": "" }
@@ -226,8 +226,8 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:LeaderElection:RenewIntervalSeconds` | `10` | CP | Leader lock acquire/renew tick |
 | `ControlPlane:StagedFlagGc:IntervalSeconds` | `300` | API/back-end | GC of superseded `v{ts}` keys |
 | `ControlPlane:CacheReconcile:MinBackfillIntervalSeconds` | `300` | CP | Per-DC reconnect-flap backfill cooldown (#92, see §1c) |
-| `ControlPlane:Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c) |
-| `ControlPlane:Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c) |
+| `Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c). #108: moved from `ControlPlane:Redis:ConnectTimeoutMs`, matching the back-end/eval-server `Redis:*` convention (#106); the old key is still read as a back-compat fallback. |
+| `Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c). #108: moved from `ControlPlane:Redis:SyncTimeoutMs` (same back-compat fallback as above). |
 | `Redis:Instances[].DcId` | — | CP | DC label per Redis instance (join key) |
 | `ControlPlane:DcId` / `:Region` | — | ELS | This pod's DC identity (must match a Redis `DcId`) |
 | `Kafka:Consumer:group.id` | `featbit-control-plane` | CP | Consumer group for the control-plane trigger topics. When left at the shipped default AND `Redis:Instances:0:DcId` is non-empty, the control plane auto-suffixes it with `-{DcId}` (e.g. `featbit-control-plane-west`) so DCs sharing a broker don't collide on a single group id (#100). An explicitly-set non-default group id (e.g. `Deploy-FeatBitClusters.ps1`'s per-cluster literal) is always left untouched; no DcId configured leaves the default group id unchanged (single-DC/legacy behavior). See `MqServiceCollectionExtensions.ResolveConsumerGroupId`. |
@@ -372,6 +372,22 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   restarted); it rejoins rotation once heartbeats resume. See CP-13 above.
 - **EF residual window:** the optimistic guards on `SetPending`/`PromotePending` are atomic on
   Mongo but load-check-save on EF/Postgres (no rowversion) — a documented narrow window.
+- **EF `SetPendingAsync` retry-exhaustion edge (#107):** on Postgres, `SetPendingAsync`
+  (`FeatureFlagService`/`SegmentService`, EF) retries `DbUpdateConcurrencyException` (the xmin
+  token, #76) with a bounded budget and jittered backoff
+  (`PendingOpRetryPolicy.MaxRetries` = 8; `Random(10, 50)ms * attemptNumber` between attempts,
+  ~1-2s worst case) rather than retrying unboundedly or making the write atomic via
+  `ExecuteUpdate`/jsonb-predicate translation (evaluated and rejected — see #72 design notes on
+  translation fragility) or reordering the handler's Redis-stage-then-DB-write sequence (rejected
+  — subtle coordinator interactions). This makes exhaustion effectively unreachable under realistic
+  contention, but does not eliminate it: under pathological contention (far more concurrent racers
+  on one row than the retry budget can absorb), `SetPendingAsync` still throws after exhausting its
+  attempts, and the handler already staged that change to Redis before the DB write — so this
+  specific stage is dropped, invisible to the coordinator, superseded only by the next edit of that
+  flag/segment. The orphaned Redis stage is reclaimed by `StagedFlagGc`
+  (`ControlPlane:StagedFlagGc:IntervalSeconds`, §-referenced above) rather than lingering forever.
+  Exhaustion is not silent: it logs an ERROR with the entity type, key/id, version, and attempt
+  count before rethrowing, so it is diagnosable via logs even though the write itself is lost.
 - **Multi-replica control plane (#71 — resolved):** the coordinator/recovery/checker workers now
   run only on the elected leader (§1a); `CacheReconciler` intentionally still runs on every
   replica (§1b).

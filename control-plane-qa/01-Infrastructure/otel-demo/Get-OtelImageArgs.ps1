@@ -12,7 +12,7 @@
     Get-OtelImageArgs to verify the rendered args for any -Registry/-Repo/-Tag
     combination, e.g.:
 
-        . ./OtelImageArgs.ps1
+        . ./Get-OtelImageArgs.ps1
         Get-OtelImageArgs -Components @("cart","frontend") `
             -Registry "harbor.tekgeek.io" -Repo "apps/otel-demo" -Tag "featbit-2.2.0"
 #>

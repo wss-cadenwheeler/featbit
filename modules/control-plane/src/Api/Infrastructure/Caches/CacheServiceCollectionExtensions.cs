@@ -12,7 +12,10 @@ public static class CacheServiceCollectionExtensions
     /// <summary>
     /// Default StackExchange.Redis <c>connectTimeout</c>/<c>syncTimeout</c> (ms) applied to every
     /// per-DC connection string (#92) when not already present and not overridden via
-    /// <c>ControlPlane:Redis:ConnectTimeoutMs</c> / <c>ControlPlane:Redis:SyncTimeoutMs</c>.
+    /// <c>Redis:ConnectTimeoutMs</c> / <c>Redis:SyncTimeoutMs</c> (#108 item 8: moved under
+    /// <c>Redis:*</c> to match the back-end/eval-server convention, #106 — the old
+    /// <c>ControlPlane:Redis:*</c> keys are still read as a back-compat fallback, see
+    /// <see cref="AddRedis"/> below).
     ///
     /// Trade-off: with <c>abortConnect=false</c> and NO explicit timeout, a command issued to a
     /// down/unreachable DC blocks for StackExchange.Redis's own default (~5s) before failing —
@@ -56,10 +59,17 @@ public static class CacheServiceCollectionExtensions
 
             // #92: explicit connect/sync timeouts, config-overridable, appended to every per-DC
             // connection string below (see DefaultRedisTimeoutMs for the trade-off rationale).
+            // #108 item 8: primary key is Redis:* (matching the back-end/eval-server convention,
+            // #106); the original ControlPlane:Redis:* key is still read as a back-compat fallback
+            // so an existing deployment's config keeps working unchanged.
             var connectTimeoutMs =
-                configuration.GetValue<int?>("ControlPlane:Redis:ConnectTimeoutMs") ?? DefaultRedisTimeoutMs;
+                configuration.GetValue<int?>("Redis:ConnectTimeoutMs")
+                ?? configuration.GetValue<int?>("ControlPlane:Redis:ConnectTimeoutMs")
+                ?? DefaultRedisTimeoutMs;
             var syncTimeoutMs =
-                configuration.GetValue<int?>("ControlPlane:Redis:SyncTimeoutMs") ?? DefaultRedisTimeoutMs;
+                configuration.GetValue<int?>("Redis:SyncTimeoutMs")
+                ?? configuration.GetValue<int?>("ControlPlane:Redis:SyncTimeoutMs")
+                ?? DefaultRedisTimeoutMs;
 
             var clients = redisInstances
                 .Select(instance =>

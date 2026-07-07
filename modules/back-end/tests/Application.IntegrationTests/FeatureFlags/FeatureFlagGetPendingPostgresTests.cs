@@ -3,6 +3,7 @@ using Domain.Utils;
 using Infrastructure.Persistence.EntityFrameworkCore;
 using Infrastructure.Services.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
 namespace Application.IntegrationTests.FeatureFlags;
@@ -60,7 +61,7 @@ public sealed class FeatureFlagGetPendingPostgresTests : IAsyncLifetime
 
         await _dbContext.Database.EnsureCreatedAsync();
 
-        _sut = new FeatureFlagService(_dbContext);
+        _sut = new FeatureFlagService(_dbContext, NullLogger<FeatureFlagService>.Instance);
     }
 
     public async Task DisposeAsync()

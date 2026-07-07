@@ -194,25 +194,33 @@ public sealed class RedisAppliedWatermarkReader : IAppliedWatermarkReader
                 continue;
             }
 
-            foreach (var key in server.Keys(pattern: RedisKeys.FlagIndexScanPattern))
-            {
-                var envId = RedisKeys.TryParseFlagIndexEnvId(key.ToString());
-                if (envId.HasValue)
-                {
-                    envIds.Add(envId.Value);
-                }
-            }
-
-            foreach (var key in server.Keys(pattern: RedisKeys.SegmentIndexScanPattern))
-            {
-                var envId = RedisKeys.TryParseSegmentIndexEnvId(key.ToString());
-                if (envId.HasValue)
-                {
-                    envIds.Add(envId.Value);
-                }
-            }
+            ScanIndexEnvIdsInto(envIds, server, RedisKeys.FlagIndexScanPattern, RedisKeys.TryParseFlagIndexEnvId);
+            ScanIndexEnvIdsInto(envIds, server, RedisKeys.SegmentIndexScanPattern, RedisKeys.TryParseSegmentIndexEnvId);
         }
 
         return envIds;
+    }
+
+    /// <summary>
+    /// Scans <paramref name="server"/> for keys matching <paramref name="scanPattern"/>, parses each
+    /// matching key's env id via <paramref name="tryParseEnvId"/>, and adds every successfully parsed
+    /// id into <paramref name="envIds"/>. Shared by both the flag-index and segment-index scans in
+    /// <see cref="ScanIndexEnvIds"/> (#108 item 2), which are otherwise identical apart from the
+    /// pattern/parser pair.
+    /// </summary>
+    private static void ScanIndexEnvIdsInto(
+        HashSet<Guid> envIds,
+        IServer server,
+        string scanPattern,
+        Func<string, Guid?> tryParseEnvId)
+    {
+        foreach (var key in server.Keys(pattern: scanPattern))
+        {
+            var envId = tryParseEnvId(key.ToString());
+            if (envId.HasValue)
+            {
+                envIds.Add(envId.Value);
+            }
+        }
     }
 }
