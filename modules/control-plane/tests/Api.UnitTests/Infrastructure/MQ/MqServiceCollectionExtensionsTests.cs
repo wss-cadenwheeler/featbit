@@ -79,4 +79,116 @@ public class MqServiceCollectionExtensionsTests
 
         Assert.Equal("featbit-control-plane-legacy", result);
     }
+
+    // ----- #105: real appsettings pinned to DefaultConsumerGroupId (drift breaks CI) -----
+
+    private static IConfiguration LoadRealAppSettings(string fileName)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "TestData", fileName);
+        Assert.True(File.Exists(path), $"Expected the linked appsettings file at '{path}'.");
+
+        return new ConfigurationBuilder()
+            .AddJsonFile(path, optional: false)
+            .Build();
+    }
+
+    [Fact]
+    public void AppSettings_KafkaConsumerGroupId_MatchesDefaultConsumerGroupIdConstant()
+    {
+        var configuration = LoadRealAppSettings("appsettings.json");
+
+        var groupId = configuration["Kafka:Consumer:group.id"];
+
+        Assert.Equal(MqServiceCollectionExtensions.DefaultConsumerGroupId, groupId);
+    }
+
+    [Fact]
+    public void AppSettingsDevelopment_KafkaConsumerGroupId_MatchesDefaultConsumerGroupIdConstant()
+    {
+        var configuration = LoadRealAppSettings("appsettings.Development.json");
+
+        var groupId = configuration["Kafka:Consumer:group.id"];
+
+        Assert.Equal(MqServiceCollectionExtensions.DefaultConsumerGroupId, groupId);
+    }
+
+    // ----- #105: multi-instance + empty-local-DcId + still-default-group.id collision-risk shape -----
+
+    [Fact]
+    public void CollisionRisk_MultiInstance_EmptyLocalDcId_StillDefaultGroupId_IsTrue()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Redis:Instances:0:DcId"] = "",
+                ["Redis:Instances:0:ConnectionString"] = "redis-west:6379",
+                ["Redis:Instances:1:DcId"] = "east",
+                ["Redis:Instances:1:ConnectionString"] = "redis-east:6379"
+            })
+            .Build();
+
+        var risk = MqServiceCollectionExtensions.IsMultiInstanceDefaultGroupIdCollisionRisk(
+            configuration, MqServiceCollectionExtensions.DefaultConsumerGroupId);
+
+        Assert.True(risk);
+    }
+
+    [Fact]
+    public void CollisionRisk_SingleInstance_EmptyDcId_IsFalse()
+    {
+        // Single-DC/legacy deployments are today's preserved behavior — not a collision risk (there
+        // is no peer to collide with).
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Redis:Instances:0:DcId"] = "",
+                ["Redis:Instances:0:ConnectionString"] = "redis:6379"
+            })
+            .Build();
+
+        var risk = MqServiceCollectionExtensions.IsMultiInstanceDefaultGroupIdCollisionRisk(
+            configuration, MqServiceCollectionExtensions.DefaultConsumerGroupId);
+
+        Assert.False(risk);
+    }
+
+    [Fact]
+    public void CollisionRisk_MultiInstance_WithLocalDcId_IsFalse()
+    {
+        // A non-empty local DcId lets ResolveConsumerGroupId self-differentiate; not a risk.
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Redis:Instances:0:DcId"] = "west",
+                ["Redis:Instances:0:ConnectionString"] = "redis-west:6379",
+                ["Redis:Instances:1:DcId"] = "east",
+                ["Redis:Instances:1:ConnectionString"] = "redis-east:6379"
+            })
+            .Build();
+
+        var risk = MqServiceCollectionExtensions.IsMultiInstanceDefaultGroupIdCollisionRisk(
+            configuration, MqServiceCollectionExtensions.DefaultConsumerGroupId);
+
+        Assert.False(risk);
+    }
+
+    [Fact]
+    public void CollisionRisk_MultiInstance_EmptyLocalDcId_ButCustomGroupId_IsFalse()
+    {
+        // An operator-set custom group.id already self-differentiates; not a risk regardless of DcId.
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Redis:Instances:0:DcId"] = "",
+                ["Redis:Instances:0:ConnectionString"] = "redis-west:6379",
+                ["Redis:Instances:1:DcId"] = "east",
+                ["Redis:Instances:1:ConnectionString"] = "redis-east:6379"
+            })
+            .Build();
+
+        var risk = MqServiceCollectionExtensions.IsMultiInstanceDefaultGroupIdCollisionRisk(
+            configuration, "my-custom-group-id");
+
+        Assert.False(risk);
+    }
 }

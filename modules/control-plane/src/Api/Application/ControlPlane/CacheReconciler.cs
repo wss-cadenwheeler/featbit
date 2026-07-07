@@ -281,7 +281,28 @@ public sealed class CacheReconciler : BackgroundService
             var result = await _backfiller.BackfillDcAsync(dcId, _mode, snapshot, cancellationToken);
             if (result != IDcBackfiller.Skipped)
             {
-                // Only a real (non-coalesced, non-guard-failed) backfill starts the cooldown clock.
+                // #105: arms the cooldown on any NON-SKIPPED (non-coalesced) run — INCLUDING one
+                // where the only-advance guard accepted zero writes because this DC's Redis already
+                // matched the source of truth for every flag/segment. An earlier version of this
+                // comment called that "non-guard-failed", which overclaimed: a zero-accepted run IS
+                // the guard rejecting every item, just because nothing was actually stale.
+                //
+                // That is still safe to treat as a successful reconcile for cooldown purposes, by
+                // PER-KEY GUARD INDEPENDENCE (#89): every targeted write is judged solely against
+                // its OWN key's version register (the flag/segment's own index score), never against
+                // this cooldown timer. This reconciler is a SUPPLEMENTARY catch-up for an outage
+                // window, not the only way a DC's cache converges — while the DC is connected (the
+                // precondition for reaching this method at all), the PRIMARY propagation path (the
+                // broadcast Stage/Commit/Upsert a live DC receives directly from
+                // FeatureFlagChangeMessageHandler / SegmentChangeMessageHandler / the commit
+                // coordinator) keeps delivering fresh writes to it regardless of this cooldown. So
+                // arming the cooldown after a zero-accepted run never suppresses a NEEDED retry: if
+                // a key genuinely goes stale again during the cooldown window (e.g. another
+                // disconnect), either the primary path already covers it once reconnected, or the
+                // guard's own per-key independence means a LATER reconcile (once the cooldown
+                // expires, or triggered by the next reachability transition) will accept it on its
+                // own merits — nothing about this cooldown can make an already-accepted write look
+                // rejected, or vice versa.
                 _lastBackfillAt[dcId] = DateTimeOffset.UtcNow;
             }
         }

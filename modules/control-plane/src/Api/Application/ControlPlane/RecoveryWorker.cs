@@ -206,12 +206,15 @@ public sealed class RecoveryWorker : BackgroundService
         // for a multi-DC tick.
         var snapshot = await _backfiller.FetchCommittedSnapshotAsync(cancellationToken);
 
-        // #92: honest metrics — count a DC as "backfilled" only when the shared backfiller actually
-        // did work for it, not merely because it was in the "returned" set this tick. A DC's call
-        // returns IDcBackfiller.Skipped (not a repair) when it coalesced with a concurrent backfill of
-        // the same DC (e.g. CacheReconciler backfilling it at the same moment) — that DC IS being
-        // repaired, just not by this call, so it must not be double-counted, and a genuinely failed
-        // guard/coalesce must not be reported as a repair either.
+        // #92/#105: honest metrics — count a DC as "backfilled" only when the shared backfiller
+        // actually did work for it AND that work was ACCEPTED, not merely because it was in the
+        // "returned" set this tick. A DC's call returns IDcBackfiller.Skipped (not a repair) when it
+        // coalesced with a concurrent backfill of the same DC (e.g. CacheReconciler backfilling it at
+        // the same moment) — that DC IS being repaired, just not by this call, so it must not be
+        // double-counted. #105: BackfillDcAsync's return is now the ACCEPTED flag count (not the
+        // attempted count — see IDcBackfiller's #105 doc), so a run that genuinely accepted zero
+        // writes (the DC's Redis already matched the source of truth for every flag) must ALSO not
+        // be counted as a repair, even though it was not skipped/coalesced.
         var backfilled = 0;
         foreach (var dcId in returned)
         {
@@ -222,15 +225,23 @@ public sealed class RecoveryWorker : BackgroundService
             // the shared backfiller, which CacheReconciler also uses (with the mode-appropriate
             // write path).
             var result = await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, snapshot, cancellationToken);
-            if (result != IDcBackfiller.Skipped)
+            if (result == IDcBackfiller.Skipped)
+            {
+                _logger.LogDebug(
+                    "Recovery worker: backfill for returned DC {DcId} was skipped this tick " +
+                    "(coalesced with a concurrent backfill already in flight for that DC).",
+                    dcId);
+            }
+            else if (result > 0)
             {
                 backfilled++;
             }
             else
             {
                 _logger.LogDebug(
-                    "Recovery worker: backfill for returned DC {DcId} was skipped this tick " +
-                    "(coalesced with a concurrent backfill already in flight for that DC).",
+                    "Recovery worker: backfill for returned DC {DcId} ran but the only-advance guard " +
+                    "accepted zero flag writes (its Redis already matched the source of truth); not " +
+                    "counted as a repair.",
                     dcId);
             }
         }

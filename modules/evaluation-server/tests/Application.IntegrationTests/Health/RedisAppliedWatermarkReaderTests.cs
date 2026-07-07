@@ -243,6 +243,60 @@ public class RedisAppliedWatermarkReaderTests : IDisposable
         Assert.Equal(2000, watermarks[segmentOnlyEnv]);
     }
 
+    /// <summary>
+    /// #104: the zero-connections SCAN fallback (<c>EnumerateEnvIds</c> -&gt;
+    /// <c>ScanIndexEnvIds</c>) used to run two full-keyspace SCAN passes on every single
+    /// <see cref="RedisAppliedWatermarkReader.ReadAsync"/> call — forever, on a standby/passive
+    /// DC's pods, which never accumulate connections. It is now cached for a TTL. This test drives
+    /// the cache via the internal (test-only) constructor's settable TTL/clock seam: a read within
+    /// the TTL must NOT pick up an env added to the index after the first scan, while a read after
+    /// the TTL expires must.
+    /// </summary>
+    [Fact]
+    public async Task ScanFallback_CachesEnvIds_WithinTtl_AndRefreshesAfterExpiry()
+    {
+        // Arrange — no active connections, one env already committed.
+        var env1 = Guid.NewGuid();
+        await SeedIndexAsync(env1, Guid.NewGuid().ToString(), 1000);
+
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var sut = new RedisAppliedWatermarkReader(
+            _redisClient,
+            new FakeConnectionManager(),
+            scanCacheTtl: TimeSpan.FromSeconds(30),
+            now: clock.Now);
+
+        var first = await sut.ReadAsync();
+        Assert.Equal(1000, first[env1]);
+
+        // A second env is committed after the first scan, but the cache is still within its TTL.
+        var env2 = Guid.NewGuid();
+        await SeedIndexAsync(env2, Guid.NewGuid().ToString(), 2000);
+
+        clock.Advance(TimeSpan.FromSeconds(10)); // 10s since the first scan, still < 30s TTL
+        var second = await sut.ReadAsync();
+        Assert.False(
+            second.ContainsKey(env2),
+            "a read within the cache TTL should reuse the cached env-id set, not re-SCAN");
+
+        // Advance past the TTL (40s since the first scan) — the next read must re-SCAN and pick
+        // up the newly committed env.
+        clock.Advance(TimeSpan.FromSeconds(30));
+        var third = await sut.ReadAsync();
+        Assert.Equal(1000, third[env1]);
+        Assert.Equal(2000, third[env2]);
+    }
+
+    /// <summary>Settable clock for exercising the SCAN-fallback cache's TTL without sleeping.</summary>
+    private sealed class FakeClock(DateTimeOffset start)
+    {
+        private DateTimeOffset _now = start;
+
+        public DateTimeOffset Now() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
     public void Dispose()
     {
         FlushIndexKeys();

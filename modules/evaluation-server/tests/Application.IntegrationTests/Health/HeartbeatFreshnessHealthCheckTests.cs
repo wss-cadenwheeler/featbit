@@ -139,7 +139,7 @@ public class HeartbeatFreshnessHealthCheckTests
         var status = new HeartbeatPublishStatus();
         status.MarkSuccess(T0);
 
-        // Just under the documented default (180s) -> still healthy.
+        // Just under the documented default (15s) -> still healthy.
         clock.Advance(TimeSpan.FromSeconds(HeartbeatFreshnessHealthCheck.DefaultStalenessThresholdSeconds - 1));
         Assert.Equal(HealthStatus.Healthy, (await Check(CreateSut(config, status, clock))).Status);
 
@@ -196,5 +196,26 @@ public class HeartbeatFreshnessHealthCheckTests
         clock.Advance(TimeSpan.FromHours(1));
         var result = await Check(sut);
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
+    }
+
+    /// <summary>
+    /// #104 coherence guard: the readiness-fence default must stay a few multiples of the
+    /// heartbeat-interval default, not drift independently (as happened when #99 changed the
+    /// interval default from 60s to 5s but this threshold's 180s default, derived against the old
+    /// interval, was left behind — 36 missed heartbeats instead of the intended ~3). Pin the
+    /// relationship directly against <see cref="HeartbeatService.DefaultHeartbeatIntervalSeconds"/>
+    /// so a future change to either default that breaks the coherence fails this test.
+    /// </summary>
+    [Fact]
+    public void DefaultStalenessThreshold_IsCoherentWithDefaultHeartbeatInterval()
+    {
+        var thresholdDefault = HeartbeatFreshnessHealthCheck.DefaultStalenessThresholdSeconds;
+        var intervalDefault = HeartbeatService.DefaultHeartbeatIntervalSeconds;
+
+        Assert.True(
+            thresholdDefault >= 3 * intervalDefault,
+            $"DefaultStalenessThresholdSeconds ({thresholdDefault}) should be at least 3x " +
+            $"DefaultHeartbeatIntervalSeconds ({intervalDefault}) so a pod tolerates a few missed " +
+            "heartbeats before its readiness fence trips.");
     }
 }

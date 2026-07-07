@@ -205,7 +205,11 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         // ---- the backfill runs, holding the STALE ts1 Mongo snapshot ----
         var backfiller = CreateBackfiller(new NoopMessageProducer());
         var flagCount = await backfiller.BackfillDcAsync(DcB, ConsistencyMode.GatedCommit);
-        Assert.Equal(1, flagCount);
+        // #105: BackfillDcAsync now returns the ACCEPTED count, not the attempted count. The one
+        // flag attempted here was genuinely guard-rejected (dc-b already held the fresher ts2), so
+        // the honest count is 0 — asserting 1 (the old "attempted" behavior) would hide exactly the
+        // dishonest-metrics bug #105 exists to fix.
+        Assert.Equal(0, flagCount);
 
         // ACCEPTANCE: dc-b's committed pointer + index must still read ts2 — the stale backfill
         // write for ts1 must have been rejected by the only-advance guard, not reverted the DC.
@@ -308,7 +312,9 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
 
         var backfiller = CreateBackfiller(new NoopMessageProducer());
         var flagCount = await backfiller.BackfillDcAsync(DcB, ConsistencyMode.BestEffort);
-        Assert.Equal(1, flagCount);
+        // #105: ACCEPTED, not attempted — the one flag attempted here was genuinely guard-rejected
+        // (dc-b already held the fresher ts2), so the honest count is 0.
+        Assert.Equal(0, flagCount);
 
         // ACCEPTANCE: the legacy key must still read the ts2 (enabled) content and the index score
         // must still be ts2 — the backfill's stale ts1 upsert must have been rejected.
@@ -335,8 +341,11 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         // dc-a starts with NOTHING (never wiped, just never written) and dc-b likewise: prove the
         // backfill writes ONLY to the target DC (dc-b), never dc-a.
         var backfiller = CreateBackfiller(new NoopMessageProducer());
-        var flagCount = await backfiller.BackfillDcAsync(DcB, mode);
-        Assert.Equal(0, flagCount); // no flags seeded in this test, only secrets
+        var repairedCount = await backfiller.BackfillDcAsync(DcB, mode);
+        // #105: BackfillDcAsync's return is the TOTAL genuine-write count (accepted flags + accepted
+        // segments + secrets written) — no flags/segments seeded here, but secrets are unconditional
+        // (no guard), so every one of the 2 seeded secrets counts.
+        Assert.Equal(2, repairedCount);
 
         foreach (var secret in env.Secrets)
         {

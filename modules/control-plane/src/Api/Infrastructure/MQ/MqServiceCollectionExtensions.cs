@@ -49,6 +49,43 @@ public static class MqServiceCollectionExtensions
         return string.IsNullOrEmpty(dcId) ? boundGroupId : $"{boundGroupId}-{dcId}";
     }
 
+    /// <summary>
+    /// #105: true when this deployment shape leaves TWO OR MORE control planes sharing the
+    /// unmodified default Kafka <c>group.id</c> with no way to self-differentiate — a multi-instance
+    /// configuration (<c>Redis:Instances</c> has more than one entry, i.e. this control plane knows
+    /// about at least one peer DC) whose LOCAL DC id (<c>Redis:Instances:0:DcId</c>) is empty, so
+    /// <see cref="ResolveConsumerGroupId"/>'s suffixing above never triggers. Every control plane
+    /// deployed this same way resolves the identical default <c>group.id</c>, reproducing #100's
+    /// collision (only one DC's control plane processes flag/segment changes and heartbeats; the
+    /// others silently idle) even though the deployment IS multi-DC-aware (peers ARE configured) —
+    /// it is simply missing the DcId that would let it self-differentiate. Suffixing by Redis
+    /// instance INDEX instead of DcId would NOT fix this: each peer's own local instance is always
+    /// index 0 in ITS OWN configuration, so every cluster would still resolve "-0".
+    /// <para>
+    /// Pure/side-effect-free (no logging) so it is trivially unit-testable; the actual warning is
+    /// emitted by <see cref="KafkaConsumerGroupIdCollisionGuard"/>, deferred to first-use logging
+    /// (see <c>AddKafka</c> below for why).
+    /// </para>
+    /// </summary>
+    public static bool IsMultiInstanceDefaultGroupIdCollisionRisk(
+        IConfiguration configuration,
+        string effectiveGroupId)
+    {
+        if (effectiveGroupId != DefaultConsumerGroupId)
+        {
+            return false;
+        }
+
+        var instanceCount = configuration.GetSection("Redis:Instances").GetChildren().Count();
+        if (instanceCount <= 1)
+        {
+            return false;
+        }
+
+        var dcId = configuration["Redis:Instances:0:DcId"];
+        return string.IsNullOrEmpty(dcId);
+    }
+
     public static void AddMq(this IServiceCollection services, IConfiguration configuration)
     {
         var mqProvider = configuration.GetMqProvider();
@@ -134,6 +171,19 @@ public static class MqServiceCollectionExtensions
 
             services.AddSingleton<IMessageProducer, KafkaMessageProducer>();
 
+            // #105: the multi-instance + empty-local-DcId + still-default-group.id shape (see
+            // IsMultiInstanceDefaultGroupIdCollisionRisk above) reproduces #100's collision even on
+            // a deployment that IS multi-DC-aware. Still no ILogger available at this point in
+            // registration, so the warning is deferred to a tiny one-shot IHostedService that runs
+            // once real DI (and a logger) is available at startup, instead of being silently
+            // skipped like ResolveConsumerGroupId's result above.
+            if (IsMultiInstanceDefaultGroupIdCollisionRisk(configuration, consumerConfig.GroupId))
+            {
+                services.AddHostedService(sp => new KafkaConsumerGroupIdCollisionGuard(
+                    sp.GetRequiredService<ILogger<KafkaConsumerGroupIdCollisionGuard>>(),
+                    consumerConfig.GroupId));
+            }
+
             services.AddHostedService(sp =>
             {
                 var cfg = sp.GetRequiredService<ConsumerConfig>();
@@ -165,4 +215,36 @@ public static class MqServiceCollectionExtensions
             });
         }
     }
+}
+
+/// <summary>
+/// #105: one-shot startup warning for the multi-instance + empty-local-DcId + still-default
+/// Kafka <c>group.id</c> deployment shape (see
+/// <see cref="MqServiceCollectionExtensions.IsMultiInstanceDefaultGroupIdCollisionRisk"/>). Exists
+/// only because no <see cref="ILogger"/> is available at the point in DI service registration
+/// where that shape is detected (<c>AddKafka</c>) — this runs once real DI is up, logs, and exits.
+/// Deliberately NOT a <see cref="BackgroundService"/> loop; only registered when the risky shape is
+/// actually detected, so it costs nothing on every other deployment.
+/// </summary>
+internal sealed class KafkaConsumerGroupIdCollisionGuard(
+    ILogger<KafkaConsumerGroupIdCollisionGuard> logger,
+    string groupId) : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        logger.LogWarning(
+            "Kafka consumer group.id is still the shipped default ('{GroupId}') on a multi-instance " +
+            "deployment (Redis:Instances has more than one entry, i.e. at least one peer DC is " +
+            "configured) whose LOCAL DC id (Redis:Instances:0:DcId) is EMPTY. Every control plane " +
+            "deployed this way resolves the SAME group.id, so Kafka hands each topic-partition to " +
+            "only ONE of them while the others silently idle (#100) -- this will NOT self-resolve by " +
+            "suffixing on Redis instance index, since each peer's own local instance is always index " +
+            "0 in ITS OWN configuration. Set Redis:Instances:0:DcId (or an explicit " +
+            "Kafka:Consumer:group.id) to a distinct value on every cluster.",
+            groupId);
+
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

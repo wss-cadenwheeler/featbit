@@ -327,11 +327,21 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     {
         // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
         // expected steady-state on every non-leader replica, not an error).
+        //
+        // #105: also ZERO the static gauge fields here. The ObservableGauge callbacks
+        // (ObservePendingBacklog / ObserveAppliedWatermarkLag) read these fields on every export
+        // with no leader filter of their own, and they are refreshed only AFTER this gate — so a
+        // replica that loses leadership would otherwise keep exporting its stale last-leader
+        // snapshot indefinitely. Latent today (no exporter wired up), but activates the moment
+        // metrics are exported from more than one replica.
         if (!_leaderElection.IsLeader)
         {
             _logger.LogDebug(
                 "Commit coordinator: instance {InstanceId} is not leader; skipping tick.",
                 _leaderElection.InstanceId);
+            _pendingFlagBacklog = 0;
+            _pendingSegmentBacklog = 0;
+            _appliedWatermarkLagSnapshot = Array.Empty<AppliedWatermarkLagMeasurement>();
             return 0;
         }
 

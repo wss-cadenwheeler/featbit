@@ -29,15 +29,26 @@ public class CompositeRedisCacheService(
     // ICacheService contract member (#89): broadcasts the only-advance-guarded upsert to every DC.
     // Not used by the normal upsert flow (that's UpsertFlagAsync above) — this exists so
     // CompositeRedisCacheService satisfies ICacheService; the backfiller reaches the guard via the
-    // TARGETED UpsertFlagToDcAsync below instead.
-    public Task UpsertFlagIfNewerAsync(FeatureFlag flag) =>
-        BroadcastAsync(s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagIfNewerAsync));
+    // TARGETED UpsertFlagToDcAsync below instead. #105: the interface now returns Task<bool>, so
+    // this collapses BroadcastAsync's per-DC accept map down to a single bool ("every DC accepted")
+    // — unused today (see above), so the exact reduction is not load-bearing.
+    public async Task<bool> UpsertFlagIfNewerAsync(FeatureFlag flag)
+    {
+        var results = await BroadcastAsync(s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagIfNewerAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task StageFlagAsync(FeatureFlag flag, long ts) =>
-        BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+    public async Task<bool> StageFlagAsync(FeatureFlag flag, long ts)
+    {
+        var results = await BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task CommitFlagAsync(Guid envId, string flagId, long ts) =>
-        BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+    public async Task<bool> CommitFlagAsync(Guid envId, string flagId, long ts)
+    {
+        var results = await BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
     // ICacheService probe: returns the LOCAL DC's result (first instance), consistent with
     // the heartbeat/health local-first convention above. This is NOT the coordinator API —
@@ -56,14 +67,25 @@ public class CompositeRedisCacheService(
 
     // ICacheService contract member (#89, segment counterpart of UpsertFlagIfNewerAsync above);
     // same rationale — the backfiller reaches the guard via the TARGETED UpsertSegmentToDcAsync.
-    public Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment) =>
-        BroadcastAsync(s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentIfNewerAsync));
+    public async Task<bool> UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment)
+    {
+        var results = await BroadcastAsync(
+            s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentIfNewerAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task StageSegmentAsync(Segment segment, long ts) =>
-        BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+    public async Task<bool> StageSegmentAsync(Segment segment, long ts)
+    {
+        var results = await BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) =>
-        BroadcastAsync(s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+    public async Task<bool> CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts)
+    {
+        var results = await BroadcastAsync(
+            s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
     // ICacheService probe: returns the LOCAL DC's result (first instance), mirroring
     // HasStagedFlagAsync. This is NOT the coordinator API — the coordinator must use
@@ -216,7 +238,7 @@ public class CompositeRedisCacheService(
     /// <see cref="StageFlagAsync"/>. If no DC matches, logs a warning and no-ops. A failing write is
     /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
+    public Task<bool> StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
         TargetedAsync(dcId, s => s.StageFlagAsync(flag, ts), nameof(StageFlagToDcAsync));
 
     /// <summary>
@@ -228,8 +250,14 @@ public class CompositeRedisCacheService(
     /// never reverts a fresher committed pointer. If no DC matches <paramref name="dcId"/>, logs a
     /// warning and no-ops. A failing write is swallowed and logged with the same resilience
     /// as <see cref="BroadcastAsync"/>.
+    /// <para>
+    /// #105: returns whether the write was ACCEPTED (advanced the committed pointer) — <c>false</c>
+    /// for a no-matching-DC no-op, a swallowed failure, AND a guard-rejected stale write. Callers
+    /// (the DC backfiller) must use this to report honest repair counts instead of assuming every
+    /// call landed.
+    /// </para>
     /// </summary>
-    public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
+    public Task<bool> CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
         TargetedAsync(dcId, s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagToDcAsync));
 
     /// <summary>
@@ -240,7 +268,7 @@ public class CompositeRedisCacheService(
     /// matches, logs a warning and no-ops. A failing write is swallowed and logged with the same
     /// resilience as <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
+    public Task<bool> StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
         TargetedAsync(dcId, s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentToDcAsync));
 
     /// <summary>
@@ -252,7 +280,7 @@ public class CompositeRedisCacheService(
     /// no-ops. A failing write is swallowed and logged with the same resilience as
     /// <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
+    public Task<bool> CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
         TargetedAsync(dcId, s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentToDcAsync));
 
     /// <summary>
@@ -266,17 +294,22 @@ public class CompositeRedisCacheService(
     /// snapshot from reverting it. If no DC matches <paramref name="dcId"/>, logs a warning and
     /// no-ops; a failing write is swallowed and logged with the same resilience as
     /// <see cref="BroadcastAsync"/>.
+    /// <para>
+    /// #105: returns whether the write was ACCEPTED (the guard let it land) — <c>false</c> for a
+    /// no-matching-DC no-op, a swallowed failure, AND a guard-rejected stale write.
+    /// </para>
     /// </summary>
-    public Task UpsertFlagToDcAsync(string dcId, FeatureFlag flag) =>
+    public Task<bool> UpsertFlagToDcAsync(string dcId, FeatureFlag flag) =>
         TargetedAsync(dcId, s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagToDcAsync));
 
     /// <summary>
     /// Segment counterpart of <see cref="UpsertFlagToDcAsync"/>: targeted, only-advance-guarded
     /// (#89) BestEffort upsert of <paramref name="segment"/> (+ per-env index) into ONE DC's Redis
     /// via <see cref="ICacheService.UpsertSegmentIfNewerAsync"/>. If no DC matches
-    /// <paramref name="dcId"/>, logs a warning and no-ops.
+    /// <paramref name="dcId"/>, logs a warning and no-ops. #105: return-value semantics mirror
+    /// <see cref="UpsertFlagToDcAsync"/>.
     /// </summary>
-    public Task UpsertSegmentToDcAsync(string dcId, ICollection<Guid> envIds, Segment segment) =>
+    public Task<bool> UpsertSegmentToDcAsync(string dcId, ICollection<Guid> envIds, Segment segment) =>
         TargetedAsync(dcId, s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentToDcAsync));
 
     /// <summary>
@@ -313,6 +346,28 @@ public class CompositeRedisCacheService(
         }
 
         await ExecuteSafelyAsync(dc, action, operationName);
+    }
+
+    /// <summary>
+    /// #105: bool-returning counterpart of <see cref="TargetedAsync(string,Func{ICacheService,Task},string)"/>
+    /// for the accept-signalling targeted writes (Stage/Commit/UpsertIfNewer). A no-matching-DC
+    /// no-op returns <c>false</c> (same as a guard-rejected or swallowed-failure write) — callers
+    /// cannot distinguish "no DC configured" from "guard rejected" from this return value alone,
+    /// but both are correctly excluded from an "accepted" count either way.
+    /// </summary>
+    private async Task<bool> TargetedAsync(string dcId, Func<ICacheService, Task<bool>> action, string operationName)
+    {
+        var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);
+        if (dc == null)
+        {
+            logger.LogWarning(
+                "Targeted cache operation '{Operation}' requested for unknown DC {DcId}; no matching cache instance. No-op.",
+                operationName,
+                dcId);
+            return false;
+        }
+
+        return await ExecuteSafelyAsync(dc, action, operationName);
     }
 
     private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
@@ -376,6 +431,37 @@ public class CompositeRedisCacheService(
             logger.LogError(
                 ex,
                 "Redis cache broadcast operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Continuing.",
+                operationName,
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #105: bool-returning counterpart of <see cref="ExecuteSafelyAsync(DcCacheService,Func{ICacheService,Task},string)"/>
+    /// for the accept-signalling targeted writes — returns the underlying call's own accept result
+    /// instead of a fixed "did not throw" <c>true</c>, and <c>false</c> (not merely swallowed) on a
+    /// thrown exception, so a genuine failure is never counted as accepted.
+    /// </summary>
+    private async Task<bool> ExecuteSafelyAsync(
+        DcCacheService dc,
+        Func<ICacheService, Task<bool>> action,
+        string operationName)
+    {
+        try
+        {
+            return await action(dc.Service);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Redis cache targeted operation '{Operation}' failed for DC {DcId} (implementation {CacheService}).",
                 operationName,
                 dc.DcId,
                 dc.Service.GetType().FullName);
