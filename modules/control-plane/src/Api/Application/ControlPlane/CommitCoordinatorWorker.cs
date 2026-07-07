@@ -6,6 +6,7 @@ using Application.Segments;
 using Application.Services;
 using Api.Infrastructure.Caches;
 using Domain.AuditLogs;
+using Domain.ControlPlane;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Segments;
@@ -50,6 +51,11 @@ namespace Api.Application.ControlPlane;
 /// multiple replicas would each run this loop; the commit + version-guarded promote are idempotent
 /// so this is safe (at worst duplicate publishes), but a leader election would avoid the redundant
 /// work. Out of scope for C3b-2; tracked as a follow-up.
+///
+/// Metrics (all on <see cref="MeterName"/>): <see cref="CommitsCounterName"/>,
+/// <see cref="TimeToCommitHistogramName"/>, <see cref="PendingBacklogGaugeName"/>,
+/// <see cref="EvictedCommitCounterName"/>, and (#84) <see cref="AppliedWatermarkLagGaugeName"/> —
+/// each live DC's lag behind the most-advanced live DC's applied watermark, per env.
 /// </summary>
 public sealed class CommitCoordinatorWorker : BackgroundService
 {
@@ -120,9 +126,6 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     private static volatile int _pendingFlagBacklog;
     private static volatile int _pendingSegmentBacklog;
 
-    // NOTE (#46): per-DC "applied watermark / lag" metrics are intentionally NOT emitted here. They
-    // depend on the eval-server's applied-watermark, whose source is still inaccurate (tracked in
-    // #46); adding them now would publish misleading data. Revisit once #46 lands.
     private static readonly ObservableGauge<long> PendingBacklogGauge = Meter.CreateObservableGauge(
         PendingBacklogGaugeName,
         ObservePendingBacklog,
@@ -137,6 +140,93 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         yield return new Measurement<long>(
             _pendingSegmentBacklog,
             new KeyValuePair<string, object?>("resource_type", "segment"));
+    }
+
+    /// <summary>
+    /// #84 (sub-issue of #69): observable gauge reporting each live DC's lag, in milliseconds, behind
+    /// the most-advanced live DC's applied watermark, per env. Tagged <c>dc_id</c>, <c>env_id</c>.
+    /// Backed by a snapshot refreshed at the start of each tick (see
+    /// <see cref="RefreshAppliedWatermarkLagSnapshot"/>) from <see cref="ILeaseStore.GetLiveSetAsync"/>
+    /// — self-contained from the live set the coordinator already loads every tick, independent of
+    /// pending flags/segments and of the commit decision.
+    /// </summary>
+    public const string AppliedWatermarkLagGaugeName = "control_plane.consistency.applied_watermark_lag_ms";
+
+    /// <summary>
+    /// One (dc_id, env_id, lag_ms) measurement captured by <see cref="RefreshAppliedWatermarkLagSnapshot"/>.
+    /// </summary>
+    private readonly record struct AppliedWatermarkLagMeasurement(string DcId, Guid EnvId, long LagMs);
+
+    // Observable applied-watermark-lag gauge: reports the per-(dc, env) lag captured at the start of
+    // the most recent tick. Static + volatile for the same reasons as the backlog fields above.
+    private static volatile IReadOnlyList<AppliedWatermarkLagMeasurement> _appliedWatermarkLagSnapshot =
+        Array.Empty<AppliedWatermarkLagMeasurement>();
+
+    private static readonly ObservableGauge<long> AppliedWatermarkLagGauge = Meter.CreateObservableGauge(
+        AppliedWatermarkLagGaugeName,
+        ObserveAppliedWatermarkLag,
+        unit: "ms",
+        description:
+        "Per-DC lag (ms) behind the most-advanced live DC's applied watermark, per env " +
+        "(frontier(env) - dc's watermark(env)).");
+
+    private static IEnumerable<Measurement<long>> ObserveAppliedWatermarkLag()
+    {
+        foreach (var measurement in _appliedWatermarkLagSnapshot)
+        {
+            yield return new Measurement<long>(
+                measurement.LagMs,
+                new KeyValuePair<string, object?>("dc_id", measurement.DcId),
+                new KeyValuePair<string, object?>("env_id", measurement.EnvId.ToString()));
+        }
+    }
+
+    /// <summary>
+    /// #84: recompute the per-(dc, env) applied-watermark-lag snapshot from this tick's live set.
+    /// There is no materialized per-env committed frontier in the control plane, and none is
+    /// needed: per env, <c>frontier(env) = max over live DCs of lease.AppliedWatermarks[env]</c>,
+    /// and <c>lag(dc, env) = frontier(env) - lease.AppliedWatermarks[env]</c> — the most-advanced DC
+    /// reads 0, stragglers read their delay in ms (watermarks are unix-ms on the same clock as
+    /// pending versions). Only (dc, env) pairs where that DC actually has a watermark entry are
+    /// reported — a DC with no connections/data for an env doesn't serve it, and inventing
+    /// <c>lag = frontier - 0</c> would be misleading. An empty live set, or a live set where no DC
+    /// reports any watermark, yields an empty snapshot (the gauge then reports no measurements).
+    /// </summary>
+    private static void RefreshAppliedWatermarkLagSnapshot(IReadOnlyList<DcLease> liveSet)
+    {
+        var frontierByEnv = new Dictionary<Guid, long>();
+        foreach (var lease in liveSet)
+        {
+            if (string.IsNullOrEmpty(lease.DcId) || lease.AppliedWatermarks is null)
+            {
+                continue;
+            }
+
+            foreach (var (envId, watermark) in lease.AppliedWatermarks)
+            {
+                if (!frontierByEnv.TryGetValue(envId, out var currentFrontier) || watermark > currentFrontier)
+                {
+                    frontierByEnv[envId] = watermark;
+                }
+            }
+        }
+
+        var snapshot = new List<AppliedWatermarkLagMeasurement>();
+        foreach (var lease in liveSet)
+        {
+            if (string.IsNullOrEmpty(lease.DcId) || lease.AppliedWatermarks is null)
+            {
+                continue;
+            }
+
+            foreach (var (envId, watermark) in lease.AppliedWatermarks)
+            {
+                var lagMs = frontierByEnv[envId] - watermark;
+                snapshot.Add(new AppliedWatermarkLagMeasurement(lease.DcId, envId, lagMs));
+            }
+        }
+
+        _appliedWatermarkLagSnapshot = snapshot;
     }
 
     /// <summary>
@@ -249,18 +339,25 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         _pendingFlagBacklog = pending.Count;
         _pendingSegmentBacklog = pendingSegments.Count;
 
-        if (pending.Count == 0 && pendingSegments.Count == 0)
-        {
-            return 0;
-        }
-
-        // Live DCs = distinct DcIds that currently hold at least one unexpired lease.
+        // Live DCs = distinct DcIds that currently hold at least one unexpired lease. Loaded
+        // unconditionally (even when nothing is pending) because the #84 applied-watermark-lag
+        // gauge is refreshed from this same live set every tick, independent of pending work.
         var liveSet = await leaseStore.GetLiveSetAsync(DateTimeOffset.UtcNow);
         var liveDcs = liveSet
             .Select(lease => lease.DcId)
             .Where(id => !string.IsNullOrEmpty(id))
             .Distinct()
             .ToList();
+
+        // #84: refresh the observable applied-watermark-lag gauge snapshot from this tick's live
+        // set. Side-effect-only; independent of pending flags/segments and of the commit decision
+        // below.
+        RefreshAppliedWatermarkLagSnapshot(liveSet);
+
+        if (pending.Count == 0 && pendingSegments.Count == 0)
+        {
+            return 0;
+        }
 
         if (liveDcs.Count == 0)
         {
