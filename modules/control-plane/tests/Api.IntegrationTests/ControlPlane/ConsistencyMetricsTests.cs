@@ -251,6 +251,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
             new SpyMessageProducer(),
+            new FakeLeaderElection(isLeader: true),
             configuration,
             NullLogger<CommitCoordinatorWorker>.Instance);
     }

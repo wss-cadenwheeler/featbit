@@ -30,6 +30,11 @@ namespace Api.Application.ControlPlane;
 /// Advisory only: it changes no commit behavior. It logs and emits an observable gauge on the shared
 /// <see cref="CommitCoordinatorWorker.MeterName"/> meter so operators can alert on a non-zero
 /// unmatched-DC count.
+///
+/// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
+/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. The check is
+/// advisory and idempotent, so this is purely to avoid redundant work across replicas, not a
+/// correctness requirement.
 /// </summary>
 public sealed class DcIdConsistencyChecker : BackgroundService
 {
@@ -75,6 +80,7 @@ public sealed class DcIdConsistencyChecker : BackgroundService
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly ILeaderElection _leaderElection;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<DcIdConsistencyChecker> _logger;
@@ -82,10 +88,12 @@ public sealed class DcIdConsistencyChecker : BackgroundService
     public DcIdConsistencyChecker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        ILeaderElection leaderElection,
         ILogger<DcIdConsistencyChecker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _leaderElection = leaderElection;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -177,11 +185,22 @@ public sealed class DcIdConsistencyChecker : BackgroundService
     /// <summary>
     /// Performs a single check tick: reads the configured Redis DcIds and the reporting lease DcIds,
     /// compares them, warns on each mismatch, and refreshes the unmatched-DC gauge. Returns the
-    /// comparison result. Exposed so it can be invoked directly (e.g. by integration tests) without
-    /// waiting on the periodic timer.
+    /// comparison result, or <c>null</c> if this instance is not the elected leader (see #71b gate
+    /// below) — meaning the tick was skipped entirely, not that no mismatch was found. Exposed so it
+    /// can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     /// </summary>
-    public async Task<ComparisonResult> RunOnceAsync(CancellationToken cancellationToken = default)
+    public async Task<ComparisonResult?> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
+        // expected steady-state on every non-leader replica, not an error).
+        if (!_leaderElection.IsLeader)
+        {
+            _logger.LogDebug(
+                "DcId consistency checker: instance {InstanceId} is not leader; skipping tick.",
+                _leaderElection.InstanceId);
+            return null;
+        }
+
         // The configured DcIds are read from the SAME Redis:Instances section the cache extension
         // binds (see CacheServiceCollectionExtensions.AddRedis). Empty DcIds are ordinal-fallback
         // placeholders and are excluded by Compare.

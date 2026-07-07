@@ -1,4 +1,9 @@
 using Api.Application.ControlPlane;
+using Application.ControlPlane;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
 
@@ -85,5 +90,40 @@ public class DcIdConsistencyCheckerTests
         Assert.Equal(new[] { "east", "west" }, result.MissingLeases);
         // both reporting DcIds are unknown, sorted
         Assert.Equal(new[] { "north", "south" }, result.UnknownDcs);
+    }
+
+    // ----- #71b leader gating -----
+
+    /// <summary>
+    /// Minimal construction of the worker itself (not just the static <see cref="DcIdConsistencyChecker.Compare"/>
+    /// helper the rest of this file exercises): an in-memory <see cref="IConfiguration"/> and a
+    /// scope factory resolving a mocked <see cref="ILeaseStore"/>, matching how DI wires the real
+    /// worker via <c>IServiceScopeFactory</c>.
+    /// </summary>
+    [Fact]
+    public async Task RunOnceAsync_WhenNotLeader_ReturnsNull_WithoutTouchingLeaseStore()
+    {
+        var leaseStore = new Mock<ILeaseStore>();
+        var services = new ServiceCollection();
+        services.AddTransient(_ => leaseStore.Object);
+        var provider = services.BuildServiceProvider();
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ControlPlane:ConsistencyMode"] = "GatedCommit"
+            })
+            .Build();
+
+        var sut = new DcIdConsistencyChecker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            configuration,
+            new FakeLeaderElection(isLeader: false),
+            NullLogger<DcIdConsistencyChecker>.Instance);
+
+        var result = await sut.RunOnceAsync();
+
+        Assert.Null(result);
+        leaseStore.Verify(x => x.GetLiveSetAsync(It.IsAny<DateTimeOffset>()), Times.Never);
     }
 }

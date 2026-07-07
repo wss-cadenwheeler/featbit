@@ -172,7 +172,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         });
     }
 
-    private RecoveryWorker CreateSut(ILogger<RecoveryWorker>? logger = null)
+    private RecoveryWorker CreateSut(ILogger<RecoveryWorker>? logger = null, bool isLeader = true)
     {
         // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
         // resolves them at runtime via IServiceScopeFactory.
@@ -201,6 +201,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         return new RecoveryWorker(
             provider.GetRequiredService<IServiceScopeFactory>(),
             backfiller,
+            new FakeLeaderElection(isLeader),
             configuration,
             logger ?? NullLogger<RecoveryWorker>.Instance);
     }
@@ -477,6 +478,39 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         var refresh = Assert.Single(returnCommands);
         Assert.Equal(Action.PushFullSync, refresh.Action);
         Assert.Equal(DcB, refresh.TargetDcId);
+    }
+
+    // ----- #71b leader gating -----
+
+    [Fact]
+    public async Task Recovery_NotLeader_SkipsTick()
+    {
+        const string key = "not-leader-recovery";
+
+        // ---- v1 committed on BOTH DCs (both live) ----
+        var v1 = CreateFlag(key, isEnabled: false);
+        v1.CommittedVersion = 1;
+        await _flagService.AddOneAsync(v1);
+        var v1Ts = VersionTokenOf(v1);
+
+        await _dcaCache.StageFlagAsync(v1, v1Ts);
+        await _dcaCache.CommitFlagAsync(_envId, v1.Id.ToString(), v1Ts);
+        // dc-b intentionally NOT staged/committed -> it would be "returned" and backfilled if a
+        // leader ran this tick.
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var sut = CreateSut(isLeader: false);
+
+        var backfilled = await sut.RunOnceAsync();
+
+        Assert.Equal(0, backfilled);
+        Assert.Empty(_producer.Published);
+
+        // dc-b was never backfilled: still missing the flag entirely.
+        Assert.False(await _dcbCache.HasStagedFlagAsync(v1.Id, v1Ts));
     }
 
     // ----- test doubles -----
