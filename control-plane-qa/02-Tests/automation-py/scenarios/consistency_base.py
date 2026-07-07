@@ -104,9 +104,21 @@ class ConsistencyScenarioBase(BaseScenario):
 
     # ----------------------------------------------------------- redis access --
 
-    def _redis_target(self, context: str) -> Tuple[Optional[str], int]:
-        """Resolve ``(pod_name, port)`` for the redis service in a DC context."""
+    def _redis_target(self, context: str) -> Tuple[Optional[str], int, Optional[str]]:
+        """Resolve ``(pod_name, port, host)`` for the redis service in a DC context.
+
+        ``host`` is the legacy ``redis`` service name, or ``None`` under the
+        Sentinel topology (featbit-redis-node-*), where redis-cli should target
+        localhost inside the node pod instead.
+        """
         port = 6379
+        host: Optional[str] = None
+        pod = self._discover_redis_pod(context=context, namespace=self._REDIS_NAMESPACE)
+        if pod and pod.startswith("featbit-redis-node"):
+            # Sentinel topology: the per-cluster HA redis is the authoritative cache.
+            # Ignore any orphaned legacy "redis" service (it may still resolve — to the
+            # WRONG, empty redis) and target localhost inside the node pod instead.
+            return pod, port, None
         svc = self._run_kubectl(
             [
                 "--context",
@@ -121,6 +133,7 @@ class ConsistencyScenarioBase(BaseScenario):
             ]
         )
         if svc.returncode == 0:
+            host = self._REDIS_SERVICE
             try:
                 import json
 
@@ -129,17 +142,20 @@ class ConsistencyScenarioBase(BaseScenario):
                     port = ports[0].get("port", 6379)
             except (ValueError, KeyError):
                 pass
-        pod = self._discover_redis_pod(context=context, namespace=self._REDIS_NAMESPACE)
-        return pod, port
+        return pod, port, host
 
     def _redis_cli(self, context: str, *args: str, timeout: int = 30) -> Tuple[bool, str]:
         """Run ``redis-cli <args>`` inside the DC's redis pod via kubectl exec.
 
         Returns ``(ok, output)``; ``ok`` is False when the pod can't be reached.
         """
-        pod, port = self._redis_target(context)
+        pod, port, host = self._redis_target(context)
         if not pod:
             return False, f"no running redis pod in context '{context}'"
+        # Sentinel node pods run two containers (redis + sentinel): pin the exec to
+        # the redis container; with no legacy service, redis-cli targets localhost.
+        container_args = ["-c", "redis"] if pod.startswith("featbit-redis-node") else []
+        host_args = ["-h", host] if host else []
         result = self._run_kubectl(
             [
                 "--context",
@@ -148,10 +164,10 @@ class ConsistencyScenarioBase(BaseScenario):
                 self._REDIS_NAMESPACE,
                 "exec",
                 pod,
+                *container_args,
                 "--",
                 "redis-cli",
-                "-h",
-                self._REDIS_SERVICE,
+                *host_args,
                 "-p",
                 str(port),
                 *args,
@@ -296,7 +312,9 @@ class ConsistencyScenarioBase(BaseScenario):
 
     # ----------------------------------------------------------- disruptions --
 
-    def run_named_command(self, name: str, command: Optional[str], *, required: bool) -> bool:
+    def run_named_command(
+        self, name: str, command: Optional[str], *, required: bool, timeout: int = 30
+    ) -> bool:
         """Execute a configured disruption/ops command, recording the outcome.
 
         Reuses :meth:`BaseScenario.run_optional_check` (records pass/fail/skip and a
@@ -304,7 +322,7 @@ class ConsistencyScenarioBase(BaseScenario):
         so callers can gate dependent assertions on a real disruption having occurred.
         """
         before = len(self.assertions.assertions)
-        self.run_optional_check(name, command, required=required)
+        self.run_optional_check(name, command, required=required, timeout=timeout)
         if not command:
             return False
         # The most recent assertion recorded by run_optional_check reflects the result.

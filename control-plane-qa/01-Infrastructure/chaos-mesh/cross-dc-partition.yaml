@@ -1,21 +1,23 @@
 # Cross-DC network partition for GatedCommit consistency tests (CP-11 / CP-12).
 #
-# All cross-cluster traffic in the control-plane-qa topology funnels through the host
-# bridge IP (the kubectl port-forwards for redis 6379/6380, kafka, and the Mongo
-# replicaset NodePorts). Blocking each featbit pod's EGRESS to that host IP severs the
-# cross-DC link regardless of port-forward tunneling, because we block the initiating
-# pod's outbound connection at its own netns. Intra-cluster pod-to-pod traffic does not
-# transit the host, so it stays up — a clean partition of just the east<->west link.
+# Applied VERBATIM by the suite to BOTH clusters (no templating happens — the external
+# targets below must match the deployed topology). Under the per-cluster Redis/Sentinel
+# topology, cross-DC and control-plane-infra traffic uses:
+#   172.31.0.10  west node on the shared cluster network (east -> west peer redis fwd :31649)
+#   172.31.0.20  east node on the shared cluster network (west -> east peer redis fwd :31649)
+#   192.168.58.1 east's host gateway (host.minikube.internal: shared Kafka 9092 / Mongo 27017)
 #
-# Apply in BOTH clusters to produce a mutual partition (a real network partition is
-# bidirectional). West retains Mongo replica-set majority (2 of 3 nodes), so west stays
-# writable and east becomes the isolated/evicted DC — the asymmetry CP-11/CP-12 need.
+# Effect per cluster of blocking all three from featbit pods' egress:
+#   west: loses only 172.31.0.20 (east peer) — keeps its own gateway 192.168.49.1, so
+#         Kafka/Mongo stay reachable and west remains the writable survivor.
+#   east: loses 172.31.0.10 (west peer) AND 192.168.58.1 (its Kafka/Mongo route) — fully
+#         isolated: heartbeats stop, its lease expires, it becomes the evicted DC.
+# Intra-cluster pod-to-pod traffic never leaves the cluster network, so it stays up —
+# a clean partition of just the east<->west + east<->control-plane-infra links.
 #
 # Usage:
 #   start: kubectl --context <west|east> apply  -f cross-dc-partition.yaml
 #   stop:  kubectl --context <west|east> delete -f cross-dc-partition.yaml --ignore-not-found
-#
-# HOST_BRIDGE_IP is templated by the scenario at apply time (default 172.31.128.1).
 apiVersion: chaos-mesh.org/v1alpha1
 kind: NetworkChaos
 metadata:
@@ -29,5 +31,7 @@ spec:
       - featbit
   direction: both
   externalTargets:
-    - "172.31.128.1"
+    - "172.31.0.10"
+    - "172.31.0.20"
+    - "192.168.58.1"
   duration: "10m"

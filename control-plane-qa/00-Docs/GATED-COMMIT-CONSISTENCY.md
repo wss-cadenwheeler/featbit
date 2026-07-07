@@ -132,6 +132,31 @@ Four hardening items on top of the shared `IDcBackfiller`, all applying to **bot
 
 ---
 
+## 1d. Consistency guarantee: bounded-skew by design (decision record, #25)
+
+Gated commit guarantees **no live DC ever serves a version it does not already hold locally** —
+but the commit *flip* itself is **bounded-skew, not zero-skew**. When the coordinator advances the
+committed pointers, each DC observes its own pointer independently (local Redis read + the MQ
+publish), so for a short window — pointer write/replication lag plus MQ delivery, normally
+sub-second — one DC may still serve the *previous committed* value while another already serves the
+new one. Crucially, by the time the flip begins, **every live DC has already staged the new
+version**, so the residual skew is only "old committed vs new committed", never "value you don't
+have".
+
+**Decision (Risk #1 of the implementation plan): accept bounded-skew convergence + MQ push as the
+default.** The strict-zero-skew alternative — reading the pointer with a linearizable/primary-only
+read on the hot evaluation path — was rejected for the default because it adds a cross-region read
+per evaluation-relevant fetch and a hard dependency on primary reachability (a partitioned region
+would self-fence: consistent with the design, but expensive for what it buys). Deployments that
+need literally zero skew can revisit that trade-off; nothing in the design precludes it.
+
+Corollary recorded for the future: if the source of truth ever becomes async multi-master
+(active/active Postgres), the bounded-skew guarantee weakens further (the pointer is no longer
+majority-linearizable) and Option A degrades toward eventual consistency — that is Model B (#44)
+territory, not a config change.
+
+---
+
 ## 2. Enabling it
 
 ### 2.1 Control plane (`modules/control-plane`)
@@ -229,7 +254,13 @@ mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-
 ## 5. Rollout procedure (QA: `control-plane-qa` east/west)
 
 1. **Pre-flight:** confirm each DC's ELS `ControlPlane:DcId` equals that DC's control-plane
-   `Redis:Instances[].DcId`. Confirm all DCs are heartbeating (leases present).
+   `Redis:Instances[].DcId`. Confirm all DCs are heartbeating (leases present). Two settings
+   MUST be coherent or leases flap / processing stalls (both bit the first QA enablement, #25):
+   - `ControlPlane:HeartbeatIntervalSeconds` ≤ `LeaseTtlSeconds`/3 (e.g. 5s against the 15s TTL).
+     The ELS appsettings default is 60s — incoherent with the TTL; see #99.
+   - Each DC's control plane needs its **own Kafka consumer `group.id`** when DCs share a broker
+     (e.g. `featbit-control-plane-<dc>`); a shared group id makes change processing single-owner
+     and non-deterministic under partitions; see #100.
 2. **Enable** `ConsistencyMode=GatedCommit` on the control plane and all evaluation servers;
    restart.
 3. **Smoke:** watch logs for `DcIdConsistencyChecker` warnings and `unmatched_dc_count`; resolve
