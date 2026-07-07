@@ -8,6 +8,7 @@ using Api.Infrastructure.Caches;
 using Domain.AuditLogs;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Segments;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -31,9 +32,12 @@ namespace Api.Application.ControlPlane;
 ///
 /// Segments (S3 / #17): committing a segment additionally replays the affected-flags propagation
 /// that <see cref="SegmentChangeMessageHandler"/>'s BestEffort branch performs inline at handle
-/// time. Because the staged pending change does NOT carry the original change notification, the
-/// coordinator reconstructs an <see cref="OnSegmentChange"/> (Operation = Update,
-/// IsTargetingChange = true) from the committed segment so
+/// time. The staged pending change now carries the attribution context captured at stage time
+/// (<see cref="PendingSegmentChange.OperatorId"/> / <see cref="PendingSegmentChange.Operation"/> /
+/// <see cref="PendingSegmentChange.IsTargetingChange"/>, #73), so the coordinator reconstructs an
+/// <see cref="OnSegmentChange"/> from the committed segment using that persisted attribution
+/// (legacy pending rows staged before #73 default to Operator = Guid.Empty, Operation = Update,
+/// IsTargetingChange = true — today's prior hardcoded behavior) so
 /// <see cref="ISegmentMessageService.GetAffectedFlagsAsync"/> recomputes the affected flags, then
 /// (if any) calls <see cref="IFeatureFlagAppService.OnSegmentUpdatedAsync"/> and finally
 /// <see cref="ISegmentMessageService.PublishSegmentChangeMessage"/> per env — exactly the
@@ -414,18 +418,24 @@ public sealed class CommitCoordinatorWorker : BackgroundService
                 }
 
                 // Replicate SegmentChangeMessageHandler's BestEffort affected-flags propagation,
-                // deferred to commit time. The staged pending change does not carry the original
-                // notification, so reconstruct one from the (now committed) segment as an Update with
-                // IsTargetingChange = true, so GetAffectedFlagsAsync recomputes the affected flags.
+                // deferred to commit time. Reconstruct the notification from the (now committed)
+                // segment using the attribution persisted on the pending change at stage time
+                // (#73) instead of hardcoding it, so GetAffectedFlagsAsync recomputes the affected
+                // flags with the real Operation/IsTargetingChange, and OnSegmentUpdatedAsync (below)
+                // stamps the real operator. Legacy pending rows staged before #73 deserialize with
+                // OperatorId = Guid.Empty / Operation = Update / IsTargetingChange = true, which is
+                // exactly the coordinator's prior hardcoded behavior.
                 var committedSegment = await segmentService.GetCommittedAsync(segment.Id);
                 var notification = new OnSegmentChange(
                     committedSegment,
-                    Operations.Update,
-                    // DataChange drives only the audit log (not exercised on this propagation path),
-                    // so an empty change is sufficient here.
+                    pendingChange.Operation,
+                    // DataChange is intentionally empty: the only consumer on this path
+                    // (OnSegmentUpdatedAsync) recomputes its own before/after locally, and the
+                    // audit log / webhook publishes for the segment itself already happened at
+                    // stage time with the real notification.
                     new DataChange(),
-                    operatorId: Guid.Empty,
-                    isTargetingChange: true);
+                    operatorId: pendingChange.OperatorId,
+                    isTargetingChange: pendingChange.IsTargetingChange);
 
                 foreach (var envId in envIds)
                 {
