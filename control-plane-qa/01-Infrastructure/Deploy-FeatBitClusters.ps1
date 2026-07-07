@@ -1662,6 +1662,9 @@ foreach ($clusterContext in @("west", "east")) {
     # DcId ?? PodId), so a deployment brought up in BestEffort and later flipped to GatedCommit
     # has broken commit-coordination/recovery (it targets pod-GUID "DCs"). DcId MUST equal this
     # cluster's control-plane Redis DcId (set below). Harmless under BestEffort (no leases recorded).
+    # ControlPlane__HeartbeatIntervalSeconds is set here for the same reason: the ELS appsettings
+    # default (previously 60s) was incoherent with the control plane's 15s LeaseTtlSeconds default,
+    # so leases flapped and GatedCommit stalled (#99). 5s keeps interval <= LeaseTtlSeconds/3.
     $consistencyMode = if ($env:CONSISTENCY_MODE -eq 'GatedCommit') { 'GatedCommit' } else { 'BestEffort' }
     kubectl --context $clusterContext -n featbit set env deployment/evaluation-server `
         "MqProvider=Kafka" `
@@ -1670,7 +1673,8 @@ foreach ($clusterContext in @("west", "east")) {
         "ControlPlane__Enabled=true" `
         "ControlPlane__DcId=$clusterContext" `
         "ControlPlane__Region=$clusterContext" `
-        "ControlPlane__ConsistencyMode=$consistencyMode" | Out-Null
+        "ControlPlane__ConsistencyMode=$consistencyMode" `
+        "ControlPlane__HeartbeatIntervalSeconds=5" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Kafka/ControlPlane config on evaluation-server in $clusterContext"
     }

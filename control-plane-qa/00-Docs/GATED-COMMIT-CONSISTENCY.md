@@ -192,8 +192,9 @@ The **first** instance is the control plane's *local* DC (used for heartbeat/hea
 ```jsonc
 "ControlPlane": {
   "ConsistencyMode": "GatedCommit",
-  "DcId": "west",      // MUST equal this DC's Redis:Instances[].DcId on the control plane
-  "Region": "us-west"
+  "DcId": "west",                  // MUST equal this DC's Redis:Instances[].DcId on the control plane
+  "Region": "us-west",
+  "HeartbeatIntervalSeconds": 5    // MUST be <= LeaseTtlSeconds/3 (see below); default is 5
 }
 ```
 
@@ -216,6 +217,7 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 |---|---|---|---|
 | `ControlPlane:ConsistencyMode` | `BestEffort` | CP + ELS | `GatedCommit` turns the whole feature on |
 | `ControlPlane:LeaseTtlSeconds` | `15` | CP | Heartbeat → lease lifetime; eviction threshold |
+| `ControlPlane:HeartbeatIntervalSeconds` | `5` | ELS | Heartbeat cadence. **MUST be `<= LeaseTtlSeconds/3`** (e.g. 5s against the 15s TTL default) — a slower cadence lets each DC's lease expire between heartbeats, flapping the live set and stalling GatedCommit (#99). The control plane logs a one-time-per-DC warning when it detects this. |
 | `ControlPlane:CommitCoordinator:IntervalSeconds` | `5` | CP | Commit-evaluation tick |
 | `ControlPlane:Recovery:IntervalSeconds` | `10` | CP | Returning-DC backfill tick |
 | `ControlPlane:DcIdConsistency:IntervalSeconds` | `60` | CP | DcId-mismatch advisory check |
@@ -257,7 +259,8 @@ mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-
    `Redis:Instances[].DcId`. Confirm all DCs are heartbeating (leases present). Two settings
    MUST be coherent or leases flap / processing stalls (both bit the first QA enablement, #25):
    - `ControlPlane:HeartbeatIntervalSeconds` ≤ `LeaseTtlSeconds`/3 (e.g. 5s against the 15s TTL).
-     The ELS appsettings default is 60s — incoherent with the TTL; see #99.
+     The ELS appsettings default is now 5s and `HeartbeatService` falls back to 5s (not 60s) when
+     the setting is unset/0; see #99. `Deploy-FeatBitClusters.ps1` also sets it explicitly.
    - Each DC's control plane needs its **own Kafka consumer `group.id`** when DCs share a broker
      (e.g. `featbit-control-plane-<dc>`); a shared group id makes change processing single-owner
      and non-deterministic under partitions; see #100.
