@@ -14,7 +14,9 @@ namespace Api.Application.ControlPlane;
 /// Redis would otherwise stay stale forever. This worker watches the live set; when a DC newly
 /// appears (its lease returns), it backfills that DC's Redis with the COMMITTED value of every flag
 /// AND every segment (stage the versioned value + flip the committed pointer + advance the index),
-/// so the returned DC catches up.
+/// AND every secret (#91: unconditional upsert — secrets carry no staged/committed lifecycle to gate
+/// on), so the returned DC catches up — including SDK auth, which a flag/segment-only backfill would
+/// leave broken.
 ///
 /// Model A, locked decisions:
 ///  - A: a separate worker (this one), not folded into the commit coordinator.
@@ -28,13 +30,22 @@ namespace Api.Application.ControlPlane;
 ///       Best-effort: a publish failure is logged but does NOT fail the backfill.
 ///
 /// Idempotent: re-staging/re-committing an already-present version is a no-op (the staged value key
-/// and committed pointer are version-keyed). It does NOT publish <c>Topics.FeatureFlagChange</c> —
-/// the committed value did not change globally, only one DC's Redis is being repaired.
+/// and committed pointer are version-keyed), AND, since #89, the committed-pointer flip itself is
+/// only-advance-guarded — a stale/duplicate backfill run can never revert a fresher pointer a
+/// concurrent commit or another backfill already wrote, even outside the exact-version-match case.
+/// It does NOT publish <c>Topics.FeatureFlagChange</c> — the committed value did not change
+/// globally, only one DC's Redis is being repaired.
 ///
 /// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
 /// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
 /// guards (see above) still make concurrent execution safe belt-and-braces during a failover
 /// overlap window, so losing leadership mid-tick is harmless.
+///
+/// #90: when more than one DC returns in the same tick, <see cref="RunOnceAsync"/> fetches the
+/// committed snapshot ONCE (<see cref="IDcBackfiller.FetchCommittedSnapshotAsync"/>) and shares it
+/// across every returned DC's backfill, so they are all repaired from an identical view of the source
+/// of truth (restores the pre-#74-refactor guarantee) instead of each DC re-reading the source of
+/// truth independently.
 ///
 /// ASSUMPTION (per-DC client refresh): the targeted <c>PushFullSync</c> command relies on the
 /// <see cref="ControlPlaneTopics.ControlPlaneCommand"/> topic reaching EVERY DC's eval servers (the
@@ -120,7 +131,8 @@ public sealed class RecoveryWorker : BackgroundService
     /// so it can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
     /// For each DcId newly present in the live set since the previous tick, every flag's AND every
-    /// segment's committed value is staged and committed into that DC's Redis (targeted, not broadcast).
+    /// segment's committed value is staged and committed into that DC's Redis (targeted, not
+    /// broadcast), AND every secret cache entry is upserted (#91, unconditional — not staged/gated).
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -161,17 +173,66 @@ public sealed class RecoveryWorker : BackgroundService
             return 0;
         }
 
+        // #92: check the composite-cache guard ONCE per tick, before the per-DC loop, so a
+        // misconfiguration (e.g. a None cache) logs a single warning per tick instead of once per
+        // returned DC — and skips the committed-snapshot fetch entirely instead of reading the DB only
+        // to discard it. The previous-live-set watermark was already advanced above (each returned
+        // DcId is now considered "seen"), so without corrective action a real reconnect immediately
+        // after a transient misconfiguration fix would never be re-detected as "returned". Mirror
+        // CacheReconciler's equivalent guard and explicitly un-advance the watermark for these DCs so
+        // the NEXT tick treats them as newly-returned again once the guard clears.
+        if (!_backfiller.IsCompositeCacheAvailable)
+        {
+            _logger.LogWarning(
+                "Recovery worker: composite Redis cache is unavailable; skipping backfill for " +
+                "{Count} returned DC(s) this tick ({DcIds}). Will retry once they are re-detected " +
+                "as returned.",
+                returned.Count,
+                string.Join(", ", returned));
+            // Force a retry: forget these DCs from the watermark so next tick treats them as
+            // newly-returned again once the guard clears.
+            foreach (var dcId in returned)
+            {
+                _previousLiveSet.Remove(dcId);
+            }
+            return 0;
+        }
+
+        // #90 (extended by #91 to also cover secrets): fetch the committed snapshot (flags + segments
+        // + segment env-ids + secret caches) ONCE per tick and share it across every DC returned this
+        // tick, instead of letting each DC's backfill re-fetch
+        // it. This restores the pre-#74-refactor guarantee that two DCs returning in the same tick are
+        // backfilled from an IDENTICAL view of the source of truth, and halves-to-Nths the DB reads
+        // for a multi-DC tick.
+        var snapshot = await _backfiller.FetchCommittedSnapshotAsync(cancellationToken);
+
+        // #92: honest metrics — count a DC as "backfilled" only when the shared backfiller actually
+        // did work for it, not merely because it was in the "returned" set this tick. A DC's call
+        // returns IDcBackfiller.Skipped (not a repair) when it coalesced with a concurrent backfill of
+        // the same DC (e.g. CacheReconciler backfilling it at the same moment) — that DC IS being
+        // repaired, just not by this call, so it must not be double-counted, and a genuinely failed
+        // guard/coalesce must not be reported as a repair either.
         var backfilled = 0;
         foreach (var dcId in returned)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // GatedCommit backfill of the returned DC from the source of truth (staged versioned
+            // GatedCommit backfill of the returned DC from the shared snapshot (staged versioned
             // value + committed pointer + index) followed by a targeted PushFullSync — delegated to
             // the shared backfiller, which CacheReconciler also uses (with the mode-appropriate
             // write path).
-            await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, cancellationToken);
-            backfilled++;
+            var result = await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, snapshot, cancellationToken);
+            if (result != IDcBackfiller.Skipped)
+            {
+                backfilled++;
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Recovery worker: backfill for returned DC {DcId} was skipped this tick " +
+                    "(coalesced with a concurrent backfill already in flight for that DC).",
+                    dcId);
+            }
         }
 
         return backfilled;

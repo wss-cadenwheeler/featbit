@@ -26,6 +26,13 @@ public class CompositeRedisCacheService(
     public Task UpsertFlagAsync(FeatureFlag flag) =>
         BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
 
+    // ICacheService contract member (#89): broadcasts the only-advance-guarded upsert to every DC.
+    // Not used by the normal upsert flow (that's UpsertFlagAsync above) — this exists so
+    // CompositeRedisCacheService satisfies ICacheService; the backfiller reaches the guard via the
+    // TARGETED UpsertFlagToDcAsync below instead.
+    public Task UpsertFlagIfNewerAsync(FeatureFlag flag) =>
+        BroadcastAsync(s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagIfNewerAsync));
+
     public Task StageFlagAsync(FeatureFlag flag, long ts) =>
         BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
 
@@ -46,6 +53,11 @@ public class CompositeRedisCacheService(
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) =>
         BroadcastAsync(s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentAsync));
+
+    // ICacheService contract member (#89, segment counterpart of UpsertFlagIfNewerAsync above);
+    // same rationale — the backfiller reaches the guard via the TARGETED UpsertSegmentToDcAsync.
+    public Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment) =>
+        BroadcastAsync(s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentIfNewerAsync));
 
     public Task StageSegmentAsync(Segment segment, long ts) =>
         BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
@@ -210,8 +222,11 @@ public class CompositeRedisCacheService(
     /// <summary>
     /// Recovery-facing targeted write (E1): commits <paramref name="flagId"/> at version
     /// <paramref name="ts"/> into ONE DC's Redis (advancing that DC's committed pointer + index),
-    /// unlike the broadcast <see cref="CommitFlagAsync"/>. If no DC matches <paramref name="dcId"/>,
-    /// logs a warning and no-ops. A failing write is swallowed and logged with the same resilience
+    /// unlike the broadcast <see cref="CommitFlagAsync"/>. Only-advance guarded at the underlying
+    /// <see cref="ICacheService.CommitFlagAsync"/> implementation (#89): a stale <paramref name="ts"/>
+    /// (e.g. from a backfill holding an older snapshot racing a newer normal commit) is a no-op and
+    /// never reverts a fresher committed pointer. If no DC matches <paramref name="dcId"/>, logs a
+    /// warning and no-ops. A failing write is swallowed and logged with the same resilience
     /// as <see cref="BroadcastAsync"/>.
     /// </summary>
     public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
@@ -232,7 +247,8 @@ public class CompositeRedisCacheService(
     /// Recovery-facing targeted write (#58, segment counterpart of <see cref="CommitFlagToDcAsync"/>):
     /// commits <paramref name="segmentId"/> at version <paramref name="ts"/> into ONE DC's Redis
     /// (advancing that DC's committed pointer + per-env index), unlike the broadcast
-    /// <see cref="CommitSegmentAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// <see cref="CommitSegmentAsync"/>. Only-advance guarded (#89), mirroring
+    /// <see cref="CommitFlagToDcAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
     /// no-ops. A failing write is swallowed and logged with the same resilience as
     /// <see cref="BroadcastAsync"/>.
     /// </summary>
@@ -242,21 +258,47 @@ public class CompositeRedisCacheService(
     /// <summary>
     /// Recovery-facing targeted BestEffort write: upserts <paramref name="flag"/>'s legacy value
     /// key (<c>featbit:flag:{id}</c>) + index into ONE DC's Redis, unlike the broadcast
-    /// <see cref="UpsertFlagAsync"/>. Used by the cross-DC reconciler to backfill a returning DC
-    /// under BestEffort, where the eval-server reads the legacy key (no committed pointer). If no
-    /// DC matches <paramref name="dcId"/>, logs a warning and no-ops; a failing write is swallowed
-    /// and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// <see cref="UpsertFlagAsync"/>. Used by the cross-DC reconciler/backfiller to backfill a
+    /// returning DC under BestEffort, where the eval-server reads the legacy key (no committed
+    /// pointer). Only-advance guarded (#89) via <see cref="ICacheService.UpsertFlagIfNewerAsync"/>:
+    /// the backfiller snapshots the source of truth and then awaits per-item writes, so a racing
+    /// normal upsert can land a newer value on this DC first — the guard stops the backfill's stale
+    /// snapshot from reverting it. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// no-ops; a failing write is swallowed and logged with the same resilience as
+    /// <see cref="BroadcastAsync"/>.
     /// </summary>
     public Task UpsertFlagToDcAsync(string dcId, FeatureFlag flag) =>
-        TargetedAsync(dcId, s => s.UpsertFlagAsync(flag), nameof(UpsertFlagToDcAsync));
+        TargetedAsync(dcId, s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagToDcAsync));
 
     /// <summary>
-    /// Segment counterpart of <see cref="UpsertFlagToDcAsync"/>: targeted BestEffort upsert of
-    /// <paramref name="segment"/> (+ per-env index) into ONE DC's Redis. If no DC matches
+    /// Segment counterpart of <see cref="UpsertFlagToDcAsync"/>: targeted, only-advance-guarded
+    /// (#89) BestEffort upsert of <paramref name="segment"/> (+ per-env index) into ONE DC's Redis
+    /// via <see cref="ICacheService.UpsertSegmentIfNewerAsync"/>. If no DC matches
     /// <paramref name="dcId"/>, logs a warning and no-ops.
     /// </summary>
     public Task UpsertSegmentToDcAsync(string dcId, ICollection<Guid> envIds, Segment segment) =>
-        TargetedAsync(dcId, s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentToDcAsync));
+        TargetedAsync(dcId, s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (#91): upserts one secret's cache entry
+    /// (<c>featbit:secret:{value}</c>, a hash of descriptor fields) into ONE DC's Redis, unlike the
+    /// broadcast <see cref="UpsertSecretAsync"/>. Used by the cross-DC reconciler/backfiller to
+    /// backfill a DC whose Redis lost its secret keys — without this, SDK auth (a per-key existence
+    /// check with no DB fallback; see <see cref="Domain.Environments.Secret"/>) keeps failing on that
+    /// DC even after flags/segments are healed.
+    /// <para>
+    /// Unlike the flag/segment targeted writes above, this is NOT only-advance guarded: the secret
+    /// hash carries no version/timestamp (it is keyed by the secret's own value, not by env+id), so
+    /// there is nothing to compare against — <see cref="RedisCacheService.UpsertSecretAsync"/> is
+    /// already an unconditional last-write-wins <c>HASH SET</c>, exactly like the existing broadcast
+    /// <see cref="UpsertSecretAsync"/>. Applies in BOTH consistency modes (secrets are never
+    /// staged/gated).
+    /// </para>
+    /// If no DC matches <paramref name="dcId"/>, logs a warning and no-ops. A failing write is
+    /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task UpsertSecretToDcAsync(string dcId, ResourceDescriptor resourceDescriptor, Secret secret) =>
+        TargetedAsync(dcId, s => s.UpsertSecretAsync(resourceDescriptor, secret), nameof(UpsertSecretToDcAsync));
 
     private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
     {
