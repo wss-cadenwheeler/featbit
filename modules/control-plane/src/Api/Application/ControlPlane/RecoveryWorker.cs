@@ -39,6 +39,12 @@ namespace Api.Application.ControlPlane;
 /// guards (see above) still make concurrent execution safe belt-and-braces during a failover
 /// overlap window, so losing leadership mid-tick is harmless.
 ///
+/// #90: when more than one DC returns in the same tick, <see cref="RunOnceAsync"/> fetches the
+/// committed snapshot ONCE (<see cref="IDcBackfiller.FetchCommittedSnapshotAsync"/>) and shares it
+/// across every returned DC's backfill, so they are all repaired from an identical view of the source
+/// of truth (restores the pre-#74-refactor guarantee) instead of each DC re-reading the source of
+/// truth independently.
+///
 /// ASSUMPTION (per-DC client refresh): the targeted <c>PushFullSync</c> command relies on the
 /// <see cref="ControlPlaneTopics.ControlPlaneCommand"/> topic reaching EVERY DC's eval servers (the
 /// existing admin "push full sync to ALL active clients" implies it does). The TargetDcId filter then
@@ -164,16 +170,23 @@ public sealed class RecoveryWorker : BackgroundService
             return 0;
         }
 
+        // #90: fetch the committed snapshot (flags + segments + segment env-ids) ONCE per tick and
+        // share it across every DC returned this tick, instead of letting each DC's backfill re-fetch
+        // it. This restores the pre-#74-refactor guarantee that two DCs returning in the same tick are
+        // backfilled from an IDENTICAL view of the source of truth, and halves-to-Nths the DB reads
+        // for a multi-DC tick.
+        var snapshot = await _backfiller.FetchCommittedSnapshotAsync(cancellationToken);
+
         var backfilled = 0;
         foreach (var dcId in returned)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // GatedCommit backfill of the returned DC from the source of truth (staged versioned
+            // GatedCommit backfill of the returned DC from the shared snapshot (staged versioned
             // value + committed pointer + index) followed by a targeted PushFullSync — delegated to
             // the shared backfiller, which CacheReconciler also uses (with the mode-appropriate
             // write path).
-            await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, cancellationToken);
+            await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, snapshot, cancellationToken);
             backfilled++;
         }
 

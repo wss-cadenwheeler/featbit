@@ -1,3 +1,4 @@
+using System.Reflection;
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
 using Application.Caches;
@@ -172,13 +173,18 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         });
     }
 
-    private RecoveryWorker CreateSut(ILogger<RecoveryWorker>? logger = null, bool isLeader = true)
+    private RecoveryWorker CreateSut(
+        ILogger<RecoveryWorker>? logger = null,
+        bool isLeader = true,
+        IFeatureFlagService? flagService = null,
+        ISegmentService? segmentService = null)
     {
         // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
-        // resolves them at runtime via IServiceScopeFactory.
+        // resolves them at runtime via IServiceScopeFactory. Tests that need to observe how many
+        // times the snapshot is fetched (#90) pass a counting spy in place of the real services.
         var services = new ServiceCollection();
-        services.AddTransient<IFeatureFlagService>(_ => _flagService);
-        services.AddTransient<ISegmentService>(_ => _segmentService);
+        services.AddTransient(_ => flagService ?? (IFeatureFlagService)_flagService);
+        services.AddTransient(_ => segmentService ?? (ISegmentService)_segmentService);
         services.AddTransient<ILeaseStore>(_ => _leaseStore);
         var provider = services.BuildServiceProvider();
 
@@ -421,6 +427,61 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         Assert.Equal(0, second);
     }
 
+    // ----- #90: one shared committed snapshot per tick -----
+
+    [Fact]
+    public async Task TwoDcsReturnedInOneTick_ShareOneCommittedSnapshotFetch()
+    {
+        const string flagKey = "shared-snapshot-flag";
+        const string segmentKey = "shared-snapshot-segment";
+
+        var flag = CreateFlag(flagKey, isEnabled: true);
+        flag.CommittedVersion = 1;
+        await _flagService.AddOneAsync(flag);
+        var flagTs = VersionTokenOf(flag);
+
+        var segment = CreateSegment(segmentKey, included: ["alice"]);
+        segment.CommittedVersion = 1;
+        await _segmentService.AddOneAsync(segment);
+        var segmentTs = VersionTokenOf(segment);
+
+        // Both DCs start absent (no lease at all): a SINGLE tick sees both as newly live/returned
+        // together, so the shared-snapshot path is exercised (not the sequential-returns path the
+        // other acceptance tests exercise).
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        // Counting spies around the REAL Mongo-backed services: prove GetAllCommittedAsync is called
+        // exactly once per tick (not once per returned DC) while still exercising the real read path.
+        var (flagServiceSpy, flagCommittedCalls) =
+            CountingProxy<IFeatureFlagService>.Wrap(_flagService, nameof(IFeatureFlagService.GetAllCommittedAsync));
+        var (segmentServiceSpy, segmentCommittedCalls) =
+            CountingProxy<ISegmentService>.Wrap(_segmentService, nameof(ISegmentService.GetAllCommittedAsync));
+
+        var sut = CreateSut(flagService: flagServiceSpy, segmentService: segmentServiceSpy);
+
+        var backfilled = await sut.RunOnceAsync();
+
+        Assert.Equal(2, backfilled);
+        Assert.Equal(1, flagCommittedCalls.CallCount);
+        Assert.Equal(1, segmentCommittedCalls.CallCount);
+
+        // Both DCs were written from the IDENTICAL shared snapshot: same committed pointer (ts) for
+        // both the flag and the segment on both DCs.
+        var dcaFlagPointer = await _mux.GetDatabase(0).StringGetAsync(RedisCaches.FlagCommittedPointer(flag.Id));
+        var dcbFlagPointer = await _mux.GetDatabase(1).StringGetAsync(RedisCaches.FlagCommittedPointer(flag.Id));
+        Assert.Equal(flagTs, (long)dcaFlagPointer);
+        Assert.Equal(flagTs, (long)dcbFlagPointer);
+
+        var dcaSegmentPointer =
+            await _mux.GetDatabase(0).StringGetAsync(RedisCaches.SegmentCommittedPointer(segment.Id));
+        var dcbSegmentPointer =
+            await _mux.GetDatabase(1).StringGetAsync(RedisCaches.SegmentCommittedPointer(segment.Id));
+        Assert.Equal(segmentTs, (long)dcaSegmentPointer);
+        Assert.Equal(segmentTs, (long)dcbSegmentPointer);
+    }
+
     [Fact]
     public async Task Publishes_Targeted_ClientRefresh_For_ReturningDc()
     {
@@ -535,5 +596,47 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         public IConnectionMultiplexer Connection { get; } = connection;
 
         public IDatabase GetDatabase() => Connection.GetDatabase(db);
+    }
+
+    /// <summary>
+    /// A thread-safe call counter paired with a <see cref="DispatchProxy"/> that forwards every call
+    /// on <typeparamref name="TInterface"/> to a REAL wrapped instance, incrementing only for the one
+    /// named method being spied on. Used (#90) to prove the shared committed snapshot is fetched
+    /// exactly once per tick — i.e. <c>GetAllCommittedAsync</c> is invoked once, not once per returned
+    /// DC — while the test still exercises the real Mongo-backed service underneath.
+    /// </summary>
+    public class CountingProxy<TInterface> : DispatchProxy where TInterface : class
+    {
+        private TInterface _target = null!;
+        private string _countedMethodName = string.Empty;
+        private int _callCount;
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public static (TInterface Proxy, CountingProxy<TInterface> Counter) Wrap(
+            TInterface target,
+            string countedMethodName)
+        {
+            var proxy = Create<TInterface, CountingProxy<TInterface>>();
+            var counter = (CountingProxy<TInterface>)(object)proxy;
+            counter._target = target;
+            counter._countedMethodName = countedMethodName;
+            return (proxy, counter);
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod is null)
+            {
+                throw new InvalidOperationException("CountingProxy received a null target method.");
+            }
+
+            if (targetMethod.Name == _countedMethodName)
+            {
+                Interlocked.Increment(ref _callCount);
+            }
+
+            return targetMethod.Invoke(_target, args);
+        }
     }
 }

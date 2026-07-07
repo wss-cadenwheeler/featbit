@@ -31,6 +31,12 @@ namespace Api.Application.ControlPlane;
 /// only-advance guard (#89) on the underlying targeted writes is what actually makes them so: two
 /// concurrent backfillers (or a backfiller racing a normal commit) can never revert each other's
 /// pointer/index to an older snapshot, they just converge on whichever version is newest.
+///
+/// #90: when a tick finds more than one DC newly reachable (e.g. control-plane startup with several
+/// configured peers), <see cref="RunOnceAsync"/> fetches the committed snapshot ONCE
+/// (<see cref="IDcBackfiller.FetchCommittedSnapshotAsync"/>) and shares it across all of them, instead
+/// of each DC's backfill re-reading the source of truth. That fetch is LAZY — an idle tick where
+/// nothing is newly reachable (the steady-state common case) never touches the source of truth.
 /// Disable via <c>ControlPlane:CacheReconcile:Enabled=false</c>.
 /// </summary>
 public sealed class CacheReconciler : BackgroundService
@@ -107,9 +113,17 @@ public sealed class CacheReconciler : BackgroundService
     /// One detection tick: poll each DC's connection state and reconcile any DC that is newly
     /// reachable (first seen connected — i.e. startup — or a disconnected -> connected transition). A
     /// steady-connected DC is not re-reconciled. Exposed so tests can drive ticks without the timer.
+    ///
+    /// #90: the committed snapshot (flags + segments + segment env-ids) is fetched LAZILY — only if at
+    /// least one DC is newly reachable this tick — and then shared across every newly-reachable DC's
+    /// backfill in the SAME tick, so an idle steady-state tick (the common case, every ~10s) never
+    /// touches the source of truth, and a tick with multiple newly-reachable DCs (e.g. control-plane
+    /// startup with several peers) reads it once instead of once per DC.
     /// </summary>
     public async Task RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        var newlyReachable = new List<(string DcId, bool IsLocal)>();
+
         foreach (var dc in _dcs)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -133,20 +147,59 @@ public sealed class CacheReconciler : BackgroundService
             var seenBefore = _lastConnected.TryGetValue(dc.DcId, out var wasConnected);
             _lastConnected[dc.DcId] = isConnected;
 
-            var newlyReachable = isConnected && (!seenBefore || !wasConnected);
-            if (newlyReachable)
+            if (isConnected && (!seenBefore || !wasConnected))
             {
-                await RunReconcileAsync(dc.DcId, dc.IsLocal, cancellationToken);
+                newlyReachable.Add((dc.DcId, dc.IsLocal));
             }
+        }
+
+        if (newlyReachable.Count == 0)
+        {
+            // Idle tick: nothing newly reachable, so no snapshot fetch and no DB read this tick.
+            return;
+        }
+
+        CommittedSnapshot snapshot;
+        try
+        {
+            snapshot = await _backfiller.FetchCommittedSnapshotAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Cache reconciler: failed to fetch the shared committed snapshot for {Count} newly " +
+                "reachable DC(s); all will retry on a later tick.",
+                newlyReachable.Count);
+            // Force a retry next tick for every DC that would have been reconciled this tick.
+            foreach (var (dcId, _) in newlyReachable)
+            {
+                _lastConnected.Remove(dcId);
+            }
+            return;
+        }
+
+        foreach (var (dcId, isLocal) in newlyReachable)
+        {
+            await RunReconcileAsync(dcId, isLocal, snapshot, cancellationToken);
         }
     }
 
     /// <summary>
-    /// Backfill one DC's cache from the source of truth (via <see cref="IDcBackfiller"/>), coalescing
-    /// overlapping calls per DcId. On failure the last-connected watermark for the DC is cleared so
-    /// the next tick re-detects it as newly reachable and retries. Exposed for tests.
+    /// Backfill one DC's cache from the pre-fetched <paramref name="snapshot"/> (via
+    /// <see cref="IDcBackfiller"/>), coalescing overlapping calls per DcId. On failure the
+    /// last-connected watermark for the DC is cleared so the next tick re-detects it as newly reachable
+    /// and retries. Exposed for tests.
     /// </summary>
-    public async Task RunReconcileAsync(string dcId, bool isLocal, CancellationToken cancellationToken = default)
+    public async Task RunReconcileAsync(
+        string dcId,
+        bool isLocal,
+        CommittedSnapshot snapshot,
+        CancellationToken cancellationToken = default)
     {
         lock (_inFlight)
         {
@@ -164,7 +217,7 @@ public sealed class CacheReconciler : BackgroundService
                 isLocal ? "local" : "peer",
                 dcId,
                 _mode);
-            await _backfiller.BackfillDcAsync(dcId, _mode, cancellationToken);
+            await _backfiller.BackfillDcAsync(dcId, _mode, snapshot, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

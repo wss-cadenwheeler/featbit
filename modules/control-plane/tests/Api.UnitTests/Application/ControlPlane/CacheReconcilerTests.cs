@@ -11,14 +11,24 @@ namespace Api.UnitTests.Application.ControlPlane;
 
 public class CacheReconcilerTests
 {
+    private static readonly CommittedSnapshot EmptySnapshot = new(
+        Array.Empty<Domain.FeatureFlags.FeatureFlag>(),
+        Array.Empty<Domain.Segments.Segment>(),
+        new Dictionary<string, ICollection<Guid>>());
+
     private readonly Mock<IDcBackfiller> _backfiller = new();
 
     public CacheReconcilerTests()
     {
         // Default: backfill succeeds, returning 0 flags. Individual tests override as needed.
         _backfiller
-            .Setup(b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CancellationToken>()))
+            .Setup(b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(0);
+        // #90: RunOnceAsync fetches the shared snapshot lazily (only when a DC is newly reachable);
+        // tests that DO expect a backfill rely on this succeeding.
+        _backfiller
+            .Setup(b => b.FetchCommittedSnapshotAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(EmptySnapshot);
     }
 
     // A DC whose IsConnected is evaluated live each poll via the supplied delegate.
@@ -62,8 +72,11 @@ public class CacheReconcilerTests
 
     private void VerifyBackfill(string dcId, ConsistencyMode mode, Times times) =>
         _backfiller.Verify(
-            b => b.BackfillDcAsync(dcId, mode, It.IsAny<CancellationToken>()),
+            b => b.BackfillDcAsync(dcId, mode, It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()),
             times);
+
+    private void VerifySnapshotFetch(Times times) =>
+        _backfiller.Verify(b => b.FetchCommittedSnapshotAsync(It.IsAny<CancellationToken>()), times);
 
     [Fact]
     public async Task FirstSeenConnectedPeer_IsBackfilledOnce()
@@ -150,8 +163,9 @@ public class CacheReconcilerTests
         await sut.RunOnceAsync();
 
         _backfiller.Verify(
-            b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CancellationToken>()),
+            b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()),
             Times.Never());
+        VerifySnapshotFetch(Times.Never());
     }
 
     [Fact]
@@ -163,8 +177,56 @@ public class CacheReconcilerTests
         await sut.StopAsync(CancellationToken.None);
 
         _backfiller.Verify(
-            b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CancellationToken>()),
+            b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()),
             Times.Never());
+    }
+
+    // ----- #90: lazy snapshot fetch -----
+
+    [Fact]
+    public async Task IdleTick_WithNothingNewlyReachable_NeverFetchesSnapshot()
+    {
+        // A DC already steady-connected from a previous tick: this tick finds nothing newly
+        // reachable, so the shared committed snapshot must NOT be fetched (no DB read on an idle
+        // ~10s tick).
+        var sut = CreateSut(new[] { Dc("east", () => true) });
+
+        await sut.RunOnceAsync(); // first-seen -> backfills, fetches snapshot once
+        VerifySnapshotFetch(Times.Once());
+
+        await sut.RunOnceAsync(); // steady-state idle tick -> no new fetch
+        await sut.RunOnceAsync();
+
+        VerifySnapshotFetch(Times.Once());
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
+    }
+
+    [Fact]
+    public async Task NoDcsConfigured_NeverFetchesSnapshot()
+    {
+        var sut = CreateSut(Array.Empty<DcRedisConnection>());
+
+        await sut.RunOnceAsync();
+
+        VerifySnapshotFetch(Times.Never());
+    }
+
+    [Fact]
+    public async Task MultipleNewlyReachableDcsInOneTick_ShareOneSnapshotFetch()
+    {
+        // Both DCs first-seen in the SAME tick -> both backfilled, but the snapshot is fetched once
+        // and shared, not once per DC.
+        var sut = CreateSut(new[]
+        {
+            Dc("west", () => true, isLocal: true),
+            Dc("east", () => true)
+        });
+
+        await sut.RunOnceAsync();
+
+        VerifySnapshotFetch(Times.Once());
+        VerifyBackfill("west", ConsistencyMode.BestEffort, Times.Once());
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
     }
 
     [Fact]
@@ -183,8 +245,8 @@ public class CacheReconcilerTests
     {
         var gate = new TaskCompletionSource();
         _backfiller
-            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CancellationToken>()))
-            .Returns(async (string _, ConsistencyMode _, CancellationToken _) =>
+            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string _, ConsistencyMode _, CommittedSnapshot _, CancellationToken _) =>
             {
                 await gate.Task;
                 return 0;
@@ -192,8 +254,8 @@ public class CacheReconcilerTests
 
         var sut = CreateSut(new[] { Dc("east", () => true) });
 
-        var first = sut.RunReconcileAsync("east", isLocal: false);  // acquires slot, blocks on gate
-        var second = sut.RunReconcileAsync("east", isLocal: false); // sees in-flight -> returns now
+        var first = sut.RunReconcileAsync("east", isLocal: false, EmptySnapshot);  // acquires slot, blocks on gate
+        var second = sut.RunReconcileAsync("east", isLocal: false, EmptySnapshot); // sees in-flight -> returns now
 
         await second;
         VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
@@ -209,8 +271,8 @@ public class CacheReconcilerTests
     {
         var calls = 0;
         _backfiller
-            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CancellationToken>()))
-            .Returns((string _, ConsistencyMode _, CancellationToken _) =>
+            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
+            .Returns((string _, ConsistencyMode _, CommittedSnapshot _, CancellationToken _) =>
             {
                 calls++;
                 return calls == 1
@@ -224,5 +286,36 @@ public class CacheReconcilerTests
         await sut.RunOnceAsync(); // re-detected as newly reachable -> retried
 
         VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task SnapshotFetchFailure_IsRetriedOnNextTick_ForAllNewlyReachableDcs()
+    {
+        var calls = 0;
+        _backfiller
+            .Setup(b => b.FetchCommittedSnapshotAsync(It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                calls++;
+                return calls == 1
+                    ? Task.FromException<CommittedSnapshot>(new Exception("snapshot fetch boom"))
+                    : Task.FromResult(EmptySnapshot);
+            });
+
+        var sut = CreateSut(new[]
+        {
+            Dc("west", () => true, isLocal: true),
+            Dc("east", () => true)
+        });
+
+        await sut.RunOnceAsync(); // snapshot fetch fails -> neither DC backfilled, watermark cleared
+        VerifyBackfill("west", ConsistencyMode.BestEffort, Times.Never());
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Never());
+
+        await sut.RunOnceAsync(); // both re-detected as newly reachable -> fetch succeeds -> both backfilled
+
+        VerifySnapshotFetch(Times.Exactly(2));
+        VerifyBackfill("west", ConsistencyMode.BestEffort, Times.Once());
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
     }
 }
