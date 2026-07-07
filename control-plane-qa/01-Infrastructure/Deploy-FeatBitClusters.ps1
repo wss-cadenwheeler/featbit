@@ -1706,8 +1706,22 @@ if ($consistencyMode -eq 'GatedCommit') {
     # ControlPlane__DcId (the cluster name, set in the per-cluster loop above).
     #   west control-plane: 0 = local west redis (DcId=west), 1 = remote east redis (DcId=east)
     #   east control-plane: 0 = local east redis (DcId=east), 1 = remote west redis (DcId=west)
+    #
+    # Kafka__Consumer__group.id is set PER CLUSTER (not the shipped default of
+    # "featbit-control-plane") so west/east control planes never collide on a shared
+    # consumer group.id when they both consume from the same host Kafka broker (#100).
+    # A shared group.id makes Kafka hand each topic-partition to exactly ONE group
+    # member, so only one DC's control plane processes flag/segment changes and
+    # heartbeats at a time — the other silently idles until a rebalance. Each DC needs
+    # its own group so both control planes are independent consumers of the change
+    # stream (the composite-cache design assumes this; every control plane writes to
+    # every DC's Redis and the idempotent/only-advance guards make duplicate
+    # processing safe, see #72/#89). auto.offset.reset=latest avoids replaying the
+    # entire topic history the first time each new per-DC group is created.
     kubectl --context west -n featbit set env deployment/control-plane `
         "ControlPlane__ConsistencyMode=GatedCommit" `
+        "Kafka__Consumer__group.id=featbit-control-plane-west" `
+        "Kafka__Consumer__auto.offset.reset=latest" `
         "Redis__Instances__0__ConnectionString=redis:6379" `
         "Redis__Instances__0__DcId=west" `
         "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6380" `
@@ -1717,6 +1731,8 @@ if ($consistencyMode -eq 'GatedCommit') {
     }
     kubectl --context east -n featbit set env deployment/control-plane `
         "ControlPlane__ConsistencyMode=GatedCommit" `
+        "Kafka__Consumer__group.id=featbit-control-plane-east" `
+        "Kafka__Consumer__auto.offset.reset=latest" `
         "Redis__Instances__0__ConnectionString=redis:6379" `
         "Redis__Instances__0__DcId=east" `
         "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6379" `
@@ -1724,7 +1740,7 @@ if ($consistencyMode -eq 'GatedCommit') {
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set gated-commit Redis/DcId config on control-plane in east"
     }
-    Write-Success "GatedCommit: cross-cluster Redis labeled with DcIds (west 0=west/1=east, east 0=east/1=west); ConsistencyMode=GatedCommit on both control planes + eval servers"
+    Write-Success "GatedCommit: cross-cluster Redis labeled with DcIds (west 0=west/1=east, east 0=east/1=west); ConsistencyMode=GatedCommit + per-DC Kafka__Consumer__group.id on both control planes + eval servers"
 }
 else {
     # BestEffort MUST use the SAME object-form keys (__ConnectionString / __DcId) as the
@@ -1738,8 +1754,15 @@ else {
     # here for parity with the GatedCommit branch and to suppress that warning.
     #   west control-plane: 0 = local west redis (DcId=west), 1 = remote east redis (DcId=east)
     #   east control-plane: 0 = local east redis (DcId=east), 1 = remote west redis (DcId=west)
+    #
+    # Kafka__Consumer__group.id is set PER CLUSTER here too — see the GatedCommit branch
+    # above for the full rationale (#100). The collision is just as real under BestEffort:
+    # without a per-DC group.id, Kafka hands each topic-partition to a single group
+    # member and only one DC's control plane processes changes at a time.
     kubectl --context west -n featbit set env deployment/control-plane `
         "ControlPlane__ConsistencyMode=BestEffort" `
+        "Kafka__Consumer__group.id=featbit-control-plane-west" `
+        "Kafka__Consumer__auto.offset.reset=latest" `
         "Redis__Instances__0__ConnectionString=redis:6379" `
         "Redis__Instances__0__DcId=west" `
         "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6380" `
@@ -1749,6 +1772,8 @@ else {
     }
     kubectl --context east -n featbit set env deployment/control-plane `
         "ControlPlane__ConsistencyMode=BestEffort" `
+        "Kafka__Consumer__group.id=featbit-control-plane-east" `
+        "Kafka__Consumer__auto.offset.reset=latest" `
         "Redis__Instances__0__ConnectionString=redis:6379" `
         "Redis__Instances__0__DcId=east" `
         "Redis__Instances__1__ConnectionString=${CrossClusterRedisHost}:6379" `
@@ -1756,7 +1781,7 @@ else {
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Failed to set Redis cross-cluster instance on control-plane in east"
     }
-    Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379)"
+    Write-Success "Cross-cluster Redis configured (object-form; west→east: ${CrossClusterRedisHost}:6380, east→west: ${CrossClusterRedisHost}:6379); per-DC Kafka__Consumer__group.id set on both control planes"
 }
 
 # ── Per-cluster Redis + Sentinel ────────────────────────────────────────────────

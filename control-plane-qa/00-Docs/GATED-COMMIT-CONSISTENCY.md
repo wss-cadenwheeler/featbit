@@ -229,6 +229,7 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c) |
 | `Redis:Instances[].DcId` | — | CP | DC label per Redis instance (join key) |
 | `ControlPlane:DcId` / `:Region` | — | ELS | This pod's DC identity (must match a Redis `DcId`) |
+| `Kafka:Consumer:group.id` | `featbit-control-plane` | CP | Consumer group for the control-plane trigger topics. When left at the shipped default AND `Redis:Instances:0:DcId` is non-empty, the control plane auto-suffixes it with `-{DcId}` (e.g. `featbit-control-plane-west`) so DCs sharing a broker don't collide on a single group id (#100). An explicitly-set non-default group id (e.g. `Deploy-FeatBitClusters.ps1`'s per-cluster literal) is always left untouched; no DcId configured leaves the default group id unchanged (single-DC/legacy behavior). See `MqServiceCollectionExtensions.ResolveConsumerGroupId`. |
 
 ---
 
