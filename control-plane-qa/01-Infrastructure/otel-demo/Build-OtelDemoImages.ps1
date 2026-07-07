@@ -34,11 +34,13 @@
 param(
     [string[]]$Components,
     [string]$DemoVersion = "2.2.0",
-    # Registry + repo are configurable; defaults target the team Harbor where
-    # apps/featbit/* already lives. Override for a local registry, e.g.
-    #   -Registry localhost:5000 -Repo otel-demo
-    [string]$Registry = "harbor.tekgeek.io",
-    [string]$Repo = "apps/otel-demo"
+    # Registry + repo are configurable; defaults target the shared local registry
+    # (localhost:5000/otel-demo) that Deploy-OtelDemo.ps1 also defaults to, so the
+    # out-of-the-box flow needs no registry configuration. Override both for a
+    # private registry, e.g. -Registry harbor.tekgeek.io -Repo apps/otel-demo
+    # (and pass the same -Registry/-Repo to Deploy-OtelDemo.ps1).
+    [string]$Registry = "localhost:5000",
+    [string]$Repo = "otel-demo"
 )
 
 $ErrorActionPreference = "Stop"

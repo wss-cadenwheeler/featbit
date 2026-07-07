@@ -376,66 +376,10 @@ function Wait-ApiServerReady {
     throw "API server in '$ClusterContext' did not become ready after $($MaxAttempts * $DelaySeconds) seconds."
 }
 
-function Ensure-CustomRegistryImagePullSecret {
-    param(
-        [string]$ClusterContext,
-        [string]$Namespace,
-        [string]$Registry,
-        [PSCredential]$Credential,
-        [string]$SecretName = "registry-credentials"
-    )
-
-    $username = $Credential.UserName
-    $password = $Credential.GetNetworkCredential().Password
-
-    $maxAttempts = 4
-    $delaySeconds = 5
-    $created = $false
-
-    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        kubectl --context $ClusterContext --namespace $Namespace delete secret $SecretName --ignore-not-found | Out-Null
-        kubectl --context $ClusterContext --namespace $Namespace create secret docker-registry $SecretName --docker-server=$Registry --docker-username=$username --docker-password=$password --docker-email=devnull@$Registry | Out-Null
-
-        if ($LASTEXITCODE -eq 0) {
-            $created = $true
-            break
-        }
-
-        if ($attempt -lt $maxAttempts) {
-            Write-Warning "Failed to create $SecretName in $ClusterContext (attempt $attempt/$maxAttempts). Retrying in $delaySeconds seconds..."
-            Start-Sleep -Seconds $delaySeconds
-        }
-    }
-
-    if (-not $created) {
-        throw "Failed to create $SecretName secret in $ClusterContext"
-    }
-
-    Write-Success "$SecretName secret ready in $ClusterContext"
-}
-
-function Ensure-DefaultServiceAccountImagePullSecret {
-    param(
-        [string]$ClusterContext,
-        [string]$Namespace,
-        [string]$SecretName
-    )
-
-    $serviceAccountPatch = @{
-        imagePullSecrets = @(
-            @{
-                name = $SecretName
-            }
-        )
-    } | ConvertTo-Json -Depth 4 -Compress
-
-    kubectl --context $ClusterContext --namespace $Namespace patch serviceaccount default --type merge -p $serviceAccountPatch | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to patch default service account imagePullSecrets in $ClusterContext/$Namespace"
-    }
-
-    Write-Success "Default service account patched with $SecretName in $ClusterContext"
-}
+# Ensure-CustomRegistryImagePullSecret / Ensure-DefaultServiceAccountImagePullSecret
+# live in Registry-PullSecrets.ps1 so Deploy-OtelDemo.ps1 (otel-demo namespace)
+# can reuse the exact same pull-secret logic instead of a second copy.
+. (Join-Path $PSScriptRoot "Registry-PullSecrets.ps1")
 
 function Get-LoadBalancerIp {
     param(

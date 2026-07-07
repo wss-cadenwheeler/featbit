@@ -90,6 +90,8 @@ docker compose -f docker-compose-standard.yml up -d
 docker compose -f docker-compose-pro.yml up -d
 ```
 
+Default dev credentials: `test@featbit.com` / `123456`
+
 ---
 
 ## Key Configuration
@@ -119,6 +121,39 @@ GitHub Actions workflows run on push/PR to `main` for path-filtered changes:
 - `publish-docker-images.yml` — manual trigger; builds multi-platform (amd64/arm64) images to Docker Hub
 
 Kubernetes manifests are in `kubernetes/` (standard, pro, demo, minikube variants).
+
+---
+
+## Control Plane QA
+
+The `control-plane-qa/` directory manages multi-cluster (west/east) Minikube deployments for
+testing cross-datacenter feature flag propagation. It is organized into three numbered
+subdirectories:
+
+- **`00-Docs/`** — architecture reference, deployment guide, testing plans.
+- **`01-Infrastructure/`** — deployment scripts, platform quickstarts (`ubuntu/`,
+  `windows-wsl/`, `windows-hyperv/`), config files, and `extras/` for infrequently-used
+  utilities.
+- **`02-Tests/`** — automated scenarios (`automation-py/scenarios/cp01–cp08.py`), manual
+  procedures (`manual_scripts/`), test applications (`test-app/`, `quick-test/`), and UAT
+  orchestration (`Run-UATTests.ps1`).
+
+Artifacts are gitignored — test output goes to `artifacts/`, excluded from version control.
+Configuration lives in `01-Infrastructure/deployment.env` (copied from
+`deployment.env.example`); never commit credentials.
+
+PowerShell scripts in `control-plane-qa/` use approved PowerShell verbs in their names (e.g.
+`Deploy-`, `Initialize-`, `Start-`) and target multi-cluster Minikube deployments.
+
+---
+
+## Commit & PR Conventions
+
+- PR title: < 70 characters, sentence case.
+- Use emoji prefixes: ✨ feature, 🐛 bugfix, 🔥 P0 fix, ✅ tests, 🚀 perf, 📖 docs, 🏗 infra,
+  🧹 refactor.
+- Labels: UI, API, Evaluation Server, OLAP.
+- Always include a `Co-Authored-By` trailer when AI-assisted.
 
 ---
 
