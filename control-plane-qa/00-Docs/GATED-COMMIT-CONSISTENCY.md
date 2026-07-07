@@ -1,5 +1,11 @@
 # Gated-Commit Cross-DC Consistency (Option A)
 
+**This is the canonical documentation for the consistency feature** — mechanism, configuration
+reference, metrics, rollout/rollback, validation, and known limitations. The module READMEs
+([`modules/control-plane`](../../modules/control-plane/README.md),
+[`modules/evaluation-server`](../../modules/evaluation-server/README.md)) carry short summaries
+and link here.
+
 Operator guide for the control plane's **gated-commit** consistency mode, which guarantees
 that a flag/segment change is not served by any *live* data center until **every live DC has
 it** — closing the cross-DC inconsistency window in the default best-effort broadcast.
