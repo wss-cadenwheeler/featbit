@@ -54,6 +54,22 @@ public static class RedisKeys
 
     public static RedisKey SegmentIndex(Guid envId) => new($"{SegmentIndexPrefix}{envId}");
 
+    /// <summary>
+    /// The glob pattern matching every per-env segment index key (<c>featbit:segment-index:*</c>),
+    /// for use with Redis <c>SCAN</c> when enumerating envs that have a committed segment index.
+    /// </summary>
+    public static string SegmentIndexScanPattern => $"{SegmentIndexPrefix}*";
+
+    /// <summary>
+    /// Extracts the environment id from a segment index key (<c>featbit:segment-index:{envId}</c>),
+    /// or <c>null</c> if the key does not match the expected shape.
+    /// </summary>
+    public static Guid? TryParseSegmentIndexEnvId(string key)
+        => key.StartsWith(SegmentIndexPrefix, StringComparison.Ordinal)
+           && Guid.TryParse(key.AsSpan(SegmentIndexPrefix.Length), out var envId)
+            ? envId
+            : null;
+
     public static RedisKey Segment(string id) => new($"{SegmentPrefix}{id}");
 
     // --- Stage/commit read keys (mirror back-end RedisCaches B2 conventions) ---------------------
