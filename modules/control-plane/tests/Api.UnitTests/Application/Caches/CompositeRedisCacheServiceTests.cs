@@ -1,5 +1,6 @@
 using Api.Infrastructure.Caches;
 using Application.Caches;
+using Domain.Environments;
 using Domain.Health;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -121,5 +122,45 @@ public class CompositeRedisCacheServiceTests
         Assert.Equal(2, result.Count);
         Assert.True(result[LocalDcId]);
         Assert.False(result[RemoteDcId]);
+    }
+
+    // ----- #91: UpsertSecretToDcAsync targeted routing -----
+
+    private static (ResourceDescriptor Descriptor, Secret Secret) CreateSecret()
+    {
+        var envId = Guid.NewGuid();
+        var descriptor = new ResourceDescriptor
+        {
+            Organization = new IdNameKeyProps { Id = Guid.NewGuid(), Name = "org", Key = "org-key" },
+            Project = new IdNameKeyProps { Id = Guid.NewGuid(), Name = "proj", Key = "proj-key" },
+            Environment = new IdNameKeyProps { Id = envId, Name = "env", Key = "env-key" }
+        };
+        var secret = new Secret(envId, "Server Key", SecretTypes.Server);
+
+        return (descriptor, secret);
+    }
+
+    [Fact]
+    public async Task UpsertSecretToDcAsync_RoutesToTargetDcOnly()
+    {
+        var (descriptor, secret) = CreateSecret();
+        var sut = CreateSut();
+
+        await sut.UpsertSecretToDcAsync(RemoteDcId, descriptor, secret);
+
+        _remote.Verify(s => s.UpsertSecretAsync(descriptor, secret), Times.Once);
+        _local.Verify(s => s.UpsertSecretAsync(It.IsAny<ResourceDescriptor>(), It.IsAny<Secret>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task UpsertSecretToDcAsync_UnknownDc_IsNoOp()
+    {
+        var (descriptor, secret) = CreateSecret();
+        var sut = CreateSut();
+
+        await sut.UpsertSecretToDcAsync("dc-does-not-exist", descriptor, secret);
+
+        _local.Verify(s => s.UpsertSecretAsync(It.IsAny<ResourceDescriptor>(), It.IsAny<Secret>()), Times.Never);
+        _remote.Verify(s => s.UpsertSecretAsync(It.IsAny<ResourceDescriptor>(), It.IsAny<Secret>()), Times.Never);
     }
 }

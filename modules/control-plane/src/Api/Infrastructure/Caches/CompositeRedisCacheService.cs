@@ -279,6 +279,27 @@ public class CompositeRedisCacheService(
     public Task UpsertSegmentToDcAsync(string dcId, ICollection<Guid> envIds, Segment segment) =>
         TargetedAsync(dcId, s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentToDcAsync));
 
+    /// <summary>
+    /// Recovery-facing targeted write (#91): upserts one secret's cache entry
+    /// (<c>featbit:secret:{value}</c>, a hash of descriptor fields) into ONE DC's Redis, unlike the
+    /// broadcast <see cref="UpsertSecretAsync"/>. Used by the cross-DC reconciler/backfiller to
+    /// backfill a DC whose Redis lost its secret keys — without this, SDK auth (a per-key existence
+    /// check with no DB fallback; see <see cref="Domain.Environments.Secret"/>) keeps failing on that
+    /// DC even after flags/segments are healed.
+    /// <para>
+    /// Unlike the flag/segment targeted writes above, this is NOT only-advance guarded: the secret
+    /// hash carries no version/timestamp (it is keyed by the secret's own value, not by env+id), so
+    /// there is nothing to compare against — <see cref="RedisCacheService.UpsertSecretAsync"/> is
+    /// already an unconditional last-write-wins <c>HASH SET</c>, exactly like the existing broadcast
+    /// <see cref="UpsertSecretAsync"/>. Applies in BOTH consistency modes (secrets are never
+    /// staged/gated).
+    /// </para>
+    /// If no DC matches <paramref name="dcId"/>, logs a warning and no-ops. A failing write is
+    /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task UpsertSecretToDcAsync(string dcId, ResourceDescriptor resourceDescriptor, Secret secret) =>
+        TargetedAsync(dcId, s => s.UpsertSecretAsync(resourceDescriptor, secret), nameof(UpsertSecretToDcAsync));
+
     private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
     {
         var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);

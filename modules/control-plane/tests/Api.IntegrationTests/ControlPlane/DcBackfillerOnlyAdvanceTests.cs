@@ -5,6 +5,8 @@ using Application.Configuration;
 using Application.Services;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Organizations;
+using Domain.Projects;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
 using Infrastructure.Services.MongoDb;
@@ -46,6 +48,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
     private MongoDbClient _mongoDb = null!;
     private FeatureFlagService _flagService = null!;
     private SegmentService _segmentService = null!;
+    private EnvironmentService _environmentService = null!;
 
     private ConnectionMultiplexer _mux = null!;
     private RedisCacheService _dcbCache = null!; // db 1 -- the DC under backfill in these tests
@@ -66,6 +69,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
 
         _flagService = new FeatureFlagService(_mongoDb);
         _segmentService = new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance);
+        _environmentService = new EnvironmentService(_mongoDb, NullLogger<EnvironmentService>.Instance);
 
         var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
         redisOptions.AbortOnConnectFail = false;
@@ -132,11 +136,35 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
     private static long VersionTokenOf(FeatureFlag flag) =>
         new DateTimeOffset(flag.UpdatedAt).ToUnixTimeMilliseconds();
 
+    /// <summary>
+    /// Seeds an Organization + Project + Environment in Mongo (#91) so
+    /// <c>IEnvironmentService.GetSecretCachesAsync</c> can resolve a resource descriptor for it. The
+    /// Environment constructor auto-creates its two default secrets (Server Key, Client Key) exactly
+    /// like a real environment, so no separate secret-seeding step is needed. Fully-qualified return
+    /// type: <c>Environment</c> is ambiguous with <c>System.Environment</c> (used elsewhere in this
+    /// file for <c>GetEnvironmentVariable</c>), so this file deliberately does not
+    /// <c>using Domain.Environments;</c>.
+    /// </summary>
+    private async Task<Domain.Environments.Environment> CreateEnvironmentWithSecretsAsync()
+    {
+        var org = new Organization(Guid.NewGuid(), "org", $"org-{Guid.NewGuid():N}");
+        await _mongoDb.CollectionOf<Organization>().InsertOneAsync(org);
+
+        var project = new Project(org.Id, "project", $"project-{Guid.NewGuid():N}");
+        await _mongoDb.CollectionOf<Project>().InsertOneAsync(project);
+
+        var env = new Domain.Environments.Environment(project.Id, "env", $"env-{Guid.NewGuid():N}");
+        await _environmentService.AddOneAsync(env);
+
+        return env;
+    }
+
     private DcBackfiller CreateBackfiller(IMessageProducer producer)
     {
         var services = new ServiceCollection();
         services.AddTransient<IFeatureFlagService>(_ => _flagService);
         services.AddTransient<ISegmentService>(_ => _segmentService);
+        services.AddTransient<IEnvironmentService>(_ => _environmentService);
         var provider = services.BuildServiceProvider();
 
         return new DcBackfiller(
@@ -291,6 +319,78 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
             .SortedSetScoreAsync(RedisKeys.FlagIndex(_envId), flagAtTs2.Id.ToString());
         Assert.NotNull(indexScore);
         Assert.Equal(ts2, (long)indexScore!.Value);
+    }
+
+    // ----- #91 acceptance: secrets are backfilled unconditionally, in both modes -----
+
+    [Theory]
+    [InlineData(ConsistencyMode.GatedCommit)]
+    [InlineData(ConsistencyMode.BestEffort)]
+    public async Task Backfill_WritesSecrets_ToTargetDcOnly_RegardlessOfMode(ConsistencyMode mode)
+    {
+        // Seed an environment (with its two auto-created default secrets) in the source of truth.
+        var env = await CreateEnvironmentWithSecretsAsync();
+        Assert.Equal(2, env.Secrets.Count);
+
+        // dc-a starts with NOTHING (never wiped, just never written) and dc-b likewise: prove the
+        // backfill writes ONLY to the target DC (dc-b), never dc-a.
+        var backfiller = CreateBackfiller(new NoopMessageProducer());
+        var flagCount = await backfiller.BackfillDcAsync(DcB, mode);
+        Assert.Equal(0, flagCount); // no flags seeded in this test, only secrets
+
+        foreach (var secret in env.Secrets)
+        {
+            var key = RedisKeys.Secret(secret.Value);
+
+            // ACCEPTANCE: the secret's hash is present on dc-b (db 1) with the correct fields...
+            var fields = (await _mux.GetDatabase(1).HashGetAllAsync(key))
+                .ToDictionary(x => x.Name.ToString(), x => x.Value.ToString());
+            Assert.Equal(secret.Type, fields["type"]);
+            Assert.Equal(env.Id.ToString(), fields["envId"]);
+            Assert.Equal(env.Key, fields["envKey"]);
+
+            // ...and ABSENT on dc-a (db 0) — this backfill targeted dc-b only.
+            Assert.False(await _mux.GetDatabase(0).KeyExistsAsync(key));
+        }
+    }
+
+    [Fact]
+    public async Task Backfill_RepairsSecrets_AfterTargetDcSecretKeysAreWiped()
+    {
+        var env = await CreateEnvironmentWithSecretsAsync();
+        var secretKeys = env.Secrets.Select(s => (RedisKey)RedisKeys.Secret(s.Value)).ToArray();
+
+        // Populate dc-b normally first (simulating steady state before the "outage")...
+        foreach (var secret in env.Secrets)
+        {
+            var descriptor = (await _environmentService.GetSecretCachesAsync())
+                .First(c => c.Secret.Id == secret.Id).Descriptor;
+            await _dcbCache.UpsertSecretAsync(descriptor, secret);
+        }
+        foreach (var key in secretKeys)
+        {
+            Assert.True(await _mux.GetDatabase(1).KeyExistsAsync(key));
+        }
+
+        // ...then wipe dc-b's secret keys only (simulating the cache-loss #91 exists for) while
+        // flags/segments are untouched (none seeded here — this test is secrets-only).
+        foreach (var key in secretKeys)
+        {
+            await _mux.GetDatabase(1).KeyDeleteAsync(key);
+        }
+        foreach (var key in secretKeys)
+        {
+            Assert.False(await _mux.GetDatabase(1).KeyExistsAsync(key));
+        }
+
+        // A backfill (as the recovery worker / cache reconciler would run) must restore them.
+        var backfiller = CreateBackfiller(new NoopMessageProducer());
+        await backfiller.BackfillDcAsync(DcB, ConsistencyMode.GatedCommit);
+
+        foreach (var key in secretKeys)
+        {
+            Assert.True(await _mux.GetDatabase(1).KeyExistsAsync(key));
+        }
     }
 
     private sealed class NoopMessageProducer : IMessageProducer

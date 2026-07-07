@@ -32,7 +32,9 @@ serve the old value while others serve the new one.
    uncommitted value.
 5. **Evict & recover** — a DC that stops heartbeating is dropped from the live set after its
    lease expires (so it can't block commits forever). When it returns, a **recovery worker**
-   backfills its Redis with the current committed state before it rejoins.
+   backfills its Redis with the current committed state (flags, segments, **and secrets** — #91)
+   before it rejoins. Secrets are not staged/gated in either mode; they are backfilled
+   unconditionally so SDK auth recovers along with flag/segment values, not after them.
 
 Consistency model: **Model A** — the control plane gates on its *own* per-DC Redis writes plus
 lease liveness. A partitioned-but-alive DC keeps serving its last *committed* value
@@ -77,9 +79,10 @@ elected via a Redis lock:
 `CacheReconciler` runs in **both** consistency modes (BestEffort and GatedCommit) and reacts to a
 *local* signal — its own Redis connection transitioning disconnected→connected — so gating it on
 cluster-wide leadership would leave a non-leader replica unable to self-heal its own cache after a
-local Redis blip. Its backfill (via the shared `IDcBackfiller`) is idempotent, so redundant
-reconciles across replicas are harmless, matching the same idempotency argument that makes the
-leader-elected workers' brief dual-leadership windows safe. A follow-up could gate it too if its
+local Redis blip. Its backfill (via the shared `IDcBackfiller`) covers **flags, segments, and
+secrets** (#91) and is idempotent, so redundant reconciles across replicas are harmless, matching
+the same idempotency argument that makes the leader-elected workers' brief dual-leadership windows
+safe. A follow-up could gate it too if its
 multi-replica redundancy ever becomes a measurable cost, but it is out of scope here.
 
 ---
@@ -191,9 +194,13 @@ mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-
 - [ ] **Eviction:** keep `east` down past `LeaseTtlSeconds`; confirm the change then commits on
       `west` and `evicted_commits{dc_id=east}` increments.
 - [ ] **Recovery:** bring `east` back; confirm the recovery worker backfills its Redis to the
-      current committed state (flags **and** segments) and it serves correct values.
+      current committed state (flags, segments, **and secrets** — #91) and it serves correct values.
 - [ ] **Segments:** repeat happy-path + recovery for a segment change and a segment-dependent
       flag.
+- [ ] **Secrets (#91):** wipe `east`'s `featbit:secret:*` keys directly (simulating the cache-loss
+      scenario the recovery/reconciler backfill exists for); confirm a recovery/reconcile tick
+      restores them and SDK auth against `east` succeeds again — without needing a flag/segment
+      change to trigger it (secrets are backfilled unconditionally, not gated on a flag/segment event).
 - [ ] **DcId mismatch (negative):** deliberately mis-set one ELS `DcId`; confirm
       `DcIdConsistencyChecker` warns and `unmatched_dc_count` is non-zero.
 - [ ] **Rollback:** flip back to `BestEffort`; confirm normal immediate propagation resumes.

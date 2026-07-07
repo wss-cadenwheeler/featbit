@@ -14,7 +14,9 @@ namespace Api.Application.ControlPlane;
 /// Redis would otherwise stay stale forever. This worker watches the live set; when a DC newly
 /// appears (its lease returns), it backfills that DC's Redis with the COMMITTED value of every flag
 /// AND every segment (stage the versioned value + flip the committed pointer + advance the index),
-/// so the returned DC catches up.
+/// AND every secret (#91: unconditional upsert — secrets carry no staged/committed lifecycle to gate
+/// on), so the returned DC catches up — including SDK auth, which a flag/segment-only backfill would
+/// leave broken.
 ///
 /// Model A, locked decisions:
 ///  - A: a separate worker (this one), not folded into the commit coordinator.
@@ -129,7 +131,8 @@ public sealed class RecoveryWorker : BackgroundService
     /// so it can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
     /// For each DcId newly present in the live set since the previous tick, every flag's AND every
-    /// segment's committed value is staged and committed into that DC's Redis (targeted, not broadcast).
+    /// segment's committed value is staged and committed into that DC's Redis (targeted, not
+    /// broadcast), AND every secret cache entry is upserted (#91, unconditional — not staged/gated).
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -170,8 +173,9 @@ public sealed class RecoveryWorker : BackgroundService
             return 0;
         }
 
-        // #90: fetch the committed snapshot (flags + segments + segment env-ids) ONCE per tick and
-        // share it across every DC returned this tick, instead of letting each DC's backfill re-fetch
+        // #90 (extended by #91 to also cover secrets): fetch the committed snapshot (flags + segments
+        // + segment env-ids + secret caches) ONCE per tick and share it across every DC returned this
+        // tick, instead of letting each DC's backfill re-fetch
         // it. This restores the pre-#74-refactor guarantee that two DCs returning in the same tick are
         // backfilled from an IDENTICAL view of the source of truth, and halves-to-Nths the DB reads
         // for a multi-DC tick.

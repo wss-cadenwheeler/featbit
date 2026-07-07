@@ -3,6 +3,7 @@ using Application.Configuration;
 using Application.ControlPlane;
 using Application.Services;
 using Api.Infrastructure.Caches;
+using Domain.Environments;
 using Domain.FeatureFlags;
 using Domain.Messages;
 using Domain.Segments;
@@ -12,48 +13,60 @@ using Action = Domain.Messages.Action;
 namespace Api.Application.ControlPlane;
 
 /// <summary>
-/// A point-in-time snapshot of the source of truth (Mongo/Postgres) committed flags + segments,
-/// plus each committed segment's resolved target env ids — fetched once via
+/// A point-in-time snapshot of the source of truth (Mongo/Postgres) committed flags + segments +
+/// secrets, plus each committed segment's resolved target env ids — fetched once via
 /// <see cref="IDcBackfiller.FetchCommittedSnapshotAsync"/> and shared across every DC backfilled in
 /// the same tick (<see cref="RecoveryWorker"/>, <see cref="CacheReconciler"/>) so two DCs recovering
 /// in one tick are written from an IDENTICAL view of the source of truth, and so the DB is read once
 /// per tick rather than once per DC (#90). Env ids are resolved once here (independent of the DC being
 /// repaired) because they are themselves a DB lookup (<c>ISegmentService.GetEnvironmentIdsAsync</c>).
+/// <see cref="Secrets"/> (#91) is enumerated the same way the api-server's
+/// <c>RedisPopulatingService.PopulateSecretsAsync</c> does (<c>IEnvironmentService.GetSecretCachesAsync</c>)
+/// so a DC backfill's secret coverage matches startup population.
 /// </summary>
 public sealed record CommittedSnapshot(
     IReadOnlyList<FeatureFlag> Flags,
     IReadOnlyList<Segment> Segments,
-    IReadOnlyDictionary<string, ICollection<Guid>> SegmentEnvIds);
+    IReadOnlyDictionary<string, ICollection<Guid>> SegmentEnvIds,
+    IReadOnlyList<SecretCache> Secrets);
 
 /// <summary>
-/// Backfills ONE DC's Redis with the authoritative (committed) value of every flag and segment,
-/// read from the source of truth (Mongo/Postgres) — then publishes a per-DC <c>PushFullSync</c>
-/// so that DC's eval servers refresh their connected SDK clients.
+/// Backfills ONE DC's Redis with the authoritative (committed) value of every flag, segment, and
+/// secret, read from the source of truth (Mongo/Postgres) — then publishes a per-DC
+/// <c>PushFullSync</c> so that DC's eval servers refresh their connected SDK clients.
 ///
 /// Shared by two triggers:
 ///  - <see cref="RecoveryWorker"/> (GatedCommit, lease-return trigger), and
 ///  - <see cref="CacheReconciler"/> (mode-agnostic, Redis-link-reachable trigger, local + peers).
 ///
-/// The write path is mode-appropriate: GatedCommit stages the versioned value + flips the
-/// committed pointer (so the eval reads the versioned snapshot); BestEffort upserts the legacy
-/// <c>featbit:flag:{id}</c> key the BestEffort eval reads. All writes are targeted at the one DC
+/// The flag/segment write path is mode-appropriate: GatedCommit stages the versioned value + flips
+/// the committed pointer (so the eval reads the versioned snapshot); BestEffort upserts the legacy
+/// <c>featbit:flag:{id}</c> key the BestEffort eval reads. Secrets (#91) are NOT staged/gated in
+/// either mode — the source-of-truth secret cache shape (<c>featbit:secret:{value}</c>, a hash keyed
+/// by the secret's own value) has no version to gate on, so they are written unconditionally in BOTH
+/// modes, exactly like the api-server's initial population. All writes are targeted at the one DC
 /// (never broadcast) and idempotent, so re-running is safe.
 ///
 /// Each backfill run is driven by a <see cref="CommittedSnapshot"/> of the source of truth taken up
 /// front (<see cref="FetchCommittedSnapshotAsync"/>), then awaits per-item writes, so a version
 /// committed AFTER the snapshot was taken can land on the target DC before this backfill's write for
 /// the same flag/segment does. Without a guard that race would let a stale snapshot revert a fresher
-/// pointer (#89) — every targeted write this method makes
+/// pointer (#89) — every targeted flag/segment write this method makes
 /// (<see cref="CompositeRedisCacheService.CommitFlagToDcAsync"/>,
 /// <see cref="CompositeRedisCacheService.CommitSegmentToDcAsync"/>,
 /// <see cref="CompositeRedisCacheService.UpsertFlagToDcAsync"/>,
 /// <see cref="CompositeRedisCacheService.UpsertSegmentToDcAsync"/>) is only-advance guarded at the
-/// Redis layer, so a stale write from this snapshot is a no-op instead of a regression.
+/// Redis layer, so a stale write from this snapshot is a no-op instead of a regression. The secret
+/// write (<see cref="CompositeRedisCacheService.UpsertSecretToDcAsync"/>) is NOT guarded the same
+/// way — there is no version to compare, so it is last-write-wins, matching the existing (broadcast)
+/// <c>UpsertSecretAsync</c> semantic.
 ///
 /// #90: a caller backfilling more than one DC in the same tick (RecoveryWorker/CacheReconciler) should
 /// call <see cref="FetchCommittedSnapshotAsync"/> ONCE and pass the resulting snapshot to the
 /// <see cref="BackfillDcAsync(string,ConsistencyMode,CommittedSnapshot,CancellationToken)"/> overload
-/// for each DC, instead of using the no-snapshot overload per DC (which re-fetches every call).
+/// for each DC, instead of using the no-snapshot overload per DC (which re-fetches every call). This
+/// invariant (one fetch per tick) applies to secrets too (#91): they are part of the same
+/// <see cref="CommittedSnapshot"/>.
 /// </summary>
 public interface IDcBackfiller
 {
@@ -80,8 +93,9 @@ public interface IDcBackfiller
 
     /// <summary>
     /// Fetch a fresh <see cref="CommittedSnapshot"/> of the source of truth: every committed flag,
-    /// every committed segment, and each committed segment's resolved target env ids. Call this ONCE
-    /// per tick when backfilling multiple DCs so they share an identical view (#90).
+    /// every committed segment, each committed segment's resolved target env ids, and every secret
+    /// cache entry (#91). Call this ONCE per tick when backfilling multiple DCs so they share an
+    /// identical view (#90).
     /// </summary>
     Task<CommittedSnapshot> FetchCommittedSnapshotAsync(CancellationToken cancellationToken = default);
 }
@@ -164,13 +178,27 @@ public sealed class DcBackfiller(
             }
         }
 
+        // Secrets (#91) are NOT mode-gated: unlike flags/segments there is no staged/committed
+        // lifecycle for them (the cache shape is a last-write-wins hash keyed by the secret's own
+        // value, not by env+id — see UpsertSecretToDcAsync), so they are written unconditionally in
+        // BOTH GatedCommit and BestEffort. Without this, a DC whose Redis lost its secret keys keeps
+        // failing SDK auth even after flags/segments are healed (the eval server's secret lookup has
+        // no DB fallback).
+        foreach (var secretCache in snapshot.Secrets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await composite.UpsertSecretToDcAsync(dcId, secretCache.Descriptor, secretCache.Secret);
+        }
+
         logger.LogInformation(
-            "DC backfill: repaired DC {DcId} ({Mode}) from source of truth with {FlagCount} flag(s) " +
-            "and {SegmentCount} segment(s).",
+            "DC backfill: repaired DC {DcId} ({Mode}) from source of truth with {FlagCount} flag(s), " +
+            "{SegmentCount} segment(s), and {SecretCount} secret(s).",
             dcId,
             mode,
             snapshot.Flags.Count,
-            snapshot.Segments.Count);
+            snapshot.Segments.Count,
+            snapshot.Secrets.Count);
 
         await PublishClientRefreshAsync(dcId);
 
@@ -179,18 +207,21 @@ public sealed class DcBackfiller(
 
     /// <summary>
     /// Fetch a fresh <see cref="CommittedSnapshot"/>: every committed flag, every committed segment,
-    /// and each committed segment's resolved target env ids (a DB lookup, resolved once here —
-    /// independent of any DC being repaired). Callers backfilling multiple DCs in one tick should call
-    /// this ONCE and share the result (#90); see <see cref="RecoveryWorker.RunOnceAsync"/> and
-    /// <see cref="CacheReconciler.RunOnceAsync"/>.
+    /// each committed segment's resolved target env ids (a DB lookup, resolved once here —
+    /// independent of any DC being repaired), and every secret cache entry (#91, enumerated the same
+    /// way as the api-server's <c>RedisPopulatingService.PopulateSecretsAsync</c> via
+    /// <see cref="IEnvironmentService.GetSecretCachesAsync"/>). Callers backfilling multiple DCs in
+    /// one tick should call this ONCE and share the result (#90); see
+    /// <see cref="RecoveryWorker.RunOnceAsync"/> and <see cref="CacheReconciler.RunOnceAsync"/>.
     /// </summary>
     public async Task<CommittedSnapshot> FetchCommittedSnapshotAsync(CancellationToken cancellationToken = default)
     {
-        // IFeatureFlagService / ISegmentService are scoped (per-request) in DI; resolve them inside a
-        // scope so a singleton caller does not capture a scoped/disposed instance.
+        // IFeatureFlagService / ISegmentService / IEnvironmentService are scoped (per-request) in DI;
+        // resolve them inside a scope so a singleton caller does not capture a scoped/disposed instance.
         using var scope = scopeFactory.CreateScope();
         var featureFlagService = scope.ServiceProvider.GetRequiredService<IFeatureFlagService>();
         var segmentService = scope.ServiceProvider.GetRequiredService<ISegmentService>();
+        var environmentService = scope.ServiceProvider.GetRequiredService<IEnvironmentService>();
 
         var allCommitted = await featureFlagService.GetAllCommittedAsync();
         var allCommittedSegments = await segmentService.GetAllCommittedAsync();
@@ -203,7 +234,13 @@ public sealed class DcBackfiller(
             segmentEnvIds[segment.Id.ToString()] = await segmentService.GetEnvironmentIdsAsync(segment);
         }
 
-        return new CommittedSnapshot(allCommitted, allCommittedSegments, segmentEnvIds);
+        var secretCaches = await environmentService.GetSecretCachesAsync();
+
+        return new CommittedSnapshot(
+            allCommitted,
+            allCommittedSegments,
+            segmentEnvIds,
+            secretCaches.ToList());
     }
 
     /// <summary>

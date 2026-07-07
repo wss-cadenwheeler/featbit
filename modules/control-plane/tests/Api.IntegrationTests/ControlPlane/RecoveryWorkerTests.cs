@@ -7,6 +7,8 @@ using Application.Services;
 using Domain.ControlPlane;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Organizations;
+using Domain.Projects;
 using Domain.Segments;
 using Infrastructure.Caches.Redis;
 using Infrastructure.Persistence.MongoDb;
@@ -52,6 +54,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
     private MongoDbClient _mongoDb = null!;
     private FeatureFlagService _flagService = null!;
     private SegmentService _segmentService = null!;
+    private EnvironmentService _environmentService = null!;
     private MongoLeaseStore _leaseStore = null!;
 
     private ConnectionMultiplexer _mux = null!;
@@ -78,6 +81,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
         _flagService = new FeatureFlagService(_mongoDb);
         _segmentService = new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance);
+        _environmentService = new EnvironmentService(_mongoDb, NullLogger<EnvironmentService>.Instance);
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
@@ -173,11 +177,34 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         });
     }
 
+    /// <summary>
+    /// Seeds an Organization + Project + Environment in Mongo (#91) so
+    /// <c>IEnvironmentService.GetSecretCachesAsync</c> can resolve a resource descriptor for it. The
+    /// Environment constructor auto-creates its two default secrets (Server Key, Client Key). Fully
+    /// qualified return type: <c>Environment</c> is ambiguous with <c>System.Environment</c> (used
+    /// elsewhere in this file for <c>GetEnvironmentVariable</c>), so this file deliberately does not
+    /// <c>using Domain.Environments;</c>.
+    /// </summary>
+    private async Task<Domain.Environments.Environment> CreateEnvironmentWithSecretsAsync()
+    {
+        var org = new Organization(Guid.NewGuid(), "org", $"org-{Guid.NewGuid():N}");
+        await _mongoDb.CollectionOf<Organization>().InsertOneAsync(org);
+
+        var project = new Project(org.Id, "project", $"project-{Guid.NewGuid():N}");
+        await _mongoDb.CollectionOf<Project>().InsertOneAsync(project);
+
+        var env = new Domain.Environments.Environment(project.Id, "env", $"env-{Guid.NewGuid():N}");
+        await _environmentService.AddOneAsync(env);
+
+        return env;
+    }
+
     private RecoveryWorker CreateSut(
         ILogger<RecoveryWorker>? logger = null,
         bool isLeader = true,
         IFeatureFlagService? flagService = null,
-        ISegmentService? segmentService = null)
+        ISegmentService? segmentService = null,
+        IEnvironmentService? environmentService = null)
     {
         // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
         // resolves them at runtime via IServiceScopeFactory. Tests that need to observe how many
@@ -185,6 +212,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         var services = new ServiceCollection();
         services.AddTransient(_ => flagService ?? (IFeatureFlagService)_flagService);
         services.AddTransient(_ => segmentService ?? (ISegmentService)_segmentService);
+        services.AddTransient(_ => environmentService ?? (IEnvironmentService)_environmentService);
         services.AddTransient<ILeaseStore>(_ => _leaseStore);
         var provider = services.BuildServiceProvider();
 
@@ -397,6 +425,63 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         Assert.Equal(flagTs, (long)dcbFlagPointer);
     }
 
+    // ----- #91: secrets are backfilled to a returning DC too, unconditionally -----
+
+    [Fact]
+    public async Task Backfills_ReturningDc_With_Secrets()
+    {
+        var env = await CreateEnvironmentWithSecretsAsync();
+        Assert.Equal(2, env.Secrets.Count);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var sut = CreateSut();
+
+        // First tick: both DCs first-seen -> backfilled, establishing the watermark; secrets land on
+        // both dc-a and dc-b since both are "returning" on this first tick.
+        await sut.RunOnceAsync();
+        foreach (var secret in env.Secrets)
+        {
+            var key = RedisKeys.Secret(secret.Value);
+            Assert.True(await _mux.GetDatabase(0).KeyExistsAsync(key));
+            Assert.True(await _mux.GetDatabase(1).KeyExistsAsync(key));
+        }
+
+        // ---- dc-b loses its lease, and its secret keys are wiped (simulating the Redis data loss
+        // #91 exists to repair) ----
+        await UpsertLeaseAsync(DcB, now.AddMinutes(-5)); // expired
+        await sut.RunOnceAsync();                        // dc-b drops out of the live set
+        foreach (var secret in env.Secrets)
+        {
+            await _mux.GetDatabase(1).KeyDeleteAsync(RedisKeys.Secret(secret.Value));
+        }
+
+        // ---- dc-b returns: the recovery tick must restore its secrets, not just flags/segments
+        // (none seeded in this test) ----
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+        var backfilled = await sut.RunOnceAsync();
+        Assert.Equal(1, backfilled);
+
+        foreach (var secret in env.Secrets)
+        {
+            var key = RedisKeys.Secret(secret.Value);
+            Assert.True(await _mux.GetDatabase(1).KeyExistsAsync(key));
+
+            var fields = (await _mux.GetDatabase(1).HashGetAllAsync(key))
+                .ToDictionary(x => x.Name.ToString(), x => x.Value.ToString());
+            Assert.Equal(secret.Type, fields["type"]);
+            Assert.Equal(env.Id.ToString(), fields["envId"]);
+        }
+
+        // dc-a (never returning, always live) is untouched by this last tick — still has its secrets.
+        foreach (var secret in env.Secrets)
+        {
+            Assert.True(await _mux.GetDatabase(0).KeyExistsAsync(RedisKeys.Secret(secret.Value)));
+        }
+    }
+
     [Fact]
     public async Task NoOp_When_NoDcReturned()
     {
@@ -445,6 +530,10 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         await _segmentService.AddOneAsync(segment);
         var segmentTs = VersionTokenOf(segment);
 
+        // #91: seed an environment (with its auto-created default secrets) too, so the shared
+        // snapshot's secret enumeration is exercised alongside flags/segments.
+        var env = await CreateEnvironmentWithSecretsAsync();
+
         // Both DCs start absent (no lease at all): a SINGLE tick sees both as newly live/returned
         // together, so the shared-snapshot path is exercised (not the sequential-returns path the
         // other acceptance tests exercise).
@@ -452,20 +541,27 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         await UpsertLeaseAsync(DcA, now.AddMinutes(5));
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));
 
-        // Counting spies around the REAL Mongo-backed services: prove GetAllCommittedAsync is called
-        // exactly once per tick (not once per returned DC) while still exercising the real read path.
+        // Counting spies around the REAL Mongo-backed services: prove GetAllCommittedAsync /
+        // GetSecretCachesAsync is called exactly once per tick (not once per returned DC) while still
+        // exercising the real read path.
         var (flagServiceSpy, flagCommittedCalls) =
             CountingProxy<IFeatureFlagService>.Wrap(_flagService, nameof(IFeatureFlagService.GetAllCommittedAsync));
         var (segmentServiceSpy, segmentCommittedCalls) =
             CountingProxy<ISegmentService>.Wrap(_segmentService, nameof(ISegmentService.GetAllCommittedAsync));
+        var (environmentServiceSpy, secretCacheCalls) =
+            CountingProxy<IEnvironmentService>.Wrap(_environmentService, nameof(IEnvironmentService.GetSecretCachesAsync));
 
-        var sut = CreateSut(flagService: flagServiceSpy, segmentService: segmentServiceSpy);
+        var sut = CreateSut(
+            flagService: flagServiceSpy,
+            segmentService: segmentServiceSpy,
+            environmentService: environmentServiceSpy);
 
         var backfilled = await sut.RunOnceAsync();
 
         Assert.Equal(2, backfilled);
         Assert.Equal(1, flagCommittedCalls.CallCount);
         Assert.Equal(1, segmentCommittedCalls.CallCount);
+        Assert.Equal(1, secretCacheCalls.CallCount);
 
         // Both DCs were written from the IDENTICAL shared snapshot: same committed pointer (ts) for
         // both the flag and the segment on both DCs.
@@ -480,6 +576,14 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
             await _mux.GetDatabase(1).StringGetAsync(RedisCaches.SegmentCommittedPointer(segment.Id));
         Assert.Equal(segmentTs, (long)dcaSegmentPointer);
         Assert.Equal(segmentTs, (long)dcbSegmentPointer);
+
+        // Both DCs also got the same secrets from the one shared snapshot.
+        foreach (var secret in env.Secrets)
+        {
+            var secretKey = RedisKeys.Secret(secret.Value);
+            Assert.True(await _mux.GetDatabase(0).KeyExistsAsync(secretKey));
+            Assert.True(await _mux.GetDatabase(1).KeyExistsAsync(secretKey));
+        }
     }
 
     [Fact]

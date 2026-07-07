@@ -14,7 +14,8 @@ public class CacheReconcilerTests
     private static readonly CommittedSnapshot EmptySnapshot = new(
         Array.Empty<Domain.FeatureFlags.FeatureFlag>(),
         Array.Empty<Domain.Segments.Segment>(),
-        new Dictionary<string, ICollection<Guid>>());
+        new Dictionary<string, ICollection<Guid>>(),
+        Array.Empty<Domain.Environments.SecretCache>());
 
     private readonly Mock<IDcBackfiller> _backfiller = new();
 

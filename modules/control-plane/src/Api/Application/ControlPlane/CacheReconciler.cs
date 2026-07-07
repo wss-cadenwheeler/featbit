@@ -18,9 +18,15 @@ namespace Api.Application.ControlPlane;
 ///    truth — bypassing that guard, and independent of whether the peer is up. This is what lets a
 ///    DC self-heal even when its peer is down.
 ///
-///  - PEER (cross-DC) refill: when a peer DC's cross-DC Redis link is down during flag/segment
+///  - PEER (cross-DC) refill: when a peer DC's cross-DC Redis link is down during flag/segment/secret
 ///    changes, that peer's cache misses the writes (BestEffort drops them; GatedCommit staging can't
-///    reach it). When the link returns, this backfills the peer from the source of truth.
+///    reach it — secrets are never staged/gated, in either mode). When the link returns, this
+///    backfills the peer from the source of truth.
+///
+/// Covers three cache categories via <see cref="IDcBackfiller"/> (#91): flags, segments, and secrets.
+/// Secrets are backfilled unconditionally in both consistency modes (they carry no staged/committed
+/// lifecycle), so a DC whose Redis lost its secret keys stops failing SDK auth once this reconciles
+/// it — not just once its flags/segments look correct.
 ///
 /// Detection is a poll of <c>IConnectionMultiplexer.IsConnected</c> (touching <c>.Connection</c>
 /// materializes the lazy multiplexer; instances are built with <c>abortConnect=false</c> so this
