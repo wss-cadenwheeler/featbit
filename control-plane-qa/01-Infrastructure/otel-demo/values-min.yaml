@@ -7,8 +7,12 @@
 #   jaeger ..............  600Mi   trace UI / query
 #   prometheus ..........  400Mi   metrics store
 #   grafana .............  300Mi   dashboards (pure UI; cheapest to drop)
-# Flip the observability backends you don't need to `enabled: false` to reclaim it.
-# NOTE: disabling a backend while the collector still exports to it only produces
+# The four observability backends above are DISABLED by default (~2.4Gi
+# reclaimed): the collector discards all telemetry via the nop exporter, so
+# they would only sit idle. Flip one to `enabled: true` if you need its UI.
+# The otel-collector agent itself stays on — the demo services' SDKs need a
+# live OTLP endpoint or they stall/error on the hot path.
+# NOTE: a backend disabled while the collector still exports to it only produces
 # harmless "connection refused" export logs in the collector — not a failure.
 
 default:
@@ -64,23 +68,25 @@ components:
 
 # --- Observability backend toggles -------------------------------------------
 
-# OpenSearch — telemetry log/trace storage, NOT application data (the demo app
-# uses Kafka + PostgreSQL + Valkey, see "resource sharing" notes). Kept on until
-# we confirm nothing depends on it; ~1.1Gi — the first thing to reconsider.
-opensearch:
-  enabled: true
+# All four are off by default (see header note); nothing in the harness reads
+# them — the collector drops every signal via `nop` before it reaches a store.
 
-# Jaeger — distributed-tracing UI/query (~600Mi). Disable if the trace UI isn't needed.
+# OpenSearch — telemetry log/trace storage, NOT application data (the demo app
+# uses Kafka + PostgreSQL + Valkey, see "resource sharing" notes). ~1.1Gi.
+opensearch:
+  enabled: false
+
+# Jaeger — distributed-tracing UI/query (~600Mi). Enable if the trace UI is needed.
 jaeger:
-  enabled: true
+  enabled: false
 
 # Prometheus — metrics storage/queries (~400Mi).
 prometheus:
-  enabled: true
+  enabled: false
 
 # Grafana — dashboards UI (~300Mi).
 grafana:
-  enabled: true
+  enabled: false
 
 # --- Collector: receive-and-drop, minimum footprint -------------------------
 #
