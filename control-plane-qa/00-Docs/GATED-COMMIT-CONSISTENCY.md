@@ -112,6 +112,7 @@ OpenTelemetry/`MeterListener`):
 | `control_plane.consistency.pending_backlog` | gauge | `resource_type` | currently-pending items |
 | `control_plane.consistency.evicted_commits` | counter | `dc_id` | commits that proceeded without an evicted DC |
 | `control_plane.consistency.unmatched_dc_count` | gauge | `direction` | DcId config/lease mismatches |
+| `control_plane.consistency.applied_watermark_lag_ms` | gauge | `dc_id`, `env_id` | live DC's lag (ms) behind the most-advanced live DC's applied watermark, per env (#69/#84) |
 
 **Alert on:** sustained `pending_backlog > 0` (commits stuck — a live DC not staging, or a DcId
 mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-zero
@@ -213,8 +214,10 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
 - **Connected clients during a recovery** (#54): after a returned DC's Redis is backfilled, SDK
   clients that stayed connected through the outage keep stale values until they reconnect/next
   full-sync (a per-DC client-refresh push is not yet implemented).
-- **Eval-server applied watermark** (#46): the heartbeat watermark is per-pod in-memory and
-  inaccurate; it is **not** used for gating (Model A), only a potential future metric.
+- **Eval-server applied watermark** (#46/#69): the heartbeat watermark (now covering flags AND
+  segments, #83) is persisted per-DC in `DcLease.AppliedWatermarks` and consumed by the
+  `applied_watermark_lag_ms` gauge (#84) — it is **not** used for commit gating (Model A remains
+  staged-everywhere), only for the per-DC/per-env lag metric above.
 - **Self-fence (D5, #22):** a partitioned DC serves last-committed (consistent-but-stale) rather
   than refusing to serve. Optional stricter mode, not implemented.
 - **EF residual window:** the optimistic guards on `SetPending`/`PromotePending` are atomic on

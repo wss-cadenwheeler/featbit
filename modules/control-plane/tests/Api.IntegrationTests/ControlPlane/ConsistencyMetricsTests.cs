@@ -211,6 +211,25 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         });
     }
 
+    /// <summary>
+    /// #84: upserts a lease carrying <see cref="DcLease.AppliedWatermarks"/> so the applied-watermark
+    /// -lag gauge tests can seed per-DC/per-env watermarks directly via the lease store.
+    /// </summary>
+    private async Task UpsertLeaseAsync(
+        string dcId,
+        DateTimeOffset expiresAt,
+        Dictionary<Guid, long> appliedWatermarks)
+    {
+        await _leaseStore.UpsertLeaseAsync(new DcLease
+        {
+            DcId = dcId,
+            Region = dcId,
+            LastHeartbeatAt = DateTimeOffset.UtcNow,
+            LeaseExpiresAt = expiresAt,
+            AppliedWatermarks = appliedWatermarks
+        });
+    }
+
     private CommitCoordinatorWorker CreateSut()
     {
         var services = new ServiceCollection();
@@ -374,6 +393,133 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         listener.RecordObservableInstruments();
 
         return values;
+    }
+
+    /// <summary>
+    /// #84: force a single read of the observable applied-watermark-lag gauge and return every
+    /// (dc_id, env_id, lag_ms) measurement. Mirrors <see cref="ReadBacklogGauge"/>'s
+    /// on-demand-read pattern.
+    /// </summary>
+    private static List<(string DcId, Guid EnvId, long LagMs)> ReadAppliedWatermarkLagGauge()
+    {
+        var values = new List<(string DcId, Guid EnvId, long LagMs)>();
+
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == CommitCoordinatorWorker.MeterName
+                    && instrument.Name == CommitCoordinatorWorker.AppliedWatermarkLagGaugeName)
+                {
+                    l.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+
+        listener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+        {
+            string? dcId = null;
+            string? envId = null;
+            foreach (var tag in tags)
+            {
+                if (tag.Key == "dc_id" && tag.Value is string dc)
+                {
+                    dcId = dc;
+                }
+                else if (tag.Key == "env_id" && tag.Value is string env)
+                {
+                    envId = env;
+                }
+            }
+
+            if (dcId != null && envId != null)
+            {
+                values.Add((dcId, Guid.Parse(envId), measurement));
+            }
+        });
+
+        listener.Start();
+        listener.RecordObservableInstruments();
+
+        return values;
+    }
+
+    // ----- #84 applied-watermark-lag gauge acceptance cases -----
+
+    [Fact]
+    public async Task Lag_Reports_Zero_For_Frontier_Dc_And_Delta_For_Straggler()
+    {
+        // DC A is the frontier (higher watermark); DC B lags behind by a known delta. No pending
+        // flags/segments are seeded — the lag gauge is refreshed every tick independent of that.
+        var envId = Guid.NewGuid();
+        const long frontierWatermark = 10_000;
+        const long delta = 2_500;
+        const long stragglerWatermark = frontierWatermark - delta;
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5), new Dictionary<Guid, long> { [envId] = frontierWatermark });
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5), new Dictionary<Guid, long> { [envId] = stragglerWatermark });
+
+        var sut = CreateSut();
+        await sut.RunOnceAsync();
+
+        var lag = ReadAppliedWatermarkLagGauge();
+
+        Assert.Equal(2, lag.Count);
+        var frontier = Assert.Single(lag, m => m.DcId == DcA && m.EnvId == envId);
+        Assert.Equal(0, frontier.LagMs);
+        var straggler = Assert.Single(lag, m => m.DcId == DcB && m.EnvId == envId);
+        Assert.Equal(delta, straggler.LagMs);
+    }
+
+    [Fact]
+    public async Task Lag_Omits_Envs_A_Dc_Does_Not_Report()
+    {
+        // DC A reports {e1, e2}; DC B only reports {e1} -> no (DcB, e2) measurement should ever be
+        // emitted (inventing lag = frontier - 0 for an env a DC doesn't serve would be misleading).
+        var e1 = Guid.NewGuid();
+        var e2 = Guid.NewGuid();
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(
+            DcA,
+            now.AddMinutes(5),
+            new Dictionary<Guid, long> { [e1] = 5_000, [e2] = 8_000 });
+        await UpsertLeaseAsync(
+            DcB,
+            now.AddMinutes(5),
+            new Dictionary<Guid, long> { [e1] = 4_000 });
+
+        var sut = CreateSut();
+        await sut.RunOnceAsync();
+
+        var lag = ReadAppliedWatermarkLagGauge();
+
+        Assert.Equal(3, lag.Count); // (DcA, e1), (DcA, e2), (DcB, e1) — no (DcB, e2)
+        Assert.DoesNotContain(lag, m => m.DcId == DcB && m.EnvId == e2);
+
+        var dcAe1 = Assert.Single(lag, m => m.DcId == DcA && m.EnvId == e1);
+        Assert.Equal(0, dcAe1.LagMs); // DcA is the frontier for e1 (only reporter, trivially max)
+        var dcAe2 = Assert.Single(lag, m => m.DcId == DcA && m.EnvId == e2);
+        Assert.Equal(0, dcAe2.LagMs); // DcA is the only (and thus frontier) reporter for e2
+        var dcBe1 = Assert.Single(lag, m => m.DcId == DcB && m.EnvId == e1);
+        Assert.Equal(1_000, dcBe1.LagMs); // frontier(e1) = 5000 (DcA) - 4000 (DcB) = 1000
+    }
+
+    [Fact]
+    public async Task No_Watermarks_No_Measurements()
+    {
+        // Two live DCs, neither reporting any watermark -> the gauge must emit nothing.
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        var sut = CreateSut();
+        await sut.RunOnceAsync();
+
+        var lag = ReadAppliedWatermarkLagGauge();
+
+        Assert.Empty(lag);
     }
 
     // ----- test doubles -----
