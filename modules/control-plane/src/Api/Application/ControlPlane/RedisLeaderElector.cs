@@ -34,8 +34,16 @@ namespace Api.Application.ControlPlane;
 /// Graceful shutdown (<see cref="StopAsync"/>): if leader, the lock is released immediately so failover
 /// does not wait out the TTL.
 ///
-/// Runs in BOTH consistency modes — no <c>_enabled</c> gate. It is cheap, and only the #71b-gated
-/// workers will consult <see cref="IsLeader"/>.
+/// #71 leader election is opt-in, default off (<c>ControlPlane:LeaderElection:Enabled</c>): this
+/// type is only constructed/registered when enabled (see
+/// <see cref="Api.Setup.ServicesRegister.AddLeaderElection"/>) — election only earns its keep with
+/// MULTIPLE replicas of one control-plane deployment sharing a single commit pipeline; for the
+/// default single-replica case it only adds a stall surface (a transient Redis blip flips a lone
+/// instance to not-leader and its gated workers skip ticks) for zero benefit. When disabled,
+/// <see cref="AlwaysLeaderElection"/> is registered instead, so every instance runs — safe
+/// (idempotent/version guards, see above) but redundant under multiple replicas. When enabled, it
+/// runs in BOTH consistency modes (no <c>_enabled</c> gate of its own) — it is cheap, and only the
+/// #71b-gated workers will consult <see cref="IsLeader"/>.
 ///
 /// Metric: <see cref="IsLeaderGaugeName"/> (0/1) on the shared
 /// <see cref="CommitCoordinatorWorker.MeterName"/> meter, tagged <c>instance_id</c>. Unlike the

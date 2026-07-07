@@ -48,9 +48,11 @@ namespace Api.Application.ControlPlane;
 /// commit broadcast and the version-guarded promote both no-op when already applied.
 ///
 /// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
-/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
-/// guards (see above) still make concurrent execution safe belt-and-braces during a failover
-/// overlap window, so losing leadership mid-tick is harmless.
+/// backed by <see cref="RedisLeaderElector"/>) when leader election is enabled; non-leaders skip the
+/// tick entirely. When disabled (default — <c>ControlPlane:LeaderElection:Enabled</c>) every
+/// instance runs — safe (idempotent/version guards, see above) but redundant under multiple
+/// replicas. Idempotency guards (see above) still make concurrent execution safe belt-and-braces
+/// during a failover overlap window, so losing leadership mid-tick is harmless.
 ///
 /// Metrics (all on <see cref="MeterName"/>): <see cref="CommitsCounterName"/>,
 /// <see cref="TimeToCommitHistogramName"/>, <see cref="PendingBacklogGaugeName"/>,

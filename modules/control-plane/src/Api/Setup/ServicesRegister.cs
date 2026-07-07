@@ -54,13 +54,9 @@ public static class ServicesRegister
             builder.Configuration.GetSection(PodHealthOptions.SectionName));
         builder.Services.AddHostedService<PodHealthChecker>();
 
-        // #71a leader election: single-active gating for the gated-commit workers (#71b consumes
-        // ILeaderElection). Runs in BOTH consistency modes (cheap; no _enabled gate). Registered as a
-        // singleton exposed both as ILeaderElection and as a hosted service so all three registrations
-        // resolve the SAME instance.
-        builder.Services.AddSingleton<RedisLeaderElector>();
-        builder.Services.AddSingleton<ILeaderElection>(sp => sp.GetRequiredService<RedisLeaderElector>());
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<RedisLeaderElector>());
+        // #71 leader election: single-active gating for the gated-commit workers (#71b consumes
+        // ILeaderElection). Opt-in, default off — see AddLeaderElection below for the rationale.
+        AddLeaderElection(builder.Services, builder.Configuration);
 
         // C3b-2 commit coordinator: gated-commit reconciliation of pending flag changes. No-ops
         // unless ControlPlane:ConsistencyMode == GatedCommit (checked inside the worker).
@@ -89,6 +85,41 @@ public static class ServicesRegister
 
         return builder;
     }
-    
-    
+
+    /// <summary>
+    /// #71 leader election is opt-in, default off (<c>ControlPlane:LeaderElection:Enabled</c>).
+    /// Election only earns its keep when MULTIPLE replicas of one control-plane deployment share a
+    /// single commit pipeline; in the default single-replica case it only adds a stall surface (a
+    /// transient Redis blip flips a lone instance to not-leader and its gated workers skip ticks)
+    /// for zero benefit, since running without election is safe-but-redundant by construction — the
+    /// gated workers' operations are idempotent/version-guarded (see
+    /// <see cref="RedisLeaderElector"/>'s class doc) — matching the codebase's existing opt-in
+    /// convention (<c>ConsistencyMode</c> itself defaults to <c>BestEffort</c>).
+    ///
+    /// Disabled (default): <see cref="AlwaysLeaderElection"/> is registered as
+    /// <see cref="ILeaderElection"/> (always reports leadership, so every instance just runs every
+    /// tick) and as a hosted service (logs a one-line discoverability hint at startup).
+    /// <see cref="RedisLeaderElector"/> and its hosted service are NOT registered at all.
+    ///
+    /// Enabled: exactly today's three registrations — <see cref="RedisLeaderElector"/> as a
+    /// singleton, exposed both as <see cref="ILeaderElection"/> and as a hosted service so all three
+    /// resolve the SAME instance.
+    /// </summary>
+    internal static void AddLeaderElection(IServiceCollection services, IConfiguration configuration)
+    {
+        var enabled = configuration.GetValue<bool>("ControlPlane:LeaderElection:Enabled");
+
+        if (enabled)
+        {
+            services.AddSingleton<RedisLeaderElector>();
+            services.AddSingleton<ILeaderElection>(sp => sp.GetRequiredService<RedisLeaderElector>());
+            services.AddHostedService(sp => sp.GetRequiredService<RedisLeaderElector>());
+        }
+        else
+        {
+            services.AddSingleton<AlwaysLeaderElection>();
+            services.AddSingleton<ILeaderElection>(sp => sp.GetRequiredService<AlwaysLeaderElection>());
+            services.AddHostedService(sp => sp.GetRequiredService<AlwaysLeaderElection>());
+        }
+    }
 }

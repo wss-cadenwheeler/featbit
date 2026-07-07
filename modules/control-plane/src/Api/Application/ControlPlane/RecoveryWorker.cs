@@ -37,9 +37,11 @@ namespace Api.Application.ControlPlane;
 /// globally, only one DC's Redis is being repaired.
 ///
 /// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
-/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
-/// guards (see above) still make concurrent execution safe belt-and-braces during a failover
-/// overlap window, so losing leadership mid-tick is harmless.
+/// backed by <see cref="RedisLeaderElector"/>) when leader election is enabled; non-leaders skip the
+/// tick entirely. When disabled (default — <c>ControlPlane:LeaderElection:Enabled</c>) every
+/// instance runs — safe (idempotent/version guards, see above) but redundant under multiple
+/// replicas. Idempotency guards (see above) still make concurrent execution safe belt-and-braces
+/// during a failover overlap window, so losing leadership mid-tick is harmless.
 ///
 /// #90: when more than one DC returns in the same tick, <see cref="RunOnceAsync"/> fetches the
 /// committed snapshot ONCE (<see cref="IDcBackfiller.FetchCommittedSnapshotAsync"/>) and shares it

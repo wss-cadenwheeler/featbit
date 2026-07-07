@@ -32,8 +32,10 @@ namespace Api.Application.ControlPlane;
 /// unmatched-DC count.
 ///
 /// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
-/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. The check is
-/// advisory and idempotent, so this is purely to avoid redundant work across replicas, not a
+/// backed by <see cref="RedisLeaderElector"/>) when leader election is enabled; non-leaders skip the
+/// tick entirely. When disabled (default — <c>ControlPlane:LeaderElection:Enabled</c>) every
+/// instance runs — safe (advisory and idempotent) but redundant under multiple replicas. The check
+/// is advisory and idempotent, so this is purely to avoid redundant work across replicas, not a
 /// correctness requirement.
 /// </summary>
 public sealed class DcIdConsistencyChecker : BackgroundService

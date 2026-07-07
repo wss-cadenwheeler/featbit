@@ -42,35 +42,58 @@ lease liveness. A partitioned-but-alive DC keeps serving its last *committed* va
 
 ---
 
-## 1a. Leader election (#71)
+## 1a. Leader election (#71) — opt-in, default OFF
 
 The three gated-commit workers — the **commit coordinator**, the **recovery worker**, and the
-advisory **DcId consistency checker** — run on exactly **one** control-plane replica at a time,
-elected via a Redis lock:
+advisory **DcId consistency checker** — can be gated to run on exactly **one** control-plane
+replica at a time, elected via a Redis lock. Election is **opt-in**:
+`ControlPlane:LeaderElection:Enabled` (default **`false`**).
 
-- **Lock location:** a single key (`featbit:control-plane:leader`) in `Redis:Instances[0]` (the
-  control plane's "home"/local DC Redis — the same singleton connection already used for
-  heartbeat/health storage). Replicas share configuration, so this is one lock across all
-  replicas, not one per DC.
-- **TTL / renew defaults:** `ControlPlane:LeaderElection:TtlSeconds` (default **30**) and
-  `ControlPlane:LeaderElection:RenewIntervalSeconds` (default **10**, ≈ TTL/3 so a renew tick has
-  multiple chances to succeed before the lock expires). Each replica attempts to acquire/renew
-  immediately on start, then on every renew-interval tick.
-- **Failover characteristics:** on a graceful stop, the leader releases the lock immediately, so a
-  standby replica takes over on its very next renew attempt (well under the renew interval). On a
-  crash (no graceful release), a standby only takes over once the TTL expires — worst case
-  **≤ 30s** by default, which is acceptable against the workers' own tick cadence (5s / 10s / 60s).
-- **Dual leadership is harmless:** election here is an *optimization*, not a correctness
-  mechanism — no fencing tokens are used. Every operation the gated workers perform is idempotent
-  and version-guarded (commit broadcast + version-guarded promote, targeted per-DC backfill, and
-  the advisory DcId check itself changes no state), so a brief window where two replicas both
-  believe they are leader (e.g. during a TTL-expiry handover) produces at worst redundant work —
-  never a correctness violation.
-- **Non-leader behavior:** a non-leader's `RunOnceAsync` returns immediately with the method's
-  neutral value (`0` commits / `0` backfills / `null` comparison result) and logs at **Debug**
-  (expected steady state, not a warning-worthy condition).
-- **Not gated:** `CacheReconciler` deliberately runs on every replica regardless of leadership —
-  see §1b.
+- **Why opt-in, and why default off:** election only earns its keep when you run **multiple
+  replicas** of one control-plane deployment sharing a single commit pipeline. The default
+  deployment is a single replica, for which election adds a stall surface for zero benefit — a
+  transient Redis blip flips the lone instance to not-leader and its gated workers skip ticks even
+  though there is nothing else to hand off to. Running without election is safe-but-redundant by
+  construction (see "dual leadership is harmless" below), matching this codebase's existing
+  opt-in convention (`ConsistencyMode` itself defaults to `BestEffort`).
+- **When to enable it:** turn `ControlPlane:LeaderElection:Enabled` on when you actually run more
+  than one control-plane replica against the same Redis/config and want exactly one of them
+  driving the gated-commit workers (e.g. to avoid duplicate commit-broadcast/backfill work, or to
+  keep the advisory DcId-check log/metric single-sourced). A single-replica deployment has no
+  reason to enable it.
+- **Disabled (default) semantics:** `ILeaderElection` resolves to `AlwaysLeaderElection`, which
+  always reports leadership — so **every** replica runs every gated-commit tick.
+  `RedisLeaderElector` and its hosted service are not even registered. This is safe (every
+  operation the gated workers perform is idempotent/version-guarded — see "dual leadership is
+  harmless" below) but redundant under multiple replicas: N replicas each running the same tick
+  do N× the work for the same effect. `AlwaysLeaderElection` still emits the
+  `control_plane.consistency.is_leader` gauge (pinned at a constant `1`) so dashboards built
+  against that metric keep working instead of the series disappearing.
+- **Enabled semantics — lock location:** a single key (`featbit:control-plane:leader`) in
+  `Redis:Instances[0]` (the control plane's "home"/local DC Redis — the same singleton connection
+  already used for heartbeat/health storage). Replicas share configuration, so this is one lock
+  across all replicas, not one per DC.
+- **Enabled semantics — TTL / renew defaults:** `ControlPlane:LeaderElection:TtlSeconds` (default
+  **30**) and `ControlPlane:LeaderElection:RenewIntervalSeconds` (default **10**, ≈ TTL/3 so a
+  renew tick has multiple chances to succeed before the lock expires). Each replica attempts to
+  acquire/renew immediately on start, then on every renew-interval tick.
+- **Enabled semantics — failover characteristics:** on a graceful stop, the leader releases the
+  lock immediately, so a standby replica takes over on its very next renew attempt (well under the
+  renew interval). On a crash (no graceful release), a standby only takes over once the TTL
+  expires — worst case **≤ 30s** by default, which is acceptable against the workers' own tick
+  cadence (5s / 10s / 60s).
+- **Dual leadership is harmless (applies whether election is enabled or disabled):** election
+  here is an *optimization*, not a correctness mechanism — no fencing tokens are used. Every
+  operation the gated workers perform is idempotent and version-guarded (commit broadcast +
+  version-guarded promote, targeted per-DC backfill, and the advisory DcId check itself changes no
+  state), so a window where more than one replica believes it is leader (e.g. during a
+  TTL-expiry handover when enabled, or simply every tick on every replica when disabled) produces
+  at worst redundant work — never a correctness violation.
+- **Non-leader behavior (enabled only):** a non-leader's `RunOnceAsync` returns immediately with
+  the method's neutral value (`0` commits / `0` backfills / `null` comparison result) and logs at
+  **Debug** (expected steady state, not a warning-worthy condition).
+- **Not gated:** `CacheReconciler` deliberately runs on every replica regardless of leadership or
+  the enabled/disabled state above — see §1b.
 
 ---
 
@@ -222,8 +245,9 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:CommitCoordinator:IntervalSeconds` | `5` | CP | Commit-evaluation tick |
 | `ControlPlane:Recovery:IntervalSeconds` | `10` | CP | Returning-DC backfill tick |
 | `ControlPlane:DcIdConsistency:IntervalSeconds` | `60` | CP | DcId-mismatch advisory check |
-| `ControlPlane:LeaderElection:TtlSeconds` | `30` | CP | Leader lock TTL (#71, see §1a) |
-| `ControlPlane:LeaderElection:RenewIntervalSeconds` | `10` | CP | Leader lock acquire/renew tick |
+| `ControlPlane:LeaderElection:Enabled` | `false` | CP | Opt-in leader election for the gated-commit workers (#71, see §1a); default off runs every replica (safe but redundant under multiple replicas) |
+| `ControlPlane:LeaderElection:TtlSeconds` | `30` | CP | Leader lock TTL, only relevant when `Enabled=true` (#71, see §1a) |
+| `ControlPlane:LeaderElection:RenewIntervalSeconds` | `10` | CP | Leader lock acquire/renew tick, only relevant when `Enabled=true` |
 | `ControlPlane:StagedFlagGc:IntervalSeconds` | `300` | API/back-end | GC of superseded `v{ts}` keys |
 | `ControlPlane:CacheReconcile:MinBackfillIntervalSeconds` | `300` | CP | Per-DC reconnect-flap backfill cooldown (#92, see §1c) |
 | `Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c). #108: moved from `ControlPlane:Redis:ConnectTimeoutMs`, matching the back-end/eval-server `Redis:*` convention (#106); the old key is still read as a back-compat fallback. |
@@ -247,7 +271,7 @@ OpenTelemetry/`MeterListener`):
 | `control_plane.consistency.evicted_commits` | counter | `dc_id` | commits that proceeded without an evicted DC |
 | `control_plane.consistency.unmatched_dc_count` | gauge | `direction` | DcId config/lease mismatches |
 | `control_plane.consistency.applied_watermark_lag_ms` | gauge | `dc_id`, `env_id` | live DC's lag (ms) behind the most-advanced live DC's applied watermark, per env (#69/#84) |
-| `control_plane.consistency.is_leader` | gauge | `instance_id` | 1 if this replica currently holds the leader lock, else 0 (#71, see §1a) |
+| `control_plane.consistency.is_leader` | gauge | `instance_id` | 1 if this replica currently holds the leader lock, else 0; when election is disabled (default) always reports 1 for every replica (#71, see §1a) |
 
 **Alert on:** sustained `pending_backlog > 0` (commits stuck — a live DC not staging, or a DcId
 mismatch), rising `evicted_commits` (a DC repeatedly dropping out), and any non-zero
@@ -388,8 +412,9 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   (`ControlPlane:StagedFlagGc:IntervalSeconds`, §-referenced above) rather than lingering forever.
   Exhaustion is not silent: it logs an ERROR with the entity type, key/id, version, and attempt
   count before rethrowing, so it is diagnosable via logs even though the write itself is lost.
-- **Multi-replica control plane (#71 — resolved):** the coordinator/recovery/checker workers now
-  run only on the elected leader (§1a); `CacheReconciler` intentionally still runs on every
-  replica (§1b).
+- **Multi-replica control plane (#71 — resolved):** the coordinator/recovery/checker workers can be
+  gated to run only on the elected leader via the opt-in, default-off
+  `ControlPlane:LeaderElection:Enabled` (§1a); left disabled, every replica runs — safe but
+  redundant. `CacheReconciler` intentionally still runs on every replica regardless (§1b).
 - **Stronger model:** an eval-server-confirmed gate (Model B) is documented in #44 as a future
   enhancement.
