@@ -47,10 +47,10 @@ namespace Api.Application.ControlPlane;
 /// Idempotent + crash-safe: re-running a tick is a no-op once a flag/segment is committed — the
 /// commit broadcast and the version-guarded promote both no-op when already applied.
 ///
-/// TODO: single-instance/leader election if the control plane runs multiple replicas. Today
-/// multiple replicas would each run this loop; the commit + version-guarded promote are idempotent
-/// so this is safe (at worst duplicate publishes), but a leader election would avoid the redundant
-/// work. Out of scope for C3b-2; tracked as a follow-up.
+/// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
+/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
+/// guards (see above) still make concurrent execution safe belt-and-braces during a failover
+/// overlap window, so losing leadership mid-tick is harmless.
 ///
 /// Metrics (all on <see cref="MeterName"/>): <see cref="CommitsCounterName"/>,
 /// <see cref="TimeToCommitHistogramName"/>, <see cref="PendingBacklogGaugeName"/>,
@@ -251,6 +251,7 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICacheService _compositeCache;
     private readonly IMessageProducer _messageProducer;
+    private readonly ILeaderElection _leaderElection;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<CommitCoordinatorWorker> _logger;
@@ -259,12 +260,14 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         IServiceScopeFactory scopeFactory,
         [FromKeyedServices("compositeCache")] ICacheService compositeCache,
         IMessageProducer messageProducer,
+        ILeaderElection leaderElection,
         IConfiguration configuration,
         ILogger<CommitCoordinatorWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _compositeCache = compositeCache;
         _messageProducer = messageProducer;
+        _leaderElection = leaderElection;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -308,9 +311,10 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     }
 
     /// <summary>
-    /// Performs a single coordinator tick and returns the number of flags AND segments committed.
-    /// Exposed so it can be invoked directly (e.g. by integration tests) without waiting on the
-    /// periodic timer.
+    /// Performs a single coordinator tick and returns the number of flags AND segments committed —
+    /// <c>0</c> if this instance is not the elected leader (see #71b gate below), or if nothing was
+    /// pending, or if no pending change was eligible to commit this tick. Exposed so it can be
+    /// invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
     /// For each pending flag whose pending version is newer than its committed version, if every
     /// currently live DC has that version staged, the flag is committed across all DCs, its pending
@@ -321,6 +325,16 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
+        // expected steady-state on every non-leader replica, not an error).
+        if (!_leaderElection.IsLeader)
+        {
+            _logger.LogDebug(
+                "Commit coordinator: instance {InstanceId} is not leader; skipping tick.",
+                _leaderElection.InstanceId);
+            return 0;
+        }
+
         // IFeatureFlagService is a scoped (per-request) service in DI; resolve it inside a scope so
         // the singleton BackgroundService does not capture a scoped/disposed instance. The segment
         // services are resolved from the SAME scope, matching the flag path.

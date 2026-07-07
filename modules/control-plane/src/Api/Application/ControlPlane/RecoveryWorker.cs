@@ -31,9 +31,10 @@ namespace Api.Application.ControlPlane;
 /// and committed pointer are version-keyed). It does NOT publish <c>Topics.FeatureFlagChange</c> —
 /// the committed value did not change globally, only one DC's Redis is being repaired.
 ///
-/// TODO: leader election if control plane runs multiple replicas. Today multiple replicas would each
-/// run this loop; the staged-write + commit-pointer flip are idempotent so it is safe (at worst
-/// redundant writes), but a leader election would avoid the duplicate work. Out of scope here.
+/// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
+/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
+/// guards (see above) still make concurrent execution safe belt-and-braces during a failover
+/// overlap window, so losing leadership mid-tick is harmless.
 ///
 /// ASSUMPTION (per-DC client refresh): the targeted <c>PushFullSync</c> command relies on the
 /// <see cref="ControlPlaneTopics.ControlPlaneCommand"/> topic reaching EVERY DC's eval servers (the
@@ -51,6 +52,7 @@ public sealed class RecoveryWorker : BackgroundService
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IDcBackfiller _backfiller;
+    private readonly ILeaderElection _leaderElection;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<RecoveryWorker> _logger;
@@ -63,11 +65,13 @@ public sealed class RecoveryWorker : BackgroundService
     public RecoveryWorker(
         IServiceScopeFactory scopeFactory,
         IDcBackfiller backfiller,
+        ILeaderElection leaderElection,
         IConfiguration configuration,
         ILogger<RecoveryWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _backfiller = backfiller;
+        _leaderElection = leaderElection;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -111,14 +115,28 @@ public sealed class RecoveryWorker : BackgroundService
     }
 
     /// <summary>
-    /// Performs a single recovery tick and returns the number of DCs backfilled. Exposed so it can
-    /// be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
+    /// Performs a single recovery tick and returns the number of DCs backfilled — <c>0</c> if this
+    /// instance is not the elected leader (see #71b gate below), or if no DC newly returned. Exposed
+    /// so it can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
     /// For each DcId newly present in the live set since the previous tick, every flag's AND every
     /// segment's committed value is staged and committed into that DC's Redis (targeted, not broadcast).
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
+        // expected steady-state on every non-leader replica, not an error). The previous-live-set
+        // watermark is intentionally left untouched: if/when this instance becomes leader, the first
+        // tick treats every currently-live DC as "returned" (first-seen), which is the same harmless
+        // behavior a freshly-started worker already exhibits.
+        if (!_leaderElection.IsLeader)
+        {
+            _logger.LogDebug(
+                "Recovery worker: instance {InstanceId} is not leader; skipping tick.",
+                _leaderElection.InstanceId);
+            return 0;
+        }
+
         // ILeaseStore is scoped (per-request) in DI; resolve it inside a scope so the singleton
         // BackgroundService does not capture a scoped/disposed instance.
         using var scope = _scopeFactory.CreateScope();

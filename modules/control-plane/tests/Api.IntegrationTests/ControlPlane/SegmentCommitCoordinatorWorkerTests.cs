@@ -218,6 +218,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
             new SpyMessageProducer(),
+            new FakeLeaderElection(isLeader: true),
             configuration,
             logger ?? NullLogger<CommitCoordinatorWorker>.Instance);
     }
