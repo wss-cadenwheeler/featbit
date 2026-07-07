@@ -3,7 +3,9 @@ using Domain.Utils;
 using Infrastructure.Persistence.EntityFrameworkCore;
 using Infrastructure.Services.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using TestBase;
 
 namespace Application.IntegrationTests.FeatureFlags;
 
@@ -14,6 +16,11 @@ namespace Application.IntegrationTests.FeatureFlags;
 /// fresh row, converging to the same semantics the Mongo provider gets from its version-filtered
 /// UpdateOneAsync/ReplaceOneAsync: the loser of a race either no-ops (SetPendingAsync) or returns
 /// false (PromotePendingAsync); it never throws and never clobbers the winner.
+///
+/// #107 acceptance: the retry budget was raised (3 -> PendingOpRetryPolicy.MaxRetries=8) with
+/// jittered backoff so that even a synchronized ("lock-step") herd of racers converges reliably
+/// instead of occasionally exhausting the budget, and any exhaustion that does happen logs an
+/// ERROR with actionable context before rethrowing.
 ///
 /// Integration test against a real Postgres instance (throwaway container on port 5434).
 /// </summary>
@@ -118,7 +125,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
         // Seed the committed row via its own throwaway context/service.
         await using (var seedContext = new AppDbContext(CreateOptions()))
         {
-            var seedService = new FeatureFlagService(seedContext);
+            var seedService = new FeatureFlagService(seedContext, NullLogger<FeatureFlagService>.Instance);
             var committed = CreateFlag(key, isEnabled: false);
             committed.CommittedVersion = 1;
             await seedService.AddOneAsync(committed);
@@ -126,8 +133,8 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         await using var contextA = new AppDbContext(CreateOptions());
         await using var contextB = new AppDbContext(CreateOptions());
-        var serviceA = new FeatureFlagService(contextA);
-        var serviceB = new FeatureFlagService(contextB);
+        var serviceA = new FeatureFlagService(contextA, NullLogger<FeatureFlagService>.Instance);
+        var serviceB = new FeatureFlagService(contextB, NullLogger<FeatureFlagService>.Instance);
 
         // B "already read v1 state": force contextB to track the row before A's write lands, so
         // its identity map later hands back this same stale instance instead of a fresh query.
@@ -144,7 +151,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         // Assert: no exception escaped, and A's pending is still the one in the row.
         await using var verifyContext = new AppDbContext(CreateOptions());
-        var verifyService = new FeatureFlagService(verifyContext);
+        var verifyService = new FeatureFlagService(verifyContext, NullLogger<FeatureFlagService>.Instance);
         var raw = await verifyService.GetAsync(_envId, key);
         Assert.NotNull(raw.Pending);
         Assert.Equal(2, raw.Pending!.Version);
@@ -159,7 +166,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         await using (var seedContext = new AppDbContext(CreateOptions()))
         {
-            var seedService = new FeatureFlagService(seedContext);
+            var seedService = new FeatureFlagService(seedContext, NullLogger<FeatureFlagService>.Instance);
             var committed = CreateFlag(key, isEnabled: false);
             committed.CommittedVersion = 1;
             await seedService.AddOneAsync(committed);
@@ -167,8 +174,8 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         await using var contextA = new AppDbContext(CreateOptions());
         await using var contextB = new AppDbContext(CreateOptions());
-        var serviceA = new FeatureFlagService(contextA);
-        var serviceB = new FeatureFlagService(contextB);
+        var serviceA = new FeatureFlagService(contextA, NullLogger<FeatureFlagService>.Instance);
+        var serviceB = new FeatureFlagService(contextB, NullLogger<FeatureFlagService>.Instance);
 
         // Stage v2 via A.
         await serviceA.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: true), version: 2);
@@ -190,7 +197,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         // State intact: still v1 committed, v3 pending — B's stale promote attempt did not clobber it.
         await using var verifyContext = new AppDbContext(CreateOptions());
-        var verifyService = new FeatureFlagService(verifyContext);
+        var verifyService = new FeatureFlagService(verifyContext, NullLogger<FeatureFlagService>.Instance);
         var raw = await verifyService.GetAsync(_envId, key);
         Assert.Equal(1, raw.CommittedVersion);
         Assert.NotNull(raw.Pending);
@@ -205,7 +212,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         await using (var seedContext = new AppDbContext(CreateOptions()))
         {
-            var seedService = new FeatureFlagService(seedContext);
+            var seedService = new FeatureFlagService(seedContext, NullLogger<FeatureFlagService>.Instance);
             var committed = CreateFlag(key, isEnabled: false);
             committed.CommittedVersion = 1;
             await seedService.AddOneAsync(committed);
@@ -223,15 +230,15 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
 
         // A small random jitter before each task's own work spreads the 20 tasks' actual
         // read/write windows out (as real concurrent callers arriving over a short span would
-        // be), instead of every task hitting GetAsync at the exact same instant. That thundering-
-        // herd extreme (verified separately) can require more retries than the bounded budget
-        // (#77 intentionally lets that propagate as a pathological-contention signal) — this test
-        // targets the realistic "many overlapping racers" case the retry loop is meant to absorb.
+        // be), instead of every task hitting GetAsync at the exact same instant. The fully
+        // synchronized ("lock-step") extreme — every racer arriving in the exact same instant,
+        // which used to be able to exhaust the old 3-retry budget roughly 1 run in 5 — is
+        // exercised separately by LockStepHerd_AllTasks_Complete_Without_Exhausting_Retries below.
         var setTasks = stagedVersions.Select(version => Task.Run(async () =>
         {
             await Task.Delay(Random.Shared.Next(0, 40));
             await using var context = new AppDbContext(options);
-            var service = new FeatureFlagService(context);
+            var service = new FeatureFlagService(context, NullLogger<FeatureFlagService>.Instance);
             await service.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: version % 2 == 0), version);
         }));
 
@@ -239,7 +246,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
         {
             await Task.Delay(Random.Shared.Next(0, 40));
             await using var context = new AppDbContext(options);
-            var service = new FeatureFlagService(context);
+            var service = new FeatureFlagService(context, NullLogger<FeatureFlagService>.Instance);
             await service.PromotePendingAsync(_envId, key, expected);
         }));
 
@@ -249,7 +256,7 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
         // Assert: no lost updates — final state is internally consistent and made only of
         // values that were actually written by one of the tasks above.
         await using var verifyContext = new AppDbContext(options);
-        var verifyService = new FeatureFlagService(verifyContext);
+        var verifyService = new FeatureFlagService(verifyContext, NullLogger<FeatureFlagService>.Instance);
         var raw = await verifyService.GetAsync(_envId, key);
 
         Assert.True(raw.CommittedVersion == 1 || stagedVersions.Contains(raw.CommittedVersion));
@@ -259,4 +266,70 @@ public sealed class FeatureFlagRetryOnConflictPostgresTests : IAsyncLifetime
             Assert.Contains(raw.Pending.Version, stagedVersions);
         }
     }
+
+    // #107: the genuine "lock-step herd" extreme — every racer released at (as close as the
+    // thread pool allows to) the exact same instant, with no per-task startup jitter at all. This
+    // is what the old 3-retry budget could occasionally (~1-in-5 observed) fail to absorb, since a
+    // racer near the back of the herd could need more than 3 retries to land its write. With
+    // PendingOpRetryPolicy.MaxRetries=8 and jittered backoff, this should now converge reliably.
+    [Fact]
+    public async Task LockStepHerd_AllTasks_Complete_Without_Exhausting_Retries()
+    {
+        const string key = "retry-lockstep-herd";
+        const int herdSize = 16;
+
+        await using (var seedContext = new AppDbContext(CreateOptions()))
+        {
+            var seedService = new FeatureFlagService(seedContext, NullLogger<FeatureFlagService>.Instance);
+            var committed = CreateFlag(key, isEnabled: false);
+            committed.CommittedVersion = 1;
+            await seedService.AddOneAsync(committed);
+        }
+
+        var options = CreateOptions();
+        var testLogger = new TestLogger<FeatureFlagService>();
+
+        // Barrier.SignalAndWait releases all herdSize tasks together, so every task's internal
+        // GetAsync + SaveChanges attempt fires in the same instant rather than being spread out —
+        // the opposite of Concurrent_Stress_No_Lost_Updates' realistic jitter above.
+        using var barrier = new Barrier(herdSize);
+
+        var stagedVersions = Enumerable.Range(2, herdSize).Select(v => (long)v).ToArray();
+
+        var tasks = stagedVersions.Select(version => Task.Run(async () =>
+        {
+            barrier.SignalAndWait();
+            await using var context = new AppDbContext(options);
+            var service = new FeatureFlagService(context, testLogger);
+            await service.SetPendingAsync(_envId, key, CreateFlag(key, isEnabled: version % 2 == 0), version);
+        }));
+
+        // Assert: no unhandled exception escapes any task's retry loop, even under a fully
+        // synchronized herd — i.e. nobody exhausted PendingOpRetryPolicy.MaxRetries.
+        await Task.WhenAll(tasks);
+
+        // Corroborate via the logger: an exhaustion would have logged an ERROR (see
+        // SetPendingAsync's final catch block) before rethrowing. None should have fired.
+        Assert.DoesNotContain(testLogger.LogMessages, m => m != null && m.Contains("exhausted"));
+
+        // Assert: no lost updates — the highest version wins the pending slot.
+        await using var verifyContext = new AppDbContext(options);
+        var verifyService = new FeatureFlagService(verifyContext, NullLogger<FeatureFlagService>.Instance);
+        var raw = await verifyService.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(stagedVersions.Max(), raw.Pending!.Version);
+        Assert.Equal(1, raw.CommittedVersion);
+    }
+
+    // #107: a genuine forced-conflict exhaustion test (a pack of hostile background writers
+    // hammering the same row so the SUT's every SaveChanges attempt collides) was attempted here
+    // and deliberately dropped: even with 8 continuous hostile writers, the SUT's own retry loop
+    // reliably won a race within its budget every time (0/5 manual runs reproduced exhaustion) —
+    // there is no testing seam in production code to force a deterministic collision on every one
+    // of the SUT's 9 attempts without either (a) adding a test-only hook to production code, which
+    // is out of scope for this fix, or (b) an inherently flaky timing race. Per the #107 plan, the
+    // fallback is used instead: PendingOpRetryPolicyTests (Application.UnitTests) asserts the
+    // shared budget/backoff constants are wired as documented, and the logging call sites
+    // (FeatureFlagService/SegmentService SetPendingAsync/PromotePendingAsync final catch blocks)
+    // were verified by code review to log before rethrowing.
 }

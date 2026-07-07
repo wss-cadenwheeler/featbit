@@ -372,6 +372,22 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   restarted); it rejoins rotation once heartbeats resume. See CP-13 above.
 - **EF residual window:** the optimistic guards on `SetPending`/`PromotePending` are atomic on
   Mongo but load-check-save on EF/Postgres (no rowversion) — a documented narrow window.
+- **EF `SetPendingAsync` retry-exhaustion edge (#107):** on Postgres, `SetPendingAsync`
+  (`FeatureFlagService`/`SegmentService`, EF) retries `DbUpdateConcurrencyException` (the xmin
+  token, #76) with a bounded budget and jittered backoff
+  (`PendingOpRetryPolicy.MaxRetries` = 8; `Random(10, 50)ms * attemptNumber` between attempts,
+  ~1-2s worst case) rather than retrying unboundedly or making the write atomic via
+  `ExecuteUpdate`/jsonb-predicate translation (evaluated and rejected — see #72 design notes on
+  translation fragility) or reordering the handler's Redis-stage-then-DB-write sequence (rejected
+  — subtle coordinator interactions). This makes exhaustion effectively unreachable under realistic
+  contention, but does not eliminate it: under pathological contention (far more concurrent racers
+  on one row than the retry budget can absorb), `SetPendingAsync` still throws after exhausting its
+  attempts, and the handler already staged that change to Redis before the DB write — so this
+  specific stage is dropped, invisible to the coordinator, superseded only by the next edit of that
+  flag/segment. The orphaned Redis stage is reclaimed by `StagedFlagGc`
+  (`ControlPlane:StagedFlagGc:IntervalSeconds`, §-referenced above) rather than lingering forever.
+  Exhaustion is not silent: it logs an ERROR with the entity type, key/id, version, and attempt
+  count before rethrowing, so it is diagnosable via logs even though the write itself is lost.
 - **Multi-replica control plane (#71 — resolved):** the coordinator/recovery/checker workers now
   run only on the elected leader (§1a); `CacheReconciler` intentionally still runs on every
   replica (§1b).

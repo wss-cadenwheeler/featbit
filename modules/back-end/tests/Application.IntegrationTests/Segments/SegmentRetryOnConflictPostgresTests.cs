@@ -6,6 +6,7 @@ using Infrastructure.Services.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using TestBase;
 
 namespace Application.IntegrationTests.Segments;
 
@@ -16,6 +17,13 @@ namespace Application.IntegrationTests.Segments;
 /// fresh row, converging to the same semantics the Mongo provider gets from its version-filtered
 /// UpdateOneAsync/ReplaceOneAsync: the loser of a race either no-ops (SetPendingAsync) or returns
 /// false (PromotePendingAsync); it never throws and never clobbers the winner.
+///
+/// #107 acceptance: the retry budget was raised (3 -> PendingOpRetryPolicy.MaxRetries=8) with
+/// jittered backoff so that even a synchronized ("lock-step") herd of racers converges reliably
+/// instead of occasionally exhausting the budget, and any exhaustion that does happen logs an
+/// ERROR with actionable context before rethrowing (see PendingOpRetryPolicyTests,
+/// Application.UnitTests, for the budget/backoff wiring check — the retry/backoff/logging code
+/// under test here is shared with FeatureFlagService via PendingOpRetryPolicy).
 ///
 /// Integration test against a real Postgres instance (throwaway container on port 5436).
 /// </summary>
@@ -225,11 +233,10 @@ public sealed class SegmentRetryOnConflictPostgresTests : IAsyncLifetime
 
         // A small random jitter before each task's own work spreads the 20 tasks' actual
         // read/write windows out (as real concurrent callers arriving over a short span would
-        // be), instead of every task hitting GetAsync at the exact same instant. That thundering-
-        // herd extreme (verified separately in #77) can require more retries than the bounded
-        // budget (intentionally lets that propagate as a pathological-contention signal) — this
-        // test targets the realistic "many overlapping racers" case the retry loop is meant to
-        // absorb.
+        // be), instead of every task hitting GetAsync at the exact same instant. The fully
+        // synchronized ("lock-step") extreme — every racer arriving in the exact same instant,
+        // which used to be able to exhaust the old 3-retry budget roughly 1 run in 5 — is
+        // exercised separately by LockStepHerd_AllTasks_Complete_Without_Exhausting_Retries below.
         var setTasks = stagedVersions.Select(version => Task.Run(async () =>
         {
             await Task.Delay(Random.Shared.Next(0, 40));
@@ -261,5 +268,64 @@ public sealed class SegmentRetryOnConflictPostgresTests : IAsyncLifetime
             Assert.True(raw.Pending.Version > raw.CommittedVersion);
             Assert.Contains(raw.Pending.Version, stagedVersions);
         }
+    }
+
+    // #107: the genuine "lock-step herd" extreme — every racer released at (as close as the
+    // thread pool allows to) the exact same instant, with no per-task startup jitter at all. This
+    // is what the old 3-retry budget could occasionally (~1-in-5 observed) fail to absorb, since a
+    // racer near the back of the herd could need more than 3 retries to land its write. With
+    // PendingOpRetryPolicy.MaxRetries=8 and jittered backoff, this should now converge reliably.
+    // See PendingOpRetryPolicyTests (Application.UnitTests) for the budget/backoff wiring check
+    // (the retry/backoff/logging code under test here is shared via PendingOpRetryPolicy).
+    [Fact]
+    public async Task LockStepHerd_AllTasks_Complete_Without_Exhausting_Retries()
+    {
+        const string key = "retry-lockstep-herd";
+        const int herdSize = 16;
+
+        Guid segmentId;
+
+        await using (var seedContext = new AppDbContext(CreateOptions()))
+        {
+            var seedService = new SegmentService(seedContext, NullLogger<SegmentService>.Instance);
+            var committed = CreateSegment(key, "old");
+            committed.CommittedVersion = 1;
+            await seedService.AddOneAsync(committed);
+            segmentId = committed.Id;
+        }
+
+        var options = CreateOptions();
+        var testLogger = new TestLogger<SegmentService>();
+
+        // Barrier.SignalAndWait releases all herdSize tasks together, so every task's internal
+        // GetAsync + SaveChanges attempt fires in the same instant rather than being spread out —
+        // the opposite of Concurrent_Stress_No_Lost_Updates' realistic jitter above.
+        using var barrier = new Barrier(herdSize);
+
+        var stagedVersions = Enumerable.Range(2, herdSize).Select(v => (long)v).ToArray();
+
+        var tasks = stagedVersions.Select(version => Task.Run(async () =>
+        {
+            barrier.SignalAndWait();
+            await using var context = new AppDbContext(options);
+            var service = new SegmentService(context, testLogger);
+            await service.SetPendingAsync(segmentId, CreateSegment(key, $"v{version}"), version);
+        }));
+
+        // Assert: no unhandled exception escapes any task's retry loop, even under a fully
+        // synchronized herd — i.e. nobody exhausted PendingOpRetryPolicy.MaxRetries.
+        await Task.WhenAll(tasks);
+
+        // Corroborate via the logger: an exhaustion would have logged an ERROR (see
+        // SetPendingAsync's final catch block) before rethrowing. None should have fired.
+        Assert.DoesNotContain(testLogger.LogMessages, m => m != null && m.Contains("exhausted"));
+
+        // Assert: no lost updates — the highest version wins the pending slot.
+        await using var verifyContext = new AppDbContext(options);
+        var verifyService = new SegmentService(verifyContext, NullLogger<SegmentService>.Instance);
+        var raw = await verifyService.GetAsync(segmentId);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(stagedVersions.Max(), raw.Pending!.Version);
+        Assert.Equal(1, raw.CommittedVersion);
     }
 }
