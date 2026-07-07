@@ -73,6 +73,17 @@ public sealed record CommittedSnapshot(
 /// a <see cref="CacheReconciler"/> tick backfilling the SAME DcId at the same time coalesce against
 /// each other rather than each running a redundant full read/write cycle — the second concurrent call
 /// for a given DcId returns immediately with <see cref="Skipped"/> instead of doing any work.
+///
+/// #105: the #92 comments above describe a "genuinely failed guard must not be reported as a repair"
+/// invariant that, before #105, the code did not actually enforce — <see cref="BackfillDcAsync(string,ConsistencyMode,CancellationToken)"/>
+/// returned the ATTEMPTED flag count (<c>snapshot.Flags.Count</c>) regardless of whether the
+/// only-advance guard (#89) accepted or rejected each write. The guard scripts always returned an
+/// accept signal (1/0); it was simply discarded at every layer. Fixed by plumbing that signal through
+/// <see cref="CompositeRedisCacheService"/>'s targeted write methods (now <c>Task&lt;bool&gt;</c>) up
+/// to <c>DcBackfiller.RunBackfillAsync</c>, which now returns the ACCEPTED flag count. See
+/// <see cref="RecoveryWorker.RunOnceAsync"/> for the corresponding "count as repaired only when
+/// accepted > 0" fix, and <see cref="CacheReconciler.RunReconcileAsync"/> for why its min-backfill
+/// cooldown does NOT need the same accepted-count gate (per-key guard independence).
 /// </summary>
 public interface IDcBackfiller
 {
@@ -81,8 +92,10 @@ public interface IDcBackfiller
     /// <see cref="BackfillDcAsync(string,ConsistencyMode,CommittedSnapshot,CancellationToken)"/> return
     /// value meaning the call did NO work — either the composite Redis cache is unavailable (see
     /// <see cref="IsCompositeCacheAvailable"/>) or a backfill for that DcId was already in flight
-    /// (#92 coalescing). Distinct from a legitimate <c>0</c>, which means the backfill ran but the
-    /// committed snapshot happened to contain zero flags (e.g. a segment/secret-only tick).
+    /// (#92 coalescing). Distinct from a legitimate <c>0</c> (#105), which means the backfill ran but
+    /// genuinely had nothing to repair — every flag/segment write was rejected by the only-advance
+    /// guard (#89) because the DC's Redis already held an equal/fresher value, AND no secrets were in
+    /// the snapshot.
     /// </summary>
     public const int Skipped = -1;
 
@@ -97,19 +110,25 @@ public interface IDcBackfiller
 
     /// <summary>
     /// Backfill <paramref name="dcId"/>'s Redis from the source of truth using the write path for
-    /// <paramref name="mode"/>, then publish a targeted client refresh. Returns the number of flags
-    /// written, or <see cref="Skipped"/> if the composite cache is unavailable or this DcId's backfill
-    /// coalesced with one already in flight (#92). Convenience overload for single-DC callers: fetches
-    /// its own <see cref="CommittedSnapshot"/> internally. A caller backfilling multiple DCs in one tick
-    /// should instead call <see cref="FetchCommittedSnapshotAsync"/> once and use the snapshot-accepting
-    /// overload so every DC in that tick shares one fetch.
+    /// <paramref name="mode"/>, then publish a targeted client refresh. Returns the TOTAL count of
+    /// genuine writes this run made (#105) — accepted flags + accepted segments (both filtered by the
+    /// only-advance guard, #89: a write rejected because the DC's Redis already held an equal/fresher
+    /// value is NOT counted) PLUS every secret written (secrets carry no version to guard on, so an
+    /// attempted secret write always counts) — or <see cref="Skipped"/> if the composite cache is
+    /// unavailable or this DcId's backfill coalesced with one already in flight (#92). A return of
+    /// exactly <c>0</c> (not <see cref="Skipped"/>) means the run genuinely found nothing to repair.
+    /// Convenience overload for single-DC callers: fetches its own <see cref="CommittedSnapshot"/>
+    /// internally. A caller backfilling multiple DCs in one tick should instead call
+    /// <see cref="FetchCommittedSnapshotAsync"/> once and use the snapshot-accepting overload so every
+    /// DC in that tick shares one fetch.
     /// </summary>
     Task<int> BackfillDcAsync(string dcId, ConsistencyMode mode, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Backfill <paramref name="dcId"/>'s Redis from the pre-fetched <paramref name="snapshot"/> using
     /// the write path for <paramref name="mode"/>, then publish a targeted client refresh. Returns the
-    /// number of flags written, or <see cref="Skipped"/> if the composite cache is unavailable or this
+    /// TOTAL count of genuine writes this run made (#105 — see the single-DC overload's doc for what
+    /// "genuine" means), or <see cref="Skipped"/> if the composite cache is unavailable or this
     /// DcId's backfill coalesced with one already in flight (#92).
     /// </summary>
     Task<int> BackfillDcAsync(
@@ -210,6 +229,14 @@ public sealed class DcBackfiller(
         CompositeRedisCacheService composite,
         CancellationToken cancellationToken)
     {
+        // #105: "repaired" must report writes the only-advance guard actually ACCEPTED, not merely
+        // attempted — the guard scripts (#89) already return 1/0 accept signals; this loop is what
+        // stops that signal from being discarded. A flag/segment counts as accepted only if EVERY
+        // targeted write in its sequence was accepted (GatedCommit: stage AND commit; BestEffort:
+        // the single upsert) — a guard-rejected commit (the DC already held an equal/fresher
+        // committed version) must not be reported as a repair, matching the #92 comments' original
+        // (previously unenforced) intent.
+        var acceptedFlags = 0;
         foreach (var flag in snapshot.Flags)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -218,20 +245,28 @@ public sealed class DcBackfiller(
             // from the flag's UpdatedAt.
             var ts = new DateTimeOffset(flag.UpdatedAt).ToUnixTimeMilliseconds();
 
+            bool accepted;
             if (mode == ConsistencyMode.GatedCommit)
             {
                 // Stage the versioned value, then flip the committed pointer + index — targeted at
                 // ONLY this DC. Idempotent: re-applying an already-present version no-ops.
-                await composite.StageFlagToDcAsync(dcId, flag, ts);
-                await composite.CommitFlagToDcAsync(dcId, flag.EnvId, flag.Id.ToString(), ts);
+                var staged = await composite.StageFlagToDcAsync(dcId, flag, ts);
+                var committed = await composite.CommitFlagToDcAsync(dcId, flag.EnvId, flag.Id.ToString(), ts);
+                accepted = staged && committed;
             }
             else
             {
                 // BestEffort: write the legacy value key the BestEffort eval reads.
-                await composite.UpsertFlagToDcAsync(dcId, flag);
+                accepted = await composite.UpsertFlagToDcAsync(dcId, flag);
+            }
+
+            if (accepted)
+            {
+                acceptedFlags++;
             }
         }
 
+        var acceptedSegments = 0;
         foreach (var segment in snapshot.Segments)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -239,21 +274,29 @@ public sealed class DcBackfiller(
             var ts = new DateTimeOffset(segment.UpdatedAt).ToUnixTimeMilliseconds();
             var envIds = snapshot.SegmentEnvIds[segment.Id.ToString()];
 
+            bool accepted;
             if (mode == ConsistencyMode.GatedCommit)
             {
-                await composite.StageSegmentToDcAsync(dcId, segment, ts);
-                await composite.CommitSegmentToDcAsync(dcId, envIds, segment.Id.ToString(), ts);
+                var staged = await composite.StageSegmentToDcAsync(dcId, segment, ts);
+                var committed = await composite.CommitSegmentToDcAsync(dcId, envIds, segment.Id.ToString(), ts);
+                accepted = staged && committed;
             }
             else
             {
-                await composite.UpsertSegmentToDcAsync(dcId, envIds, segment);
+                accepted = await composite.UpsertSegmentToDcAsync(dcId, envIds, segment);
+            }
+
+            if (accepted)
+            {
+                acceptedSegments++;
             }
         }
 
-        // Secrets (#91) are NOT mode-gated: unlike flags/segments there is no staged/committed
-        // lifecycle for them (the cache shape is a last-write-wins hash keyed by the secret's own
-        // value, not by env+id — see UpsertSecretToDcAsync), so they are written unconditionally in
-        // BOTH GatedCommit and BestEffort. Without this, a DC whose Redis lost its secret keys keeps
+        // Secrets (#91) are NOT mode-gated and NOT guarded (#105 out of scope: there is no version
+        // to compare — see UpsertSecretToDcAsync's own doc): unlike flags/segments there is no
+        // staged/committed lifecycle for them (the cache shape is a last-write-wins hash keyed by
+        // the secret's own value, not by env+id), so they are written unconditionally in BOTH
+        // GatedCommit and BestEffort. Without this, a DC whose Redis lost its secret keys keeps
         // failing SDK auth even after flags/segments are healed (the eval server's secret lookup has
         // no DB fallback).
         foreach (var secretCache in snapshot.Secrets)
@@ -263,18 +306,33 @@ public sealed class DcBackfiller(
             await composite.UpsertSecretToDcAsync(dcId, secretCache.Descriptor, secretCache.Secret);
         }
 
+        // #105: report ACCEPTED vs ATTEMPTED so the log is honest about how much of this backfill
+        // actually changed state — a DC that was already fully synced legitimately shows 0/N
+        // accepted, which is not a failure.
         logger.LogInformation(
-            "DC backfill: repaired DC {DcId} ({Mode}) from source of truth with {FlagCount} flag(s), " +
-            "{SegmentCount} segment(s), and {SecretCount} secret(s).",
+            "DC backfill: repaired DC {DcId} ({Mode}) from source of truth: {AcceptedFlags}/{AttemptedFlags} " +
+            "flag(s) accepted, {AcceptedSegments}/{AttemptedSegments} segment(s) accepted, and " +
+            "{SecretCount} secret(s) upserted (unconditional, not guarded).",
             dcId,
             mode,
+            acceptedFlags,
             snapshot.Flags.Count,
+            acceptedSegments,
             snapshot.Segments.Count,
             snapshot.Secrets.Count);
 
         await PublishClientRefreshAsync(dcId);
 
-        return snapshot.Flags.Count;
+        // #105: the returned "repaired" signal is the TOTAL count of genuine writes this run made —
+        // accepted flags + accepted segments (both guard-filtered, #89) PLUS every secret written
+        // (secrets carry no version to guard on, so an attempted secret write always "accepts" — see
+        // the comment above). This is deliberately broader than "accepted flags alone": a DC whose
+        // ONLY genuine repair this tick was e.g. 2 secrets (its flags/segments were already in sync)
+        // must still be reported as repaired by callers gating on "result > 0" (RecoveryWorker,
+        // CacheReconciler) — it's real work, just not on the flag/segment axis. Conversely, a DC
+        // whose Redis already matched the source of truth for EVERY flag/segment and had NO secrets
+        // to write returns a legitimate 0 (not Skipped) — that DC needed no repair at all.
+        return acceptedFlags + acceptedSegments + snapshot.Secrets.Count;
     }
 
     /// <summary>

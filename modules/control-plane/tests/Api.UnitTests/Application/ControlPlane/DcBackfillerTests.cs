@@ -70,9 +70,13 @@ public class DcBackfillerTests
         var dcCache = new Mock<ICacheService>();
         dcCache
             .Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>()))
-            .Returns(async () => await gate.Task);
+            .Returns(async () =>
+            {
+                await gate.Task;
+                return true;
+            });
         dcCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(true);
 
         var composite = new CompositeRedisCacheService(
             new[] { new DcCacheService("east", dcCache.Object) },
@@ -104,8 +108,8 @@ public class DcBackfillerTests
         // The in-flight slot is released (finally) once a backfill completes, so a LATER (not
         // concurrent) call for the same DcId must run normally, not be treated as coalesced.
         var dcCache = new Mock<ICacheService>();
-        dcCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).Returns(Task.CompletedTask);
-        dcCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>())).Returns(Task.CompletedTask);
+        dcCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).ReturnsAsync(true);
+        dcCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>())).ReturnsAsync(true);
 
         var composite = new CompositeRedisCacheService(
             new[] { new DcCacheService("east", dcCache.Object) },
@@ -129,13 +133,17 @@ public class DcBackfillerTests
         var eastCache = new Mock<ICacheService>();
         eastCache
             .Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>()))
-            .Returns(async () => await gate.Task);
+            .Returns(async () =>
+            {
+                await gate.Task;
+                return true;
+            });
         eastCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(true);
 
         var westCache = new Mock<ICacheService>();
-        westCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).Returns(Task.CompletedTask);
-        westCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>())).Returns(Task.CompletedTask);
+        westCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).ReturnsAsync(true);
+        westCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>())).ReturnsAsync(true);
 
         var composite = new CompositeRedisCacheService(
             new[]
@@ -192,8 +200,8 @@ public class DcBackfillerTests
     [Fact]
     public async Task BackfillDcAsync_WithEmptySnapshot_ReturnsZero_NotSkipped()
     {
-        // A legitimate "nothing to write this tick" (e.g. a secret/segment-only environment) must be
-        // distinguishable from a skip.
+        // A legitimate "nothing to write this tick" (a wholly empty snapshot: zero flags, zero
+        // segments, zero secrets) must be distinguishable from a skip.
         var composite = new CompositeRedisCacheService(
             new[] { new DcCacheService("east", Mock.Of<ICacheService>()) },
             NullLogger<CompositeRedisCacheService>.Instance);
@@ -202,5 +210,76 @@ public class DcBackfillerTests
         var result = await sut.BackfillDcAsync("east", ConsistencyMode.GatedCommit, EmptySnapshot);
 
         Assert.Equal(0, result);
+    }
+
+    // ----- #105: honest "accepted" (not merely attempted) counts -----
+
+    [Fact]
+    public async Task BackfillDcAsync_GatedCommit_WhenGuardRejectsEveryCommit_ReturnsZero_NotAttemptedCount()
+    {
+        // Simulates the DC's Redis already holding an equal/fresher committed version for every
+        // flag (the only-advance guard rejects every commit as a no-op). Stage always "succeeds"
+        // (it is unconditional), but Commit — the actual guard — reports false for every flag, so
+        // this backfill accepted NOTHING even though it attempted (and successfully staged) one
+        // flag. Before #105 this incorrectly returned the ATTEMPTED count (1); it must now return 0.
+        var dcCache = new Mock<ICacheService>();
+        dcCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).ReturnsAsync(true);
+        dcCache.Setup(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>()))
+            .ReturnsAsync(false);
+
+        var composite = new CompositeRedisCacheService(
+            new[] { new DcCacheService("east", dcCache.Object) },
+            NullLogger<CompositeRedisCacheService>.Instance);
+
+        var snapshot = EmptySnapshot with { Flags = [CreateFlag()] };
+        var sut = CreateSut(composite);
+
+        var result = await sut.BackfillDcAsync("east", ConsistencyMode.GatedCommit, snapshot);
+
+        Assert.Equal(0, result);
+        dcCache.Verify(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task BackfillDcAsync_BestEffort_WhenGuardRejectsEveryUpsert_ReturnsZero_NotAttemptedCount()
+    {
+        // BestEffort counterpart: UpsertFlagIfNewerAsync itself carries the guard. A guard-rejected
+        // upsert (the DC already holds a fresher legacy value) must not be counted as a repair.
+        var dcCache = new Mock<ICacheService>();
+        dcCache.Setup(s => s.UpsertFlagIfNewerAsync(It.IsAny<FeatureFlag>())).ReturnsAsync(false);
+
+        var composite = new CompositeRedisCacheService(
+            new[] { new DcCacheService("east", dcCache.Object) },
+            NullLogger<CompositeRedisCacheService>.Instance);
+
+        var snapshot = EmptySnapshot with { Flags = [CreateFlag()] };
+        var sut = CreateSut(composite);
+
+        var result = await sut.BackfillDcAsync("east", ConsistencyMode.BestEffort, snapshot);
+
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    public async Task BackfillDcAsync_GatedCommit_MixedAcceptedAndRejected_ReturnsOnlyAcceptedCount()
+    {
+        // Two flags attempted; only the second's commit is accepted by the guard. The returned
+        // count must reflect ONLY the accepted one (1), not the attempted count (2).
+        var dcCache = new Mock<ICacheService>();
+        dcCache.Setup(s => s.StageFlagAsync(It.IsAny<FeatureFlag>(), It.IsAny<long>())).ReturnsAsync(true);
+        dcCache.SetupSequence(s => s.CommitFlagAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<long>()))
+            .ReturnsAsync(false)
+            .ReturnsAsync(true);
+
+        var composite = new CompositeRedisCacheService(
+            new[] { new DcCacheService("east", dcCache.Object) },
+            NullLogger<CompositeRedisCacheService>.Instance);
+
+        var snapshot = EmptySnapshot with { Flags = [CreateFlag("flag-1"), CreateFlag("flag-2")] };
+        var sut = CreateSut(composite);
+
+        var result = await sut.BackfillDcAsync("east", ConsistencyMode.GatedCommit, snapshot);
+
+        Assert.Equal(1, result);
     }
 }

@@ -107,15 +107,20 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// (<see cref="Application.Caches.ICacheService"/> callers via the composite cache's
     /// UpsertFlagToDcAsync) — the normal broadcast <see cref="UpsertFlagAsync"/> stays unconditional.
     /// </summary>
-    public async Task UpsertFlagIfNewerAsync(FeatureFlag flag)
+    public async Task<bool> UpsertFlagIfNewerAsync(FeatureFlag flag)
     {
         var cache = RedisCaches.Flag(flag);
         var index = RedisCaches.FlagIndex(flag);
 
-        await Redis.ScriptEvaluateAsync(
+        var result = await Redis.ScriptEvaluateAsync(
             OnlyAdvanceIndexedUpsertScript,
             [cache.Key, index.Key],
             [cache.Value, index.Member, index.Score]);
+
+        // #105: OnlyAdvanceIndexedUpsertScript already returns 1/0 (wrote the value key or not) —
+        // surface it instead of discarding it, so callers (the DC backfiller) can tell a
+        // genuinely guard-rejected write from one that landed.
+        return (int)result == 1;
     }
 
     /// <summary>
@@ -124,10 +129,13 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// the env flag sorted-set index. The previously committed value therefore stays readable
     /// until <see cref="CommitFlagAsync"/> is called.
     /// </summary>
-    public async Task StageFlagAsync(FeatureFlag flag, long ts)
+    public async Task<bool> StageFlagAsync(FeatureFlag flag, long ts)
     {
         var staged = RedisCaches.FlagStaged(flag, ts);
-        await Redis.StringSetAsync(staged.Key, staged.Value);
+        // #105: StringSetAsync already returns whether the SET succeeded — surface it instead of
+        // discarding it. Staging is unconditional (no version register to guard against), so this
+        // is true in practice unless the underlying write throws.
+        return await Redis.StringSetAsync(staged.Key, staged.Value);
     }
 
     /// <summary>
@@ -143,16 +151,23 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// coordinator commit path always calls this with a strictly increasing <paramref name="ts"/>
     /// (enforced by its own monotonicity check before broadcasting), so the guard never fires there.
     /// </summary>
-    public async Task CommitFlagAsync(Guid envId, string flagId, long ts)
+    public async Task<bool> CommitFlagAsync(Guid envId, string flagId, long ts)
     {
         // flip the committed pointer to the staged version, but only if it advances
         var pointerKey = RedisCaches.FlagCommittedPointer(Guid.Parse(flagId));
-        await Redis.ScriptEvaluateAsync(OnlyAdvancePointerScript, [pointerKey], [ts]);
+        var pointerResult = await Redis.ScriptEvaluateAsync(OnlyAdvancePointerScript, [pointerKey], [ts]);
+        var accepted = (int)pointerResult == 1;
 
         // advance the env flag index score (mirror UpsertFlag index logic); ZADD GT is Redis's
         // native only-advance primitive for a sorted-set score (Redis 6.2+; still adds new members).
+        // #105: its own bool return means "was a NEW member added", not "did the score advance" —
+        // an existing member's score update via GT returns false even when it genuinely raised the
+        // score (Redis only counts newly-added members unless the CH flag is set). It is therefore
+        // NOT a reliable accept signal here; the pointer flip above is the authoritative one.
         var indexKey = RedisKeys.FlagIndex(envId);
         await Redis.SortedSetAddAsync(indexKey, flagId, ts, SortedSetWhen.GreaterThan);
+
+        return accepted;
     }
 
     /// <summary>
@@ -201,12 +216,14 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// there is no index to use as a version register, so this falls back to the unconditional write
     /// (matching pre-#89 behavior for that edge case).
     /// </summary>
-    public async Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment)
+    public async Task<bool> UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment)
     {
         if (envIds.Count == 0)
         {
+            // No index to use as a version register: fall back to the unconditional write
+            // (matching pre-#89 behavior for that edge case), which always "accepts".
             await UpsertSegmentAsync(envIds, segment);
-            return;
+            return true;
         }
 
         var cache = RedisCaches.Segment(segment);
@@ -221,10 +238,13 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
             keys[i++] = RedisKeys.SegmentIndex(envId);
         }
 
-        await Redis.ScriptEvaluateAsync(
+        var result = await Redis.ScriptEvaluateAsync(
             OnlyAdvanceIndexedUpsertScript,
             keys,
             [cache.Value, member, score]);
+
+        // #105: surface the script's 1/0 "wrote the value key" result instead of discarding it.
+        return (int)result == 1;
     }
 
     /// <summary>
@@ -233,10 +253,11 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// committed pointer and does NOT touch any env segment sorted-set index. The previously
     /// committed value therefore stays readable until <see cref="CommitSegmentAsync"/> is called.
     /// </summary>
-    public async Task StageSegmentAsync(Segment segment, long ts)
+    public async Task<bool> StageSegmentAsync(Segment segment, long ts)
     {
         var staged = RedisCaches.SegmentStaged(segment, ts);
-        await Redis.StringSetAsync(staged.Key, staged.Value);
+        // #105: mirrors StageFlagAsync's return-value semantics.
+        return await Redis.StringSetAsync(staged.Key, staged.Value);
     }
 
     /// <summary>
@@ -252,19 +273,24 @@ public class RedisCacheService(IRedisClient redis) : ICacheService
     /// no-op and can never revert a fresher committed segment pointer. The normal coordinator commit
     /// path always advances <paramref name="ts"/>, so the guard never fires there.
     /// </summary>
-    public async Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts)
+    public async Task<bool> CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts)
     {
         // flip the committed pointer to the staged version, but only if it advances
         var pointerKey = RedisCaches.SegmentCommittedPointer(Guid.Parse(segmentId));
-        await Redis.ScriptEvaluateAsync(OnlyAdvancePointerScript, [pointerKey], [ts]);
+        var pointerResult = await Redis.ScriptEvaluateAsync(OnlyAdvancePointerScript, [pointerKey], [ts]);
+        var accepted = (int)pointerResult == 1;
 
         // advance the segment index score for each env (mirror UpsertSegment index logic); ZADD GT
-        // is Redis's native only-advance primitive for a sorted-set score.
+        // is Redis's native only-advance primitive for a sorted-set score. #105: as in
+        // CommitFlagAsync, each ZADD's own bool return is a "new member" signal, not "score
+        // advanced", so it is not used as the accept signal — the pointer flip above is.
         foreach (var envId in envIds)
         {
             var indexKey = RedisKeys.SegmentIndex(envId);
             await Redis.SortedSetAddAsync(indexKey, segmentId, ts, SortedSetWhen.GreaterThan);
         }
+
+        return accepted;
     }
 
     /// <summary>

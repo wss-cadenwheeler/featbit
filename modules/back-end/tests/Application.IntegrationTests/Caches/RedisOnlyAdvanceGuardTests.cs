@@ -75,18 +75,22 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
             // A normal commit lands ts2 first (simulates the racing normal coordinator commit that
             // gets ahead of a backfill still holding an older snapshot).
             var ts2 = 2_000L;
-            await sut.CommitFlagAsync(envId, flagIdString, ts2);
+            var acceptedTs2 = await sut.CommitFlagAsync(envId, flagIdString, ts2);
+            Assert.True(acceptedTs2, "#105: a genuinely advancing commit must be reported as accepted");
 
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, flagIdString));
 
             // The backfill's delayed write for its stale ts1 snapshot arrives AFTER: must be a no-op.
             var ts1 = 1_000L;
-            await sut.CommitFlagAsync(envId, flagIdString, ts1);
+            var acceptedTs1 = await sut.CommitFlagAsync(envId, flagIdString, ts1);
 
             // ACCEPTANCE: pointer + index must still read ts2, NOT reverted to ts1.
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, flagIdString));
+
+            // #105: the guard-rejected stale commit must report false, not true.
+            Assert.False(acceptedTs1, "#105: a guard-rejected stale commit must be reported as NOT accepted");
         }
         finally
         {
@@ -111,16 +115,17 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         try
         {
             var ts1 = 1_000L;
-            await sut.CommitFlagAsync(envId, flagIdString, ts1);
+            Assert.True(await sut.CommitFlagAsync(envId, flagIdString, ts1));
             Assert.Equal(ts1.ToString(), (string?)await db.StringGetAsync(committedKey));
 
             var ts2 = 2_000L;
-            await sut.CommitFlagAsync(envId, flagIdString, ts2);
+            var accepted = await sut.CommitFlagAsync(envId, flagIdString, ts2);
 
             // ACCEPTANCE: a genuinely newer ts still advances both pointer and index (the guard
             // must not be a no-op for the normal, monotonically-increasing path).
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, flagIdString));
+            Assert.True(accepted, "#105: a genuinely advancing commit must be reported as accepted");
         }
         finally
         {
@@ -148,14 +153,15 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         try
         {
             var ts2 = 2_000L;
-            await sut.CommitSegmentAsync(envIds, segmentIdString, ts2);
+            Assert.True(await sut.CommitSegmentAsync(envIds, segmentIdString, ts2));
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
 
             var ts1 = 1_000L;
-            await sut.CommitSegmentAsync(envIds, segmentIdString, ts1);
+            var acceptedTs1 = await sut.CommitSegmentAsync(envIds, segmentIdString, ts1);
 
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, segmentIdString));
+            Assert.False(acceptedTs1, "#105: a guard-rejected stale commit must be reported as NOT accepted");
         }
         finally
         {
@@ -181,13 +187,14 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         try
         {
             var ts1 = 1_000L;
-            await sut.CommitSegmentAsync(envIds, segmentIdString, ts1);
+            Assert.True(await sut.CommitSegmentAsync(envIds, segmentIdString, ts1));
 
             var ts2 = 2_000L;
-            await sut.CommitSegmentAsync(envIds, segmentIdString, ts2);
+            var accepted = await sut.CommitSegmentAsync(envIds, segmentIdString, ts2);
 
             Assert.Equal(ts2.ToString(), (string?)await db.StringGetAsync(committedKey));
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, segmentIdString));
+            Assert.True(accepted, "#105: a genuinely advancing commit must be reported as accepted");
         }
         finally
         {
@@ -223,13 +230,14 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
             // The backfiller's targeted, guarded write for its stale ts1 snapshot must be a no-op.
             var ts1 = 1_000L;
             var flagAtTs1 = NewFlag(envId, flagId, isEnabled: false, ts1);
-            await sut.UpsertFlagIfNewerAsync(flagAtTs1);
+            var accepted = await sut.UpsertFlagIfNewerAsync(flagAtTs1);
 
             // ACCEPTANCE: the legacy value key must still read the ts2 (enabled) content, and the
             // index score must still be ts2 — the stale ts1 write must not have landed.
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("\"isEnabled\":true", storedJson);
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, flagIdString));
+            Assert.False(accepted, "#105: a guard-rejected stale upsert must be reported as NOT accepted");
         }
         finally
         {
@@ -255,15 +263,16 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         {
             var ts1 = 1_000L;
             var flagAtTs1 = NewFlag(envId, flagId, isEnabled: false, ts1);
-            await sut.UpsertFlagIfNewerAsync(flagAtTs1);
+            Assert.True(await sut.UpsertFlagIfNewerAsync(flagAtTs1));
 
             var ts2 = 2_000L;
             var flagAtTs2 = NewFlag(envId, flagId, isEnabled: true, ts2);
-            await sut.UpsertFlagIfNewerAsync(flagAtTs2);
+            var accepted = await sut.UpsertFlagIfNewerAsync(flagAtTs2);
 
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("\"isEnabled\":true", storedJson);
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, flagIdString));
+            Assert.True(accepted, "#105: a genuinely advancing upsert must be reported as accepted");
         }
         finally
         {
@@ -297,12 +306,13 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
 
             var ts1 = 1_000L;
             var segmentAtTs1 = NewSegment(envId, segmentId, included: ["alice"], ts1);
-            await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs1);
+            var accepted = await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs1);
 
             // ACCEPTANCE: the legacy value + index must still reflect ts2, not reverted to ts1.
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("bob", storedJson);
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, segmentIdString));
+            Assert.False(accepted, "#105: a guard-rejected stale upsert must be reported as NOT accepted");
         }
         finally
         {
@@ -329,15 +339,16 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
         {
             var ts1 = 1_000L;
             var segmentAtTs1 = NewSegment(envId, segmentId, included: ["alice"], ts1);
-            await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs1);
+            Assert.True(await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs1));
 
             var ts2 = 2_000L;
             var segmentAtTs2 = NewSegment(envId, segmentId, included: ["alice", "bob"], ts2);
-            await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs2);
+            var accepted = await sut.UpsertSegmentIfNewerAsync(envIds, segmentAtTs2);
 
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("bob", storedJson);
             Assert.Equal(ts2, await db.SortedSetScoreAsync(indexKey, segmentIdString));
+            Assert.True(accepted, "#105: a genuinely advancing upsert must be reported as accepted");
         }
         finally
         {
@@ -384,12 +395,15 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
             // A backfill holding a stale ts=100 snapshot arrives, envIds ordered lagging-env-first.
             var ts100 = 100L;
             var segmentAtTs100 = NewSegment(envA, segmentId, included: ["alice"], ts100);
-            await sut.UpsertSegmentIfNewerAsync([envB, envA], segmentAtTs100);
+            var accepted = await sut.UpsertSegmentIfNewerAsync([envB, envA], segmentAtTs100);
 
             // ACCEPTANCE: ts=100 is not strictly newer than EVERY env's index (envA is at 200), so the
             // value key must NOT be overwritten with the stale ts=100 content.
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("bob", storedJson);
+            // #105: the value write was guard-rejected, so this must report NOT accepted — even
+            // though envB's own index still independently caught up (asserted below).
+            Assert.False(accepted, "#105: a guard-rejected value write must be reported as NOT accepted");
 
             // ACCEPTANCE: envA's index must never move backward (100 < 200, so it stays at 200).
             Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
@@ -429,7 +443,7 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
 
             var ts200 = 200L;
             var segmentAtTs200 = NewSegment(envA, segmentId, included: ["alice", "bob"], ts200);
-            await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs200);
+            var accepted = await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs200);
 
             // ACCEPTANCE: ts=200 is strictly newer than every env's index (max(50, 80) = 80), so the
             // value key IS written and every env's index advances to ts=200.
@@ -437,6 +451,7 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
             Assert.Contains("bob", storedJson);
             Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));
             Assert.Equal(ts200, await db.SortedSetScoreAsync(indexKeyB, segmentIdString));
+            Assert.True(accepted, "#105: a genuinely advancing value write must be reported as accepted");
         }
         finally
         {
@@ -475,13 +490,14 @@ public class RedisOnlyAdvanceGuardTests : IAsyncLifetime
             // A write for ts=150 arrives: newer than envB's index but older than envA's.
             var ts150 = 150L;
             var segmentAtTs150 = NewSegment(envA, segmentId, included: ["carol"], ts150);
-            await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs150);
+            var accepted = await sut.UpsertSegmentIfNewerAsync([envA, envB], segmentAtTs150);
 
             // ACCEPTANCE (value-key decision, documented invariant): ts=150 is NOT strictly newer than
             // EVERY env's index (envA is at 300), so the value key must NOT be overwritten.
             var storedJson = (string?)await db.StringGetAsync(valueKey);
             Assert.Contains("bob", storedJson);
             Assert.DoesNotContain("carol", storedJson);
+            Assert.False(accepted, "#105: a guard-rejected value write must be reported as NOT accepted");
 
             // ACCEPTANCE: envA's already-fresher index is left untouched by GT (150 < 300).
             Assert.Equal(ts300, await db.SortedSetScoreAsync(indexKeyA, segmentIdString));

@@ -65,7 +65,16 @@ public class HeartbeatMessageHandler(
         var leaseTtl = TimeSpan.FromSeconds(leaseTtlSeconds);
         var dcId = heartBeatMessage.DcId ?? heartBeatMessage.PodId;
 
-        WarnIfCadenceExceedsLeaseTtl(dcId, heartBeatMessage.Timestamp, leaseTtl);
+        // #105: only track cadence when a genuine DcId was reported. When DcId is null, dcId above
+        // falls back to PodId — a fresh Guid every pod process — so keying the process-wide cadence
+        // dictionaries (LastHeartbeatTimestampByDcId / DcIdsWarnedForSlowCadence) off that fallback
+        // would grow them unbounded-ish under a persistent DcId-less GatedCommit misconfiguration
+        // (a new "DcId" on every pod restart, never reused, never cleaned up). The warning text also
+        // targets per-DC cadence tuning, which is meaningless for a fallback PodId anyway.
+        if (heartBeatMessage.DcId is not null)
+        {
+            WarnIfCadenceExceedsLeaseTtl(heartBeatMessage.DcId, heartBeatMessage.Timestamp, leaseTtl);
+        }
 
         var lease = new DcLease
         {

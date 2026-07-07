@@ -353,4 +353,62 @@ public class HeartbeatMessageHandlerTests
 
         VerifyWarningLogged(Times.Never());
     }
+
+    // #105: cadence tracking must be keyed by a GENUINE DcId only. When DcId is null, the lease
+    // itself still falls back to PodId (HandleAsync_WhenGatedCommitAndDcIdNull_FallsBackToPodId
+    // above already covers that), but the process-wide cadence dictionaries must NOT be keyed off
+    // that PodId fallback — PodId is a fresh Guid every pod process, so tracking it would grow the
+    // dictionaries unbounded-ish under a persistent DcId-less GatedCommit misconfiguration.
+
+    [Fact]
+    public async Task HandleAsync_WhenGatedCommitAndDcIdNull_DoesNotTrackCadence_EvenWithSamePodIdAndSlowGap()
+    {
+        var config = BuildConfig(consistencyMode: "GatedCommit", leaseTtlSeconds: "15");
+        var t0 = DateTimeOffset.UtcNow;
+        // Deliberately reuse the SAME PodId across both heartbeats: if cadence tracking incorrectly
+        // fell back to keying on PodId (the pre-#105 lease-derived dcId), this 60s gap (>> the 15s
+        // TTL) would trip the warning. It must not, because DcId is null on both messages.
+        var podId = Guid.NewGuid().ToString();
+
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = podId,
+            Timestamp = t0
+            // DcId omitted (null)
+        }));
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = podId,
+            Timestamp = t0.AddSeconds(60)
+            // DcId omitted (null)
+        }));
+
+        VerifyWarningLogged(Times.Never());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenGatedCommitAndDcIdEmptyString_StillTracksCadence_UnlikeNullDcId()
+    {
+        // An empty-string DcId is still non-null (heartBeatMessage.DcId ?? PodId does NOT fall back
+        // for ""), so it is a genuine (if degenerate) DcId per the #105 "non-null" contract — cadence
+        // tracking for it is expected to behave like any other DcId, i.e. it DOES warn on a slow gap.
+        // This pins that boundary explicitly against regressing to "only non-empty DcId" instead.
+        var config = BuildConfig(consistencyMode: "GatedCommit", leaseTtlSeconds: "15");
+        var t0 = DateTimeOffset.UtcNow;
+
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0,
+            DcId = ""
+        }));
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0.AddSeconds(60),
+            DcId = ""
+        }));
+
+        VerifyWarningLogged(Times.Once());
+    }
 }

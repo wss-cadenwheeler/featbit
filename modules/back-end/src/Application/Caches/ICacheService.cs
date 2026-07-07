@@ -18,21 +18,37 @@ public interface ICacheService
     /// Intended ONLY for the backfiller's targeted per-DC writes (a returning/lagging DC's Redis can
     /// race a concurrent normal write); the normal broadcast <see cref="UpsertFlagAsync"/> is left
     /// unconditional.
+    /// <para>
+    /// #105: returns <c>true</c> iff the write was ACCEPTED by the only-advance guard (i.e. it
+    /// actually landed), <c>false</c> if a fresher/equal value already at this key rejected it.
+    /// Callers that need an honest "did this write take effect" signal (e.g. the DC backfiller)
+    /// must observe this return value instead of assuming every call succeeded.
+    /// </para>
     /// </summary>
-    Task UpsertFlagIfNewerAsync(FeatureFlag flag);
+    Task<bool> UpsertFlagIfNewerAsync(FeatureFlag flag);
 
     /// <summary>
     /// Stages a new flag version (B1 stage/commit storage) without moving the committed
     /// pointer or touching the env flag index, so the previously committed value stays
     /// readable until <see cref="CommitFlagAsync"/> is called.
+    /// <para>
+    /// #105: returns <c>true</c> on a successful write. Staging is unconditional (nothing to guard
+    /// against a version register here), so this is <c>true</c> in practice unless the underlying
+    /// write throws.
+    /// </para>
     /// </summary>
-    Task StageFlagAsync(FeatureFlag flag, long ts);
+    Task<bool> StageFlagAsync(FeatureFlag flag, long ts);
 
     /// <summary>
     /// Commits a previously staged flag version (B1 stage/commit storage): moves the
     /// committed pointer and advances the env flag index to <paramref name="ts"/>.
+    /// <para>
+    /// #105: returns <c>true</c> iff the committed pointer actually ADVANCED (the only-advance
+    /// guard accepted <paramref name="ts"/>), <c>false</c> if an equal/fresher version was already
+    /// committed and this call was a guard-rejected no-op.
+    /// </para>
     /// </summary>
-    Task CommitFlagAsync(Guid envId, string flagId, long ts);
+    Task<bool> CommitFlagAsync(Guid envId, string flagId, long ts);
 
     /// <summary>
     /// Probes whether THIS cache holds the staged version key <c>flag:{id}:v{ts}</c>
@@ -51,23 +67,29 @@ public interface ICacheService
     /// version register, so a write for a stale/older segment value can never revert a fresher one.
     /// Intended ONLY for the backfiller's targeted per-DC writes; the normal broadcast
     /// <see cref="UpsertSegmentAsync"/> is left unconditional.
+    /// <para>
+    /// #105: returns <c>true</c> iff the write was ACCEPTED by the only-advance guard, mirroring
+    /// <see cref="UpsertFlagIfNewerAsync"/>.
+    /// </para>
     /// </summary>
-    Task UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment);
+    Task<bool> UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment);
 
     /// <summary>
     /// Stages a new segment version (B2 stage/commit storage) without moving the committed
     /// pointer or touching any env segment index, so the previously committed value stays
-    /// readable until <see cref="CommitSegmentAsync"/> is called. Mirrors <see cref="StageFlagAsync"/>.
+    /// readable until <see cref="CommitSegmentAsync"/> is called. Mirrors <see cref="StageFlagAsync"/>,
+    /// including its #105 return-value semantics.
     /// </summary>
-    Task StageSegmentAsync(Segment segment, long ts);
+    Task<bool> StageSegmentAsync(Segment segment, long ts);
 
     /// <summary>
     /// Commits a previously staged segment version (B2 stage/commit storage): moves the
     /// committed pointer and advances the segment index to <paramref name="ts"/> for each env
     /// in <paramref name="envIds"/> (segments can belong to multiple envs). Mirrors
-    /// <see cref="CommitFlagAsync"/>.
+    /// <see cref="CommitFlagAsync"/>, including its #105 return-value semantics (accepted iff the
+    /// committed pointer advanced).
     /// </summary>
-    Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts);
+    Task<bool> CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts);
 
     /// <summary>
     /// Probes whether THIS cache holds the staged version key <c>segment:{id}:v{ts}</c>

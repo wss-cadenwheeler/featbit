@@ -503,9 +503,15 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
         var sut = CreateSut();
 
-        // First tick establishes the watermark (both first-seen -> backfilled once).
+        // First tick: both DCs are first-seen, so the recovery tick's backfill runs for both — but
+        // #105: both dc-a's and dc-b's Redis ALREADY hold the exact v1 committed value (seeded
+        // directly above, matching Mongo's v1 exactly), so the only-advance guard genuinely accepts
+        // NOTHING (same version, not strictly newer) for either DC. The tick still establishes the
+        // watermark (see the second tick below), but honestly reports 0 repairs — neither DC needed
+        // one. This is the #105 fix working as intended: before it, RecoveryWorker counted any
+        // non-skipped backfill as a repair regardless of whether anything actually changed.
         var first = await sut.RunOnceAsync();
-        Assert.Equal(2, first);
+        Assert.Equal(0, first);
 
         // Second tick with the SAME live set: nothing returned -> no-op.
         var second = await sut.RunOnceAsync();
@@ -633,7 +639,14 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
         await UpsertLeaseAsync(DcB, now.AddMinutes(5));  // dc-b returns
         var backfilled = await sut.RunOnceAsync();
-        Assert.Equal(1, backfilled);
+        // #105: dc-b's Redis was NEVER wiped/changed while it was absent — it still holds the exact
+        // v1 value that still matches Mongo's v1 committed snapshot, so the only-advance guard
+        // genuinely accepts nothing (same version). RecoveryWorker honestly reports 0 repairs, NOT 1
+        // — but the targeted PushFullSync client refresh below is still published unconditionally
+        // (DcBackfiller always publishes it after a backfill run, independent of whether the guard
+        // accepted anything), so a returning DC's connected SDK clients still get refreshed even on
+        // a "nothing changed" backfill.
+        Assert.Equal(0, backfilled);
 
         var returnCommands = _producer.Published
             .Skip(beforeReturn)

@@ -127,6 +127,45 @@ public class RecoveryWorkerTests
         Assert.Equal(1, backfilled);
     }
 
+    // ----- #105: a genuinely guard-rejected-all backfill (accepted 0, NOT Skipped) is not a repair -----
+
+    [Fact]
+    public async Task ReturnedDc_BackfillRanButGuardAcceptedZero_IsNotCounted()
+    {
+        // #105: DcBackfiller.BackfillDcAsync now returns the ACCEPTED count, not the attempted
+        // count. A DC that ran a full backfill but had every write guard-rejected (its Redis
+        // already matched the source of truth for every flag) returns 0 — distinct from
+        // IDcBackfiller.Skipped (coalesced), but still not a genuine repair.
+        _backfiller
+            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(0);
+
+        SetLiveSet("east");
+        var sut = CreateSut();
+
+        var backfilled = await sut.RunOnceAsync();
+
+        Assert.Equal(0, backfilled);
+    }
+
+    [Fact]
+    public async Task MixOfAcceptedZeroAndGenuinelyRepairedDcs_CountsOnlyTheGenuinelyRepairedOne()
+    {
+        _backfiller
+            .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(0); // ran, but guard accepted nothing
+        _backfiller
+            .Setup(b => b.BackfillDcAsync("west", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(2); // genuinely repaired 2 flags
+
+        SetLiveSet("east", "west");
+        var sut = CreateSut();
+
+        var backfilled = await sut.RunOnceAsync();
+
+        Assert.Equal(1, backfilled);
+    }
+
     // ----- #92: composite-cache guard hoisted to once per tick -----
 
     [Fact]
