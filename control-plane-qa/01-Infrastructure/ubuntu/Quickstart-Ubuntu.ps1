@@ -15,22 +15,38 @@
 
     Phases (in order):
       1. ensure-pwsh        — verify PowerShell 7+ is active on Linux
-      2. system-prereqs     — install git via apt                     [root]
+      2. system-prereqs     — install git via apt        [root only if missing]
       3. dev-tools          — Docker Engine, Minikube, kubectl, k9s (optional)
       3b. install-k6        — optional Grafana k6 install for cp09-pod-heartbeats
       4. repo-setup         — clone repo, checkout control-plane, configure deployment.env
       4b. collect-creds     — prompt for registry credentials early (so you can walk away)
       5. build-images       — build FeatBit images and push to localhost:5000  (~10-15 min)
-      6. proxy-first-run    — first run of Setup-FeatBitProxy.ps1     [root]
+      6. proxy-first-run    — pre-pull the proxy container image       [no sudo]
       7. deploy-clusters    — Deploy-FeatBitClusters.ps1 Advanced + MongoDB   (~20 min)
       7b. verify-pull-backoff — assert no ImagePullBackOff in west/east clusters
-      8. proxy-second-run   — second run of Setup-FeatBitProxy.ps1    [root]
+      8. proxy-second-run   — start rootless containerized proxy       [no sudo]
       9. port-forwards      — instructions + launch Start-PortForwards.ps1
      10. mongo-replica-set  — Initialize-MongoDBReplicaSet.ps1
 
-    Run the wizard as your normal user (NOT sudo). Phases that need root
-    (apt install, nginx, /etc/hosts) call sudo themselves. Minikube's docker
-    driver refuses to run as root, so the wizard refuses too.
+    Run the wizard as your normal user (NOT sudo). Minikube's docker driver
+    refuses to run as root, so the wizard refuses too. Like `vagrant up`, it is
+    designed to "just work" as a single command:
+
+      - The reverse proxy is a rootless Docker container (no system nginx, no
+        /etc/nginx, no /etc/hosts, no systemd, no port-80 root bind). It reuses
+        the cluster port-forwards on 127.0.0.1 and routes via *.sslip.io
+        wildcard DNS, so the proxy phase needs NO sudo.
+      - Cluster build / deploy / port-forwards run as your normal user.
+      - The ONLY steps that can need root are first-time prerequisite installs
+        (git, docker, minikube, kubectl). Those acquire sudo on demand — a
+        single prompt, zero prompts with passwordless sudo / root, or a
+        fast-fail with guidance — and only when a tool is actually missing.
+
+    On a machine that already has the prerequisites, the entire run uses zero
+    sudo. For fully unattended / CI use on a fresh machine, enable passwordless
+    sudo once so even prerequisite installs need no prompt:
+        echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER
+        sudo chmod 440 /etc/sudoers.d/$USER
 
 .PARAMETER InstallK6
     Installs Grafana k6 as an optional prerequisite; required for full
@@ -174,6 +190,11 @@ $k6Helper = Join-Path $script:SiblingDir "Install-K6Prerequisite.ps1"
 if (-not (Test-Path $k6Helper)) { throw "Install-K6Prerequisite.ps1 not found at $k6Helper" }
 . $k6Helper
 
+# Shared privilege/sudo-session helpers — acquire root once, run the rest unattended.
+$privHelper = Join-Path $script:SiblingDir "Common-Privilege.ps1"
+if (-not (Test-Path $privHelper)) { throw "Common-Privilege.ps1 not found at $privHelper" }
+. $privHelper
+
 # ── Pause helpers ─────────────────────────────────────────────────────────────
 
 function Wait-UserConfirm([string]$Prompt = "Press Enter to continue...") {
@@ -243,11 +264,12 @@ function Invoke-SystemPrereqs([PSCustomObject]$State) {
     if ($gitInstalled) {
         Write-Success "Git is already installed ($((git --version) -replace 'git version ', ''))"
     } else {
-        Write-Info "Installing git via sudo apt-get..."
+        Write-Info "Installing git via apt-get..."
         if ($PSCmdlet.ShouldProcess("git", "sudo apt-get install")) {
-            & sudo apt-get update
-            if ($LASTEXITCODE -ne 0) { throw "sudo apt-get update failed" }
-            & sudo apt-get install -y git
+            if (-not (Get-FbSudoMode)) { [void](Initialize-FbSudoSession -Required -Purpose "installing git via apt") }
+            & sudo -n apt-get update
+            if ($LASTEXITCODE -ne 0) { throw "apt-get update failed" }
+            & sudo -n apt-get install -y git
             if ($LASTEXITCODE -ne 0) { throw "git installation failed" }
         }
         Write-Success "Git installed"
@@ -271,11 +293,17 @@ function Invoke-DevTools([PSCustomObject]$State) {
         if ($k9s) {
             Write-Success "k9s is already installed"
         } elseif (Get-Command snap -ErrorAction SilentlyContinue) {
-            Write-Info "Installing k9s via sudo snap (optional, useful for troubleshooting)..."
-            if ($PSCmdlet.ShouldProcess("k9s", "sudo snap install")) {
-                & sudo snap install k9s
-                if ($LASTEXITCODE -eq 0) { Write-Success "k9s installed" }
-                else { Write-Warn "sudo snap install k9s exited $LASTEXITCODE — skipping" }
+            # k9s is optional. Only attempt it if root is already available
+            # (primed earlier / passwordless / root) so it never adds a prompt.
+            if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') {
+                Write-Info "Installing k9s via snap (optional, useful for troubleshooting)..."
+                if ($PSCmdlet.ShouldProcess("k9s", "sudo snap install")) {
+                    & sudo -n snap install k9s
+                    if ($LASTEXITCODE -eq 0) { Write-Success "k9s installed" }
+                    else { Write-Warn "snap install k9s exited $LASTEXITCODE — skipping" }
+                }
+            } else {
+                Write-Warn "Skipping optional k9s (no sudo session). Install later: sudo snap install k9s"
             }
         } else {
             Write-Warn "snap not available — skipping k9s. See https://k9scli.io/ for install options."
@@ -333,14 +361,15 @@ function Invoke-RepoSetup([PSCustomObject]$State) {
     }
 
     $qaDir  = Join-Path $repoRoot "control-plane-qa"
-    $envDst = Join-Path $qaDir "deployment.env"
-    $envEx  = Join-Path $qaDir "deployment.env.example"
+    $envDir = Join-Path $qaDir "01-Infrastructure"
+    $envDst = Join-Path $envDir "deployment.env"
+    $envEx  = Join-Path $envDir "deployment.env.example"
     if (-not (Test-Path $envDst)) {
         if (Test-Path $envEx) {
             Copy-Item $envEx $envDst
             Write-Success "Created deployment.env from example"
         } else {
-            Write-Warn "deployment.env.example not found — create deployment.env manually in $qaDir"
+            Write-Warn "deployment.env.example not found — create deployment.env manually in $envDir"
         }
     } else {
         Write-Success "deployment.env already exists"
@@ -424,34 +453,29 @@ function Invoke-BuildImages([PSCustomObject]$State) {
 }
 
 function Invoke-ProxyFirstRun([PSCustomObject]$State) {
-    Write-Step "Phase 6 — Nginx Proxy First Run"
+    Write-Step "Phase 6 — Reverse Proxy (pre-pull image)"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh (first run)."
-    Write-Warn "Some failures on the first run are expected — that is normal."
-    Write-Info "The proxy will be fully configured after the second run (Phase 8)."
+    Write-Info "FeatBit uses a rootless, containerized nginx proxy on Linux — no"
+    Write-Info "system nginx, no /etc/nginx, no /etc/hosts, no systemd, no sudo."
+    Write-Info "Pre-pulling the image now so the proxy starts fast after deploy."
     Write-Info ""
 
-    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
-    if (-not (Test-Path $proxyScript)) { throw "Setup-FeatBitProxy.ps1 not found at $proxyScript" }
-
-    if ($PSCmdlet.ShouldProcess("nginx proxy", "First run setup")) {
-        & sudo pwsh -File $proxyScript
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Setup-FeatBitProxy.ps1 exited with code $LASTEXITCODE (expected on first run)"
-        }
+    if ($PSCmdlet.ShouldProcess("nginx image", "docker pull")) {
+        & docker pull nginx:1.27-alpine *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "Could not pre-pull nginx image (non-fatal; it will pull on start)." }
     }
 
     Complete-Phase $State "proxy-first-run"
-    Write-Success "Proxy first run complete"
+    Write-Success "Proxy image ready."
 }
 
 function Repair-ClusterNetwork {
     # Defensive: Initialize-LocalRegistry.ps1 historically created featbit-cluster-network
     # without --subnet, causing Docker to auto-assign one (e.g. 172.18.0.0/16).
-    # Deploy-FeatBitClusters.ps1 hard-codes 172.19.0.10 / 172.19.0.20 for the clusters,
+    # Deploy-FeatBitClusters.ps1 hard-codes 172.31.0.10 / 172.31.0.20 for the clusters,
     # so an auto-assigned subnet breaks cluster attachment. Detect & fix before deploying.
     $name       = "featbit-cluster-network"
-    $wantSubnet = "172.19.0.0/16"
+    $wantSubnet = "172.31.0.0/16"
 
     $exists = & docker network ls --filter "name=^$name$" --format "{{.Name}}" 2>$null
     if (-not $exists) {
@@ -574,26 +598,42 @@ function Invoke-VerifyPullBackoff([PSCustomObject]$State) {
 }
 
 function Invoke-ProxySecondRun([PSCustomObject]$State) {
-    Write-Step "Phase 8 — Nginx Proxy Second Run"
+    Write-Step "Phase 8 — Reverse Proxy (start container)"
 
-    Write-Info "Running Setup-FeatBitProxy.ps1 via sudo pwsh a second time to apply"
-    Write-Info "the cluster endpoints that were created in the previous phase."
+    $base = "127.0.0.1.sslip.io"
+    $containerProxy = Join-Path $script:SiblingDir "Start-FeatBitProxyContainer.ps1"
+    if (-not (Test-Path $containerProxy)) { throw "Start-FeatBitProxyContainer.ps1 not found at $containerProxy" }
+
+    Write-Info "Starting the FeatBit reverse proxy as a rootless Docker container."
+    Write-Info "No sudo, no /etc/nginx, no /etc/hosts — routes via *.$base wildcard DNS"
+    Write-Info "to the cluster port-forwards on 127.0.0.1."
     Write-Info ""
 
-    $proxyScript = Join-Path $script:SiblingDir "Setup-FeatBitProxy.ps1"
-    if ($PSCmdlet.ShouldProcess("nginx proxy", "Second run setup")) {
-        & sudo pwsh -File $proxyScript
-        if ($LASTEXITCODE -ne 0) { throw "Setup-FeatBitProxy.ps1 failed on second run" }
+    if ($PSCmdlet.ShouldProcess("nginx proxy", "Start container")) {
+        & pwsh -File $containerProxy -BaseDomain $base
+        if ($LASTEXITCODE -ne 0) { throw "Start-FeatBitProxyContainer.ps1 failed" }
+
+        # Point each cluster's UI at the proxied endpoints (kubectl as you, no sudo).
+        foreach ($c in @(@{ ctx = 'west'; sfx = 'west' }, @{ ctx = 'east'; sfx = 'east' })) {
+            & kubectl --context $c.ctx -n featbit set env deployment/ui `
+                "API_URL=http://featbit-api-$($c.sfx).$base" `
+                "EVALUATION_URL=http://featbit-eval-$($c.sfx).$base" `
+                "DISPLAY_API_URL=http://featbit.$base" `
+                "DISPLAY_EVALUATION_URL=http://featbit.$base" *> $null
+            if ($LASTEXITCODE -ne 0) { Write-Warn "Could not update $($c.ctx) UI endpoints (non-fatal)." }
+        }
     }
 
     Complete-Phase $State "proxy-second-run"
-    Write-Success "Proxy fully configured"
+    Write-Success "Reverse proxy running (containerized, rootless)."
 }
 
 function Stop-StalePortForwards {
     # Clears any leftover Start-PortForwards.ps1 supervisors and their kubectl
-    # port-forward workers. They're usually root-owned (Setup-FeatBitProxy.ps1
-    # starts some under sudo), so we use sudo pkill.
+    # port-forward workers. These now run as the normal user (the proxy no longer
+    # starts anything under sudo), so a plain pkill suffices; we additionally try
+    # sudo -n only when a root session already exists, to sweep up any legacy
+    # root-owned workers from older runs without ever prompting.
     # Parents must die before children, otherwise the supervisor respawns them.
     $svcCount = @(& pgrep -f 'Start-PortForwards\.ps1' 2>$null).Count
     $pfCount  = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
@@ -605,15 +645,17 @@ function Stop-StalePortForwards {
 
     Write-Info "Cleaning up stale port-forward processes..."
     if ($svcCount -gt 0) {
-        Write-Info "  Stopping $svcCount Start-PortForwards supervisor(s) (sudo)..."
-        & sudo pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null
+        Write-Info "  Stopping $svcCount Start-PortForwards supervisor(s)..."
+        & pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null
+        if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') { & sudo -n pkill -f 'Start-PortForwards\.ps1' 2>$null | Out-Null }
         Start-Sleep -Seconds 2
     }
 
     $pfCount = @(& pgrep -f 'kubectl.*port-forward' 2>$null).Count
     if ($pfCount -gt 0) {
-        Write-Info "  Stopping $pfCount kubectl port-forward worker(s) (sudo)..."
-        & sudo pkill -f 'kubectl.*port-forward' 2>$null | Out-Null
+        Write-Info "  Stopping $pfCount kubectl port-forward worker(s)..."
+        & pkill -f 'kubectl.*port-forward' 2>$null | Out-Null
+        if ((Get-FbSudoMode) -and (Get-FbSudoMode) -ne 'unavailable') { & sudo -n pkill -f 'kubectl.*port-forward' 2>$null | Out-Null }
         Start-Sleep -Seconds 1
     }
 
@@ -674,11 +716,13 @@ function Invoke-Done {
     Write-Host "  ║          FeatBit Pro is ready!                          ║" -ForegroundColor Green
     Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Access URLs (port forwards must be running):" -ForegroundColor White
-    Write-Host "    West cluster UI  →  http://localhost:8081" -ForegroundColor Cyan
-    Write-Host "    East cluster UI  →  http://localhost:8082" -ForegroundColor Cyan
-    Write-Host "    West API         →  http://localhost:15000" -ForegroundColor Cyan
-    Write-Host "    East API         →  http://localhost:15001" -ForegroundColor Cyan
+    Write-Host "  Access URLs via the containerized proxy (port forwards must be running):" -ForegroundColor White
+    Write-Host "    Load-balanced UI →  http://featbit.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    West cluster UI  →  http://featbit-west.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    East cluster UI  →  http://featbit-east.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    West API         →  http://featbit-api-west.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    East API         →  http://featbit-api-east.127.0.0.1.sslip.io" -ForegroundColor Cyan
+    Write-Host "    (direct, no proxy:  http://localhost:8081 / 8082 UI, 15000 / 15001 API)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Default credentials:" -ForegroundColor White
     Write-Host "    Email:    test@featbit.com" -ForegroundColor Gray
@@ -720,6 +764,14 @@ $allPhases = @(
     @{ Key = "port-forwards";     Fn = { Invoke-PortForwards $state } }
     @{ Key = "mongo-replica-set"; Fn = { Invoke-MongoReplicaSet $state } }
 )
+
+# No privilege preflight: the reverse proxy is now a rootless Docker container
+# (no /etc/nginx, /etc/hosts, systemd or port-80 root bind), and cluster
+# build/deploy/port-forwards run as the normal user. The only steps that can
+# need root are first-time prerequisite installs (git, docker, minikube,
+# kubectl), which acquire sudo on demand — a single prompt, passwordless sudo,
+# or fast-fail — only when something is actually missing. On a machine that
+# already has the prerequisites, the whole run uses zero sudo.
 
 $allComplete = $true
 foreach ($phase in $allPhases) {

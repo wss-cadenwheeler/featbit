@@ -49,10 +49,14 @@ public sealed class HeartbeatFreshnessHealthCheck : IHealthCheck
 
     /// <summary>
     /// Default staleness threshold (seconds) when <c>ControlPlane:HeartbeatStalenessThresholdSeconds</c>
-    /// is unset / non-positive. 180s = 3× the default 60s heartbeat interval, i.e. several missed
-    /// heartbeats — long enough to avoid flapping on a single transient publish failure.
+    /// is unset / non-positive. 15s = 3× <see cref="HeartbeatService.DefaultHeartbeatIntervalSeconds"/>
+    /// (5s), i.e. a few missed heartbeats — long enough to avoid flapping on a single transient
+    /// publish failure — and coincides with the control plane's default
+    /// <c>ControlPlane:LeaseTtlSeconds</c> (15s), so this pod's readiness fence trips around the same
+    /// time its DC lease would expire. #104: previously 180s (36× the interval, derived against the
+    /// pre-#99 60s default), which left a partitioned pod serving ~165s longer than intended.
     /// </summary>
-    public const int DefaultStalenessThresholdSeconds = 180;
+    public const int DefaultStalenessThresholdSeconds = 15;
 
     private static readonly Meter Meter = new(MeterName);
 

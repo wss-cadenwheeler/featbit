@@ -6,8 +6,10 @@ using Application.Segments;
 using Application.Services;
 using Api.Infrastructure.Caches;
 using Domain.AuditLogs;
+using Domain.ControlPlane;
 using Domain.FeatureFlags;
 using Domain.Messages;
+using Domain.Segments;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -31,9 +33,12 @@ namespace Api.Application.ControlPlane;
 ///
 /// Segments (S3 / #17): committing a segment additionally replays the affected-flags propagation
 /// that <see cref="SegmentChangeMessageHandler"/>'s BestEffort branch performs inline at handle
-/// time. Because the staged pending change does NOT carry the original change notification, the
-/// coordinator reconstructs an <see cref="OnSegmentChange"/> (Operation = Update,
-/// IsTargetingChange = true) from the committed segment so
+/// time. The staged pending change now carries the attribution context captured at stage time
+/// (<see cref="PendingSegmentChange.OperatorId"/> / <see cref="PendingSegmentChange.Operation"/> /
+/// <see cref="PendingSegmentChange.IsTargetingChange"/>, #73), so the coordinator reconstructs an
+/// <see cref="OnSegmentChange"/> from the committed segment using that persisted attribution
+/// (legacy pending rows staged before #73 default to Operator = Guid.Empty, Operation = Update,
+/// IsTargetingChange = true — today's prior hardcoded behavior) so
 /// <see cref="ISegmentMessageService.GetAffectedFlagsAsync"/> recomputes the affected flags, then
 /// (if any) calls <see cref="IFeatureFlagAppService.OnSegmentUpdatedAsync"/> and finally
 /// <see cref="ISegmentMessageService.PublishSegmentChangeMessage"/> per env — exactly the
@@ -42,10 +47,15 @@ namespace Api.Application.ControlPlane;
 /// Idempotent + crash-safe: re-running a tick is a no-op once a flag/segment is committed — the
 /// commit broadcast and the version-guarded promote both no-op when already applied.
 ///
-/// TODO: single-instance/leader election if the control plane runs multiple replicas. Today
-/// multiple replicas would each run this loop; the commit + version-guarded promote are idempotent
-/// so this is safe (at worst duplicate publishes), but a leader election would avoid the redundant
-/// work. Out of scope for C3b-2; tracked as a follow-up.
+/// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
+/// backed by <see cref="RedisLeaderElector"/>) — non-leaders skip the tick entirely. Idempotency
+/// guards (see above) still make concurrent execution safe belt-and-braces during a failover
+/// overlap window, so losing leadership mid-tick is harmless.
+///
+/// Metrics (all on <see cref="MeterName"/>): <see cref="CommitsCounterName"/>,
+/// <see cref="TimeToCommitHistogramName"/>, <see cref="PendingBacklogGaugeName"/>,
+/// <see cref="EvictedCommitCounterName"/>, and (#84) <see cref="AppliedWatermarkLagGaugeName"/> —
+/// each live DC's lag behind the most-advanced live DC's applied watermark, per env.
 /// </summary>
 public sealed class CommitCoordinatorWorker : BackgroundService
 {
@@ -116,9 +126,6 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     private static volatile int _pendingFlagBacklog;
     private static volatile int _pendingSegmentBacklog;
 
-    // NOTE (#46): per-DC "applied watermark / lag" metrics are intentionally NOT emitted here. They
-    // depend on the eval-server's applied-watermark, whose source is still inaccurate (tracked in
-    // #46); adding them now would publish misleading data. Revisit once #46 lands.
     private static readonly ObservableGauge<long> PendingBacklogGauge = Meter.CreateObservableGauge(
         PendingBacklogGaugeName,
         ObservePendingBacklog,
@@ -133,6 +140,93 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         yield return new Measurement<long>(
             _pendingSegmentBacklog,
             new KeyValuePair<string, object?>("resource_type", "segment"));
+    }
+
+    /// <summary>
+    /// #84 (sub-issue of #69): observable gauge reporting each live DC's lag, in milliseconds, behind
+    /// the most-advanced live DC's applied watermark, per env. Tagged <c>dc_id</c>, <c>env_id</c>.
+    /// Backed by a snapshot refreshed at the start of each tick (see
+    /// <see cref="RefreshAppliedWatermarkLagSnapshot"/>) from <see cref="ILeaseStore.GetLiveSetAsync"/>
+    /// — self-contained from the live set the coordinator already loads every tick, independent of
+    /// pending flags/segments and of the commit decision.
+    /// </summary>
+    public const string AppliedWatermarkLagGaugeName = "control_plane.consistency.applied_watermark_lag_ms";
+
+    /// <summary>
+    /// One (dc_id, env_id, lag_ms) measurement captured by <see cref="RefreshAppliedWatermarkLagSnapshot"/>.
+    /// </summary>
+    private readonly record struct AppliedWatermarkLagMeasurement(string DcId, Guid EnvId, long LagMs);
+
+    // Observable applied-watermark-lag gauge: reports the per-(dc, env) lag captured at the start of
+    // the most recent tick. Static + volatile for the same reasons as the backlog fields above.
+    private static volatile IReadOnlyList<AppliedWatermarkLagMeasurement> _appliedWatermarkLagSnapshot =
+        Array.Empty<AppliedWatermarkLagMeasurement>();
+
+    private static readonly ObservableGauge<long> AppliedWatermarkLagGauge = Meter.CreateObservableGauge(
+        AppliedWatermarkLagGaugeName,
+        ObserveAppliedWatermarkLag,
+        unit: "ms",
+        description:
+        "Per-DC lag (ms) behind the most-advanced live DC's applied watermark, per env " +
+        "(frontier(env) - dc's watermark(env)).");
+
+    private static IEnumerable<Measurement<long>> ObserveAppliedWatermarkLag()
+    {
+        foreach (var measurement in _appliedWatermarkLagSnapshot)
+        {
+            yield return new Measurement<long>(
+                measurement.LagMs,
+                new KeyValuePair<string, object?>("dc_id", measurement.DcId),
+                new KeyValuePair<string, object?>("env_id", measurement.EnvId.ToString()));
+        }
+    }
+
+    /// <summary>
+    /// #84: recompute the per-(dc, env) applied-watermark-lag snapshot from this tick's live set.
+    /// There is no materialized per-env committed frontier in the control plane, and none is
+    /// needed: per env, <c>frontier(env) = max over live DCs of lease.AppliedWatermarks[env]</c>,
+    /// and <c>lag(dc, env) = frontier(env) - lease.AppliedWatermarks[env]</c> — the most-advanced DC
+    /// reads 0, stragglers read their delay in ms (watermarks are unix-ms on the same clock as
+    /// pending versions). Only (dc, env) pairs where that DC actually has a watermark entry are
+    /// reported — a DC with no connections/data for an env doesn't serve it, and inventing
+    /// <c>lag = frontier - 0</c> would be misleading. An empty live set, or a live set where no DC
+    /// reports any watermark, yields an empty snapshot (the gauge then reports no measurements).
+    /// </summary>
+    private static void RefreshAppliedWatermarkLagSnapshot(IReadOnlyList<DcLease> liveSet)
+    {
+        var frontierByEnv = new Dictionary<Guid, long>();
+        foreach (var lease in liveSet)
+        {
+            if (string.IsNullOrEmpty(lease.DcId) || lease.AppliedWatermarks is null)
+            {
+                continue;
+            }
+
+            foreach (var (envId, watermark) in lease.AppliedWatermarks)
+            {
+                if (!frontierByEnv.TryGetValue(envId, out var currentFrontier) || watermark > currentFrontier)
+                {
+                    frontierByEnv[envId] = watermark;
+                }
+            }
+        }
+
+        var snapshot = new List<AppliedWatermarkLagMeasurement>();
+        foreach (var lease in liveSet)
+        {
+            if (string.IsNullOrEmpty(lease.DcId) || lease.AppliedWatermarks is null)
+            {
+                continue;
+            }
+
+            foreach (var (envId, watermark) in lease.AppliedWatermarks)
+            {
+                var lagMs = frontierByEnv[envId] - watermark;
+                snapshot.Add(new AppliedWatermarkLagMeasurement(lease.DcId, envId, lagMs));
+            }
+        }
+
+        _appliedWatermarkLagSnapshot = snapshot;
     }
 
     /// <summary>
@@ -157,6 +251,7 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ICacheService _compositeCache;
     private readonly IMessageProducer _messageProducer;
+    private readonly ILeaderElection _leaderElection;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<CommitCoordinatorWorker> _logger;
@@ -165,12 +260,14 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         IServiceScopeFactory scopeFactory,
         [FromKeyedServices("compositeCache")] ICacheService compositeCache,
         IMessageProducer messageProducer,
+        ILeaderElection leaderElection,
         IConfiguration configuration,
         ILogger<CommitCoordinatorWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _compositeCache = compositeCache;
         _messageProducer = messageProducer;
+        _leaderElection = leaderElection;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -214,9 +311,10 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     }
 
     /// <summary>
-    /// Performs a single coordinator tick and returns the number of flags AND segments committed.
-    /// Exposed so it can be invoked directly (e.g. by integration tests) without waiting on the
-    /// periodic timer.
+    /// Performs a single coordinator tick and returns the number of flags AND segments committed —
+    /// <c>0</c> if this instance is not the elected leader (see #71b gate below), or if nothing was
+    /// pending, or if no pending change was eligible to commit this tick. Exposed so it can be
+    /// invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     ///
     /// For each pending flag whose pending version is newer than its committed version, if every
     /// currently live DC has that version staged, the flag is committed across all DCs, its pending
@@ -227,6 +325,26 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
+        // expected steady-state on every non-leader replica, not an error).
+        //
+        // #105: also ZERO the static gauge fields here. The ObservableGauge callbacks
+        // (ObservePendingBacklog / ObserveAppliedWatermarkLag) read these fields on every export
+        // with no leader filter of their own, and they are refreshed only AFTER this gate — so a
+        // replica that loses leadership would otherwise keep exporting its stale last-leader
+        // snapshot indefinitely. Latent today (no exporter wired up), but activates the moment
+        // metrics are exported from more than one replica.
+        if (!_leaderElection.IsLeader)
+        {
+            _logger.LogDebug(
+                "Commit coordinator: instance {InstanceId} is not leader; skipping tick.",
+                _leaderElection.InstanceId);
+            _pendingFlagBacklog = 0;
+            _pendingSegmentBacklog = 0;
+            _appliedWatermarkLagSnapshot = Array.Empty<AppliedWatermarkLagMeasurement>();
+            return 0;
+        }
+
         // IFeatureFlagService is a scoped (per-request) service in DI; resolve it inside a scope so
         // the singleton BackgroundService does not capture a scoped/disposed instance. The segment
         // services are resolved from the SAME scope, matching the flag path.
@@ -245,18 +363,25 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         _pendingFlagBacklog = pending.Count;
         _pendingSegmentBacklog = pendingSegments.Count;
 
-        if (pending.Count == 0 && pendingSegments.Count == 0)
-        {
-            return 0;
-        }
-
-        // Live DCs = distinct DcIds that currently hold at least one unexpired lease.
+        // Live DCs = distinct DcIds that currently hold at least one unexpired lease. Loaded
+        // unconditionally (even when nothing is pending) because the #84 applied-watermark-lag
+        // gauge is refreshed from this same live set every tick, independent of pending work.
         var liveSet = await leaseStore.GetLiveSetAsync(DateTimeOffset.UtcNow);
         var liveDcs = liveSet
             .Select(lease => lease.DcId)
             .Where(id => !string.IsNullOrEmpty(id))
             .Distinct()
             .ToList();
+
+        // #84: refresh the observable applied-watermark-lag gauge snapshot from this tick's live
+        // set. Side-effect-only; independent of pending flags/segments and of the commit decision
+        // below.
+        RefreshAppliedWatermarkLagSnapshot(liveSet);
+
+        if (pending.Count == 0 && pendingSegments.Count == 0)
+        {
+            return 0;
+        }
 
         if (liveDcs.Count == 0)
         {
@@ -414,18 +539,24 @@ public sealed class CommitCoordinatorWorker : BackgroundService
                 }
 
                 // Replicate SegmentChangeMessageHandler's BestEffort affected-flags propagation,
-                // deferred to commit time. The staged pending change does not carry the original
-                // notification, so reconstruct one from the (now committed) segment as an Update with
-                // IsTargetingChange = true, so GetAffectedFlagsAsync recomputes the affected flags.
+                // deferred to commit time. Reconstruct the notification from the (now committed)
+                // segment using the attribution persisted on the pending change at stage time
+                // (#73) instead of hardcoding it, so GetAffectedFlagsAsync recomputes the affected
+                // flags with the real Operation/IsTargetingChange, and OnSegmentUpdatedAsync (below)
+                // stamps the real operator. Legacy pending rows staged before #73 deserialize with
+                // OperatorId = Guid.Empty / Operation = Update / IsTargetingChange = true, which is
+                // exactly the coordinator's prior hardcoded behavior.
                 var committedSegment = await segmentService.GetCommittedAsync(segment.Id);
                 var notification = new OnSegmentChange(
                     committedSegment,
-                    Operations.Update,
-                    // DataChange drives only the audit log (not exercised on this propagation path),
-                    // so an empty change is sufficient here.
+                    pendingChange.Operation,
+                    // DataChange is intentionally empty: the only consumer on this path
+                    // (OnSegmentUpdatedAsync) recomputes its own before/after locally, and the
+                    // audit log / webhook publishes for the segment itself already happened at
+                    // stage time with the real notification.
                     new DataChange(),
-                    operatorId: Guid.Empty,
-                    isTargetingChange: true);
+                    operatorId: pendingChange.OperatorId,
+                    isTargetingChange: pendingChange.IsTargetingChange);
 
                 foreach (var envId in envIds)
                 {

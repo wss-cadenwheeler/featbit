@@ -2,12 +2,12 @@
 #
 # Replicates flag and segment change messages from this cluster's local main
 # broker (kafka:9092) to the OTHER cluster's aggregate broker via its NodePort
-# on the shared bridge network (172.19.0.x:30094).
+# on the shared bridge network (172.31.0.x:30094).
 #
 # REMOTE_BOOTSTRAP_SERVERS is a placeholder patched by Deploy-FeatBitClusters.ps1
 # after the shared bridge network node IPs are known:
-#   West cluster:  REMOTE_BOOTSTRAP_SERVERS = 172.19.0.20:30094  (→ east)
-#   East cluster:  REMOTE_BOOTSTRAP_SERVERS = 172.19.0.10:30094  (→ west)
+#   West cluster:  REMOTE_BOOTSTRAP_SERVERS = 172.31.0.20:30094  (→ east)
+#   East cluster:  REMOTE_BOOTSTRAP_SERVERS = 172.31.0.10:30094  (→ west)
 #
 # The MirrorMaker consumer group ID is randomized so multiple clusters can
 # replicate from the same source topic without interfering with each other.
@@ -69,12 +69,12 @@ spec:
                 --num.streams 1
           resources:
             requests:
-              memory: 256Mi
-              cpu: 100m
+              memory: 192Mi
+              cpu: 50m
               ephemeral-storage: 512Mi
             limits:
-              memory: 512Mi
-              cpu: 250m
+              memory: 320Mi
+              cpu: 750m
               ephemeral-storage: 1Gi
       restartPolicy: Always
 status: {}

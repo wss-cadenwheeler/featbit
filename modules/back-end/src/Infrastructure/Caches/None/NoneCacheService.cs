@@ -12,9 +12,13 @@ public class NoneCacheService : ICacheService
 {
     public Task UpsertFlagAsync(FeatureFlag flag) => Task.CompletedTask;
 
-    public Task StageFlagAsync(FeatureFlag flag, long ts) => Task.CompletedTask;
+    // #105: None cache writes are no-ops that never fail, so there is nothing to reject; report
+    // "accepted" (true) rather than inventing a guard result that doesn't apply here.
+    public Task<bool> UpsertFlagIfNewerAsync(FeatureFlag flag) => Task.FromResult(true);
 
-    public Task CommitFlagAsync(Guid envId, string flagId, long ts) => Task.CompletedTask;
+    public Task<bool> StageFlagAsync(FeatureFlag flag, long ts) => Task.FromResult(true);
+
+    public Task<bool> CommitFlagAsync(Guid envId, string flagId, long ts) => Task.FromResult(true);
 
     public Task<bool> HasStagedFlagAsync(Guid id, long ts) => Task.FromResult(false);
 
@@ -22,9 +26,11 @@ public class NoneCacheService : ICacheService
 
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) => Task.CompletedTask;
 
-    public Task StageSegmentAsync(Segment segment, long ts) => Task.CompletedTask;
+    public Task<bool> UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment) => Task.FromResult(true);
 
-    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) => Task.CompletedTask;
+    public Task<bool> StageSegmentAsync(Segment segment, long ts) => Task.FromResult(true);
+
+    public Task<bool> CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) => Task.FromResult(true);
 
     public Task<bool> HasStagedSegmentAsync(Guid id, long ts) => Task.FromResult(false);
 

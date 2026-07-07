@@ -31,5 +31,10 @@ public class FeatureFlagConfiguration : IEntityTypeConfiguration<FeatureFlag>
         // other complex properties above (Variations/Rules/Fallthrough) are persisted.
         builder.Property(x => x.CommittedVersion).IsRequired();
         builder.Property(x => x.Pending).HasColumnType("jsonb");
+
+        // Postgres xmin as an optimistic concurrency token (#72): changes on every row
+        // update, so a racing writer makes SaveChanges throw DbUpdateConcurrencyException
+        // instead of silently overwriting. System column - no DDL, Mongo unaffected.
+        builder.Property<uint>("xmin").IsRowVersion();
     }
 }

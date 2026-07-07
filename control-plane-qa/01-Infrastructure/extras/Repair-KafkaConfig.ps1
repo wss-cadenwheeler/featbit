@@ -15,18 +15,18 @@
       - kafka-mirrormaker-remote produces to the OTHER cluster's kafka-aggregate.
 
     Cross-cluster topology (fixed IPs on the featbit-cluster-network bridge):
-      west node: 172.19.0.10   east node: 172.19.0.20
+      west node: 172.31.0.10   east node: 172.31.0.20
 
-    west kafka-aggregate  -> advertises 172.19.0.10:30094
-    east kafka-aggregate  -> advertises 172.19.0.20:30094
-    west mirrormaker-remote -> produces to east at 172.19.0.20:30094
-    east mirrormaker-remote -> produces to west at 172.19.0.10:30094
+    west kafka-aggregate  -> advertises 172.31.0.10:30094
+    east kafka-aggregate  -> advertises 172.31.0.20:30094
+    west mirrormaker-remote -> produces to east at 172.31.0.20:30094
+    east mirrormaker-remote -> produces to west at 172.31.0.10:30094
 
 .PARAMETER WestNodeIp
-    Shared bridge network IP of the west Minikube node. Default: 172.19.0.10
+    Shared bridge network IP of the west Minikube node. Default: 172.31.0.10
 
 .PARAMETER EastNodeIp
-    Shared bridge network IP of the east Minikube node. Default: 172.19.0.20
+    Shared bridge network IP of the east Minikube node. Default: 172.31.0.20
 
 .PARAMETER Namespace
     Kubernetes namespace where FeatBit is deployed. Default: featbit
@@ -53,8 +53,8 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$WestNodeIp = "172.19.0.10",
-    [string]$EastNodeIp  = "172.19.0.20",
+    [string]$WestNodeIp = "172.31.0.10",
+    [string]$EastNodeIp  = "172.31.0.20",
     [string]$Namespace   = "featbit"
 )
 
@@ -62,9 +62,11 @@ $ErrorActionPreference = "Stop"
 
 # Load deployment.env overrides if present (WestNodeIp / EastNodeIp are not
 # standard env-file keys, so CLI args always win; this is just for namespace).
-$envFile = Join-Path $PSScriptRoot "deployment.env"
+# deployment.env and Import-DeploymentEnv.ps1 live one level up in 01-Infrastructure/.
+$infraDir = Split-Path $PSScriptRoot -Parent
+$envFile = Join-Path $infraDir "deployment.env"
 if (Test-Path $envFile) {
-    $parsed = & (Join-Path $PSScriptRoot "Import-DeploymentEnv.ps1")
+    $parsed = & (Join-Path $infraDir "Import-DeploymentEnv.ps1")
     if ($parsed.ContainsKey("Namespace") -and -not $PSBoundParameters.ContainsKey("Namespace")) {
         $Namespace = $parsed["Namespace"]
     }

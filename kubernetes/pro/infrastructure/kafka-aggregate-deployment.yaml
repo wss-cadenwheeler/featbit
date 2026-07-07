@@ -47,11 +47,11 @@ spec:
             allowPrivilegeEscalation: false
           resources:
             requests:
-              memory: 256Mi
-              cpu: 100m
+              memory: 64Mi
+              cpu: 25m
               ephemeral-storage: 1Gi
             limits:
-              memory: 512Mi
+              memory: 128Mi
               cpu: 200m
               ephemeral-storage: 2Gi
           volumeMounts:
@@ -100,14 +100,19 @@ spec:
               value: "1"
             - name: KAFKA_LOG_CLEANUP_POLICY
               value: compact
+            # Cap the JVM heap so the aggregate broker fits a test-sized
+            # footprint. Default Bitnami heap is -Xmx1024m; SUT topics are
+            # single-partition and low-throughput, so 512m is ample.
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xmx512m -Xms256m"
           resources:
             requests:
-              memory: 1Gi
-              cpu: 500m
+              memory: 768Mi
+              cpu: 100m
               ephemeral-storage: 2Gi
             limits:
-              memory: 2Gi
-              cpu: 500m
+              memory: 1Gi
+              cpu: 1500m
               ephemeral-storage: 4Gi
           volumeMounts:
             - mountPath: /bitnami/kafka

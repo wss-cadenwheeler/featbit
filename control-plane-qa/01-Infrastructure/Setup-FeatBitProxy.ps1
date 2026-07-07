@@ -43,7 +43,12 @@
 .NOTES
     Requires elevated privileges:
     - Windows: run from an Administrator PowerShell session
-    - Linux:   run as root, or as a user with sudo access
+    - Linux:   run as your normal user. The script acquires root ONCE (a single
+               password prompt, passwordless sudo, or already-root) and escalates
+               only the nginx/hosts/systemd commands via `sudo -n`; kubectl runs
+               as you so it uses your kubeconfig. Do NOT prefix with sudo — that
+               makes kubectl use root's kubeconfig. If root is needed but there's
+               no terminal and no passwordless sudo, it fails fast with guidance.
 
     On Linux, nginx is managed as a systemd service and configuration is
     written to /etc/nginx/sites-available/featbit (symlinked into sites-enabled).
@@ -66,6 +71,16 @@ if (-not $script:onWindows -and -not $script:onLinux)
 {
     Write-Host "✗ This script supports Windows and Ubuntu/Debian Linux only." -ForegroundColor Red
     exit 1
+}
+
+# ── Shared privilege/sudo-session helpers (Linux) ───────────────────────────────
+# Provides Initialize-FbSudoSession / Invoke-FbSudo so root is acquired at most
+# once per run and never prompts mid-run. The helper is a no-op on Windows.
+if ($script:onLinux)
+{
+    $privHelper = Join-Path $PSScriptRoot "Common-Privilege.ps1"
+    if (-not (Test-Path $privHelper)) { Write-Host "✗ Common-Privilege.ps1 not found at $privHelper" -ForegroundColor Red; exit 1 }
+    . $privHelper
 }
 
 # ── Console helpers ───────────────────────────────────────────────────────────
@@ -95,6 +110,24 @@ function Write-Fail {
     Write-Host "✗ $Message" -ForegroundColor Red
 }
 
+# Runs a kubectl invocation and checks $LASTEXITCODE afterward. On non-zero
+# exit, Write-Fail's the given message and exits 1 immediately — without this,
+# an early failure (e.g. apply) is masked once a later call (e.g. rollout
+# status) in the same block runs and overwrites $LASTEXITCODE.
+function Invoke-Checked
+{
+    param(
+        [Parameter(Mandatory)][scriptblock]$Command,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+    & $Command
+    if ($LASTEXITCODE -ne 0)
+    {
+        Write-Fail $FailureMessage
+        exit 1
+    }
+}
+
 # ── Privilege helpers ─────────────────────────────────────────────────────────
 
 function Test-Administrator
@@ -117,7 +150,10 @@ function Invoke-Elevated
 
     if ($script:onLinux -and -not (Test-Administrator))
     {
-        & sudo @ArgumentList
+        # Non-interactive (-n): the sudo session was primed once up front by
+        # Initialize-FbSudoSession, so this reuses the cached ticket (or NOPASSWD)
+        # and never stops to prompt mid-run.
+        & sudo -n @ArgumentList
     }
     else
     {
@@ -129,19 +165,25 @@ function Invoke-Elevated
 
 # ── Privilege check ───────────────────────────────────────────────────────────
 
-if (-not (Test-Administrator))
+if ($script:onWindows)
 {
-    if ($script:onWindows)
+    if (-not (Test-Administrator))
     {
         Write-Fail "This script requires an Administrator PowerShell session."
         Write-Info "Re-run from an elevated prompt."
+        exit 1
     }
-    else
-    {
-        Write-Fail "This script requires root or sudo access."
-        Write-Info "Re-run as root, or ensure your account has sudo privileges."
-    }
-    exit 1
+}
+else
+{
+    # Linux: acquire root ONCE up front — interactive prompt (single password),
+    # passwordless sudo, or already-root — and keep the ticket warm for the run.
+    # If root is needed but there's no terminal and no passwordless sudo, fail
+    # fast here with guidance instead of part-applying config. Only the specific
+    # nginx/hosts/systemd commands escalate (Invoke-Elevated -> sudo -n); the
+    # kubectl UI-deploy calls run as the normal user so they use the caller's
+    # kubeconfig rather than root's.
+    [void](Initialize-FbSudoSession -Required -Purpose "nginx config, /etc/hosts, and the nginx reload")
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -306,9 +348,14 @@ else
     Write-Info "Writing nginx config to $sitesAvailable..."
 
     # nginx.conf is a full standalone config (worker_processes/events/http{})
-    # valid for Windows nginx.  For Ubuntu sites-available we need ONLY the
-    # server {} blocks — the system nginx.conf's http {} context already
-    # provides mime.types, default_type, sendfile, etc.
+    # valid for Windows nginx.  For Ubuntu sites-available we keep the
+    # http{}-context blocks the server blocks DEPEND ON — the upstream {}
+    # groups (referenced via proxy_pass http://featbit_ui|api|eval) and the
+    # $cors_origin map {} — alongside the server {} blocks themselves.
+    # Dropping the upstream/map blocks (server-only extraction) makes nginx
+    # treat "featbit_ui" as a DNS name => "host not found in upstream".
+    # The system nginx.conf's http {} already provides mime.types,
+    # default_type, sendfile, etc., so those scalars are left out.
     # Use brace-depth counting so we don't need a full parser.
     $lines = Get-Content $sourceNginxConf
     $serverBlocks = [System.Collections.Generic.List[string]]::new()
@@ -318,7 +365,13 @@ else
 
     foreach ($line in $lines)
     {
-        if (-not $inServer -and $line -match '^\s*server\s*(\{|$)')
+        # Match the opening line of a top-level http{} block we need to keep:
+        # server {}, upstream <name> {}, or map <args> {}. The \b after the
+        # keyword prevents matching the map_hash_bucket_size /
+        # server_names_hash_bucket_size scalar directives. Inner "server
+        # 127.0.0.1:..." lines of an upstream block are skipped because the
+        # match is guarded by -not $inServer (we're already capturing).
+        if (-not $inServer -and $line -match '^\s*(server|upstream|map)\b.*\{')
         {
             $inServer = $true
             $depth = 0
@@ -493,15 +546,15 @@ spec:
 '@
 
 Write-Info "Updating west UI..."
-$westUIYaml | kubectl --context west apply -f - | Out-Null
-kubectl --context west -n featbit rollout restart deployment/ui | Out-Null
-kubectl --context west -n featbit rollout status deployment/ui --timeout=180s | Out-Null
+Invoke-Checked -FailureMessage "west UI apply failed" -Command { $westUIYaml | kubectl --context west apply -f - | Out-Null }
+Invoke-Checked -FailureMessage "west UI rollout restart failed" -Command { kubectl --context west -n featbit rollout restart deployment/ui | Out-Null }
+Invoke-Checked -FailureMessage "west UI rollout not ready" -Command { kubectl --context west -n featbit rollout status deployment/ui --timeout=180s | Out-Null }
 Write-Success "West UI updated."
 
 Write-Info "Updating east UI..."
-$eastUIYaml | kubectl --context east apply -f - | Out-Null
-kubectl --context east -n featbit rollout restart deployment/ui | Out-Null
-kubectl --context east -n featbit rollout status deployment/ui --timeout=180s | Out-Null
+Invoke-Checked -FailureMessage "east UI apply failed" -Command { $eastUIYaml | kubectl --context east apply -f - | Out-Null }
+Invoke-Checked -FailureMessage "east UI rollout restart failed" -Command { kubectl --context east -n featbit rollout restart deployment/ui | Out-Null }
+Invoke-Checked -FailureMessage "east UI rollout not ready" -Command { kubectl --context east -n featbit rollout status deployment/ui --timeout=180s | Out-Null }
 Write-Success "East UI updated."
 
 Write-Info "Waiting for UI pods to restart..."

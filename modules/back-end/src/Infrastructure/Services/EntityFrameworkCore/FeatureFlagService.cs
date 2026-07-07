@@ -144,56 +144,81 @@ public class FeatureFlagService(AppDbContext dbContext)
         return flag;
     }
 
+    // Bounded retry budget for the optimistic-concurrency loops below: a racing writer that
+    // wins the row makes SaveChanges throw DbUpdateConcurrencyException (Postgres xmin token,
+    // #72/#76). Each retry re-reads the fresh row and re-evaluates the version guard, so a
+    // losing racer converges to the same outcome the Mongo provider gets from its version-
+    // filtered UpdateOneAsync/ReplaceOneAsync: no-op (SetPendingAsync) or false (PromotePendingAsync).
+    private const int MaxRetries = 3;
+
     public async Task SetPendingAsync(Guid envId, string key, FeatureFlag pendingValue, long version)
     {
-        // load the committed row (left otherwise untouched)
-        var flag = await GetAsync(envId, key);
-
-        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
-        // than both the already-staged pending version (if any) AND the committed version. An
-        // out-of-order/stale stage carrying a lower version (but still above committed) must not
-        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
-        if (version <= flag.CommittedVersion || (flag.Pending != null && version <= flag.Pending.Version))
+        for (var attempt = 0; ; attempt++)
         {
-            // stale / out-of-order stage — leave the existing pending (or lack of one) intact
-            return;
+            // load the committed row (left otherwise untouched)
+            var flag = await GetAsync(envId, key);
+
+            // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+            // than both the already-staged pending version (if any) AND the committed version. An
+            // out-of-order/stale stage carrying a lower version (but still above committed) must not
+            // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+            if (version <= flag.CommittedVersion || (flag.Pending != null && version <= flag.Pending.Version))
+            {
+                // stale / out-of-order stage — leave the existing pending (or lack of one) intact
+                return;
+            }
+
+            // write ONLY the pending data; committed fields stay as they are
+            flag.SetPending(pendingValue, version);
+
+            try
+            {
+                await UpdateAsync(flag);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxRetries)
+            {
+                // The xmin token (#76) closes the race: a racing writer committed first, so this
+                // SaveChanges affected 0 rows. Detach the stale tracked entity — otherwise the
+                // context's identity map would hand back this same stale instance on the re-read
+                // below — and retry; the guard above re-evaluates against the fresh row.
+                DbContext.Entry(flag).State = EntityState.Detached;
+            }
         }
-
-        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
-        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync staging a
-        // newer pending in that window could be overwritten. The in-memory version check narrows
-        // but does not close it for the EF provider; closing it requires an optimistic-concurrency
-        // token (tracked in #33). The Mongo provider closes it via a version-filtered UpdateOneAsync.
-
-        // write ONLY the pending data; committed fields stay as they are
-        flag.SetPending(pendingValue, version);
-
-        await UpdateAsync(flag);
     }
 
     public async Task<bool> PromotePendingAsync(Guid envId, string key, long expectedVersion)
     {
-        var flag = await GetAsync(envId, key);
-
-        // Version guard (#33/#34): only promote if the pending change still matches the version
-        // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
-        // or already promoted (null), do nothing.
-        if (flag.Pending?.Version != expectedVersion)
+        for (var attempt = 0; ; attempt++)
         {
-            return false;
+            var flag = await GetAsync(envId, key);
+
+            // Version guard (#33/#34): only promote if the pending change still matches the version
+            // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
+            // or already promoted (null), do nothing.
+            if (flag.Pending?.Version != expectedVersion)
+            {
+                return false;
+            }
+
+            // promote pending -> committed, then persist the full row so the committed
+            // value advances and the pending slot is cleared.
+            flag.PromotePending();
+
+            try
+            {
+                await UpdateAsync(flag);
+                return true;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxRetries)
+            {
+                // Same xmin-token race as SetPendingAsync above: a racing writer (re-stage or
+                // another promote) committed first. Detach the stale tracked entity and retry;
+                // the version guard re-evaluates against the fresh row and returns false if the
+                // pending it observed is no longer the pending that's actually there.
+                DbContext.Entry(flag).State = EntityState.Detached;
+            }
         }
-
-        // promote pending -> committed, then persist the full row so the committed
-        // value advances and the pending slot is cleared.
-        flag.PromotePending();
-
-        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
-        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync committing in
-        // that window could be overwritten. The in-memory version check narrows but does not close
-        // it for the EF provider; closing it requires an optimistic-concurrency token (tracked in
-        // #33). The Mongo provider closes it via a version-filtered ReplaceOneAsync.
-        await UpdateAsync(flag);
-        return true;
     }
 
     public async Task<IReadOnlyList<FeatureFlag>> GetPendingAsync()
