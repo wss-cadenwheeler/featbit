@@ -1,3 +1,4 @@
+using Domain.AuditLogs;
 using Domain.Segments;
 using Domain.Targeting;
 using Infrastructure.Persistence.MongoDb;
@@ -102,6 +103,39 @@ public sealed class SegmentCommittedPendingTests : IAsyncLifetime
         Assert.Null(afterPromote.Pending);
 
         // pending slot cleared on the stored document too
+        var rawAfter = await _sut.GetAsync(committed.Id);
+        Assert.Null(rawAfter.Pending);
+    }
+
+    [Fact]
+    public async Task SetPending_Persists_Attribution_And_Promote_Still_Clears_Pending()
+    {
+        // #73a: the attribution context (operator/operation/isTargetingChange) captured at stage
+        // time must roundtrip through the store, and promotion must still clear Pending as before.
+        var committed = CreateSegment("s1-attribution", "old");
+        committed.CommittedVersion = 1;
+        await _sut.AddOneAsync(committed);
+
+        var pendingValue = CreateSegment("s1-attribution", "new");
+        var operatorId = Guid.NewGuid();
+        const string operation = Operations.Archive;
+        const bool isTargetingChange = false;
+
+        await _sut.SetPendingAsync(
+            committed.Id, pendingValue, version: 2,
+            operatorId: operatorId, operation: operation, isTargetingChange: isTargetingChange);
+
+        // the attribution context roundtrips on the raw (staged) read
+        var raw = await _sut.GetAsync(committed.Id);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(operatorId, raw.Pending!.OperatorId);
+        Assert.Equal(operation, raw.Pending.Operation);
+        Assert.Equal(isTargetingChange, raw.Pending.IsTargetingChange);
+
+        // promote still clears Pending as before, unaffected by the new attribution fields
+        var promoted = await _sut.PromotePendingAsync(committed.Id, expectedVersion: 2);
+        Assert.True(promoted);
+
         var rawAfter = await _sut.GetAsync(committed.Id);
         Assert.Null(rawAfter.Pending);
     }

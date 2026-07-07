@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using Application.Bases.Models;
 using Application.Segments;
+using Domain.AuditLogs;
 using Domain.FeatureFlags;
 using Domain.Resources;
 using Domain.Segments;
@@ -189,7 +190,13 @@ public class SegmentService(MongoDbClient mongoDb, ILogger<SegmentService> logge
         return segment;
     }
 
-    public async Task SetPendingAsync(Guid id, Segment pendingValue, long version)
+    public async Task SetPendingAsync(
+        Guid id,
+        Segment pendingValue,
+        long version,
+        Guid operatorId = default,
+        string operation = Operations.Update,
+        bool isTargetingChange = true)
     {
         // ensure the segment exists (committed value is left untouched)
         await GetAsync(id);
@@ -204,7 +211,10 @@ public class SegmentService(MongoDbClient mongoDb, ILogger<SegmentService> logge
         var pending = new PendingSegmentChange
         {
             Version = version,
-            Value = pendingValue
+            Value = pendingValue,
+            OperatorId = operatorId,
+            Operation = operation,
+            IsTargetingChange = isTargetingChange
         };
 
         // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER

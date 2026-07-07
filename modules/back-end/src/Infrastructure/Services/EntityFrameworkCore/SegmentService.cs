@@ -3,6 +3,7 @@ using Application.Bases.Exceptions;
 using Application.Bases.Models;
 using Application.Segments;
 using Dapper;
+using Domain.AuditLogs;
 using Domain.Organizations;
 using Domain.Projects;
 using Domain.Resources;
@@ -203,7 +204,13 @@ public class SegmentService(AppDbContext dbContext, ILogger<SegmentService> logg
         return segment;
     }
 
-    public async Task SetPendingAsync(Guid id, Segment pendingValue, long version)
+    public async Task SetPendingAsync(
+        Guid id,
+        Segment pendingValue,
+        long version,
+        Guid operatorId = default,
+        string operation = Operations.Update,
+        bool isTargetingChange = true)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -221,7 +228,7 @@ public class SegmentService(AppDbContext dbContext, ILogger<SegmentService> logg
             }
 
             // write ONLY the pending data; committed fields stay as they are
-            segment.SetPending(pendingValue, version);
+            segment.SetPending(pendingValue, version, operatorId, operation, isTargetingChange);
 
             try
             {

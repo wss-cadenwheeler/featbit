@@ -1,3 +1,5 @@
+using Domain.AuditLogs;
+
 namespace Domain.Segments;
 
 /// <summary>
@@ -16,4 +18,11 @@ public class PendingSegmentChange
     /// until <see cref="Segment.PromotePending"/> makes it committed.
     /// </summary>
     public Segment Value { get; set; }
+
+    // Attribution context captured at stage time (#73). Initializer values double as
+    // backward-compat defaults: a pending row staged before these fields existed
+    // deserializes to exactly the values the coordinator used to hardcode.
+    public Guid OperatorId { get; set; }                       // Guid.Empty for legacy rows
+    public string Operation { get; set; } = Operations.Update;
+    public bool IsTargetingChange { get; set; } = true;
 }
