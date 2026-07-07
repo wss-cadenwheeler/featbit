@@ -123,12 +123,12 @@ Four hardening items on top of the shared `IDcBackfiller`, all applying to **bot
   failing — and RecoveryWorker/CacheReconciler write every flag/segment/secret for a DC
   **sequentially** within a tick, so that stall accumulates linearly for the whole outage.
   `CacheServiceCollectionExtensions.AddRedis` now appends explicit `connectTimeout`/`syncTimeout`
-  (default **1500ms** each, see `ControlPlane:Redis:ConnectTimeoutMs` /
-  `ControlPlane:Redis:SyncTimeoutMs` in §3) to every per-DC connection string, UNLESS that option is
-  already present in the instance's configured `ConnectionString` (an operator override always
-  wins). Trade-off: 1500ms is deliberately generous relative to a healthy Redis's normal latency to
-  avoid false-positive command failures under real but slow load, while still bounding the worst
-  case far below the unbounded default.
+  (default **1500ms** each, see `Redis:ConnectTimeoutMs` / `Redis:SyncTimeoutMs` in §3 — #108:
+  moved from `ControlPlane:Redis:*`, which is still read as a back-compat fallback) to every per-DC
+  connection string, UNLESS that option is already present in the instance's configured
+  `ConnectionString` (an operator override always wins). Trade-off: 1500ms is deliberately generous
+  relative to a healthy Redis's normal latency to avoid false-positive command failures under real
+  but slow load, while still bounding the worst case far below the unbounded default.
 
 ---
 
@@ -170,16 +170,16 @@ territory, not a config change.
   "CacheReconcile": {
     "IntervalSeconds": 10,
     "MinBackfillIntervalSeconds": 300  // #92: per-DC reconnect-flap cooldown
-  },
-  "Redis": {
-    "ConnectTimeoutMs": 1500,          // #92: per-DC connection-string timeout overrides
-    "SyncTimeoutMs": 1500
   }
 }
 ```
-And one `Redis:Instances` entry **per DC**, each labeled with its `DcId`:
+And one `Redis:Instances` entry **per DC**, each labeled with its `DcId`, plus (optional) the
+connect/sync timeout overrides:
 ```jsonc
 "Redis": {
+  "ConnectTimeoutMs": 1500,          // #92/#108: per-DC connection-string timeout overrides
+  "SyncTimeoutMs": 1500,             // (#108: moved from ControlPlane:Redis:* — old keys still
+                                      // read as a back-compat fallback, see §3)
   "Instances": [
     { "DcId": "west", "ConnectionString": "redis-west:6379", "Password": "" },
     { "DcId": "east", "ConnectionString": "redis-east:6379", "Password": "" }
@@ -226,8 +226,8 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:LeaderElection:RenewIntervalSeconds` | `10` | CP | Leader lock acquire/renew tick |
 | `ControlPlane:StagedFlagGc:IntervalSeconds` | `300` | API/back-end | GC of superseded `v{ts}` keys |
 | `ControlPlane:CacheReconcile:MinBackfillIntervalSeconds` | `300` | CP | Per-DC reconnect-flap backfill cooldown (#92, see §1c) |
-| `ControlPlane:Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c) |
-| `ControlPlane:Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c) |
+| `Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c). #108: moved from `ControlPlane:Redis:ConnectTimeoutMs`, matching the back-end/eval-server `Redis:*` convention (#106); the old key is still read as a back-compat fallback. |
+| `Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c). #108: moved from `ControlPlane:Redis:SyncTimeoutMs` (same back-compat fallback as above). |
 | `Redis:Instances[].DcId` | — | CP | DC label per Redis instance (join key) |
 | `ControlPlane:DcId` / `:Region` | — | ELS | This pod's DC identity (must match a Redis `DcId`) |
 | `Kafka:Consumer:group.id` | `featbit-control-plane` | CP | Consumer group for the control-plane trigger topics. When left at the shipped default AND `Redis:Instances:0:DcId` is non-empty, the control plane auto-suffixes it with `-{DcId}` (e.g. `featbit-control-plane-west`) so DCs sharing a broker don't collide on a single group id (#100). An explicitly-set non-default group id (e.g. `Deploy-FeatBitClusters.ps1`'s per-cluster literal) is always left untouched; no DcId configured leaves the default group id unchanged (single-DC/legacy behavior). See `MqServiceCollectionExtensions.ResolveConsumerGroupId`. |

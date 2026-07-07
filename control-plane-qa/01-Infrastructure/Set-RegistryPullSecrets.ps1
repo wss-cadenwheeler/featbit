@@ -14,7 +14,7 @@
     defaults to "registry-credentials" and can be overridden via CUSTOM_REGISTRY_SECRET_NAME.
 
     Callers must dot-source this file, e.g.:
-        . (Join-Path $PSScriptRoot "Registry-PullSecrets.ps1")
+        . (Join-Path $PSScriptRoot "Set-RegistryPullSecrets.ps1")
 
     Output is self-contained (plain Write-Host) rather than relying on a
     caller-defined Write-Success/Write-Warning, since the two callers each

@@ -141,11 +141,8 @@ public sealed class RecoveryWorker : BackgroundService
         // watermark is intentionally left untouched: if/when this instance becomes leader, the first
         // tick treats every currently-live DC as "returned" (first-seen), which is the same harmless
         // behavior a freshly-started worker already exhibits.
-        if (!_leaderElection.IsLeader)
+        if (!_leaderElection.ShouldRunAsLeader(_logger, "Recovery worker"))
         {
-            _logger.LogDebug(
-                "Recovery worker: instance {InstanceId} is not leader; skipping tick.",
-                _leaderElection.InstanceId);
             return 0;
         }
 

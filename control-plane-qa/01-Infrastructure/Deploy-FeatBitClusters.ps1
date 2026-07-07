@@ -377,9 +377,9 @@ function Wait-ApiServerReady {
 }
 
 # Ensure-CustomRegistryImagePullSecret / Ensure-DefaultServiceAccountImagePullSecret
-# live in Registry-PullSecrets.ps1 so Deploy-OtelDemo.ps1 (otel-demo namespace)
+# live in Set-RegistryPullSecrets.ps1 so Deploy-OtelDemo.ps1 (otel-demo namespace)
 # can reuse the exact same pull-secret logic instead of a second copy.
-. (Join-Path $PSScriptRoot "Registry-PullSecrets.ps1")
+. (Join-Path $PSScriptRoot "Set-RegistryPullSecrets.ps1")
 
 function Get-LoadBalancerIp {
     param(

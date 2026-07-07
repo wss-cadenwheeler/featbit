@@ -191,8 +191,8 @@ if (-not (Test-Path $k6Helper)) { throw "Install-K6Prerequisite.ps1 not found at
 . $k6Helper
 
 # Shared privilege/sudo-session helpers — acquire root once, run the rest unattended.
-$privHelper = Join-Path $script:SiblingDir "Common-Privilege.ps1"
-if (-not (Test-Path $privHelper)) { throw "Common-Privilege.ps1 not found at $privHelper" }
+$privHelper = Join-Path $script:SiblingDir "Initialize-Privilege.ps1"
+if (-not (Test-Path $privHelper)) { throw "Initialize-Privilege.ps1 not found at $privHelper" }
 . $privHelper
 
 # ── Pause helpers ─────────────────────────────────────────────────────────────

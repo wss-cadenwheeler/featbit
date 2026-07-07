@@ -15,14 +15,16 @@ using Moq;
 namespace Api.UnitTests.Application.ControlPlane;
 
 /// <summary>
-/// #105: unit coverage for zeroing <see cref="CommitCoordinatorWorker"/>'s static gauge fields
-/// (<c>_pendingFlagBacklog</c>, <c>_pendingSegmentBacklog</c>, <c>_appliedWatermarkLagSnapshot</c>)
-/// on the not-leader early-return path. The ObservableGauge callbacks read these fields with no
-/// leader filter of their own, and — before #105 — they were refreshed only on a leader tick, so a
-/// replica that lost leadership kept exporting its stale last-leader snapshot indefinitely. Uses
-/// mocked services (no real Mongo/Redis) so this stays a pure unit test: a leader tick with
-/// non-empty pending/watermark data sets the gauges, then a NON-leader tick (same static fields,
-/// matching how DI would construct a fresh worker instance per resolution) must zero them.
+/// #105: unit coverage for resetting <see cref="CommitCoordinatorWorker"/>'s static gauge snapshots
+/// (<c>PendingBacklogSnapshot</c>, <c>AppliedWatermarkLagSnapshot</c> — #108 item 5: the two
+/// hand-rolled static-int/list fields these replaced are now each wrapped by a shared
+/// <c>ObservableGaugeSnapshot&lt;T&gt;</c>) on the not-leader early-return path. The ObservableGauge
+/// callbacks read these snapshots with no leader filter of their own, and — before #105 — they were
+/// refreshed only on a leader tick, so a replica that lost leadership kept exporting its stale
+/// last-leader snapshot indefinitely. Uses mocked services (no real Mongo/Redis) so this stays a pure
+/// unit test: a leader tick with non-empty pending/watermark data sets the gauges, then a NON-leader
+/// tick (same static fields, matching how DI would construct a fresh worker instance per resolution)
+/// must reset them.
 /// </summary>
 public class CommitCoordinatorWorkerGaugeResetTests
 {

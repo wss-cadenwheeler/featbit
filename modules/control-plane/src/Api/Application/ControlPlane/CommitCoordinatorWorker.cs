@@ -119,28 +119,20 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         description:
         "Stage-to-commit latency (now - resource UpdatedAt) in milliseconds, tagged by resource_type.");
 
-    // Observable backlog gauge: reports the most recent pending counts captured at the end of a tick.
-    // Static so a single registration on the shared Meter survives across worker instances (matching
-    // the rest of the static instruments above). Volatile because the gauge callback may be invoked
-    // by the metrics infra on a different thread than the tick that updates the fields.
-    private static volatile int _pendingFlagBacklog;
-    private static volatile int _pendingSegmentBacklog;
+    /// <summary>One (resource_type, count) row captured for the pending-backlog gauge below.</summary>
+    private readonly record struct ResourceTypeCount(string ResourceType, long Count);
 
-    private static readonly ObservableGauge<long> PendingBacklogGauge = Meter.CreateObservableGauge(
+    // Observable backlog gauge: reports the most recent pending counts captured at the end of a
+    // tick, via the shared ObservableGaugeSnapshot helper (#108 item 5; previously a hand-rolled
+    // pair of static volatile ints + an ObservableGauge iterator method).
+    private static readonly ObservableGaugeSnapshot<ResourceTypeCount> PendingBacklogSnapshot = new(
+        m => new Measurement<long>(m.Count, new KeyValuePair<string, object?>("resource_type", m.ResourceType)));
+
+    private static readonly ObservableGauge<long> PendingBacklogGauge = PendingBacklogSnapshot.CreateGauge(
+        Meter,
         PendingBacklogGaugeName,
-        ObservePendingBacklog,
         unit: "{item}",
         description: "Currently-pending (staged-but-not-committed) item count per resource_type.");
-
-    private static IEnumerable<Measurement<long>> ObservePendingBacklog()
-    {
-        yield return new Measurement<long>(
-            _pendingFlagBacklog,
-            new KeyValuePair<string, object?>("resource_type", "flag"));
-        yield return new Measurement<long>(
-            _pendingSegmentBacklog,
-            new KeyValuePair<string, object?>("resource_type", "segment"));
-    }
 
     /// <summary>
     /// #84 (sub-issue of #69): observable gauge reporting each live DC's lag, in milliseconds, behind
@@ -158,28 +150,20 @@ public sealed class CommitCoordinatorWorker : BackgroundService
     private readonly record struct AppliedWatermarkLagMeasurement(string DcId, Guid EnvId, long LagMs);
 
     // Observable applied-watermark-lag gauge: reports the per-(dc, env) lag captured at the start of
-    // the most recent tick. Static + volatile for the same reasons as the backlog fields above.
-    private static volatile IReadOnlyList<AppliedWatermarkLagMeasurement> _appliedWatermarkLagSnapshot =
-        Array.Empty<AppliedWatermarkLagMeasurement>();
+    // the most recent tick, via the shared ObservableGaugeSnapshot helper (#108 item 5).
+    private static readonly ObservableGaugeSnapshot<AppliedWatermarkLagMeasurement> AppliedWatermarkLagSnapshot = new(
+        m => new Measurement<long>(
+            m.LagMs,
+            new KeyValuePair<string, object?>("dc_id", m.DcId),
+            new KeyValuePair<string, object?>("env_id", m.EnvId.ToString())));
 
-    private static readonly ObservableGauge<long> AppliedWatermarkLagGauge = Meter.CreateObservableGauge(
+    private static readonly ObservableGauge<long> AppliedWatermarkLagGauge = AppliedWatermarkLagSnapshot.CreateGauge(
+        Meter,
         AppliedWatermarkLagGaugeName,
-        ObserveAppliedWatermarkLag,
         unit: "ms",
         description:
         "Per-DC lag (ms) behind the most-advanced live DC's applied watermark, per env " +
         "(frontier(env) - dc's watermark(env)).");
-
-    private static IEnumerable<Measurement<long>> ObserveAppliedWatermarkLag()
-    {
-        foreach (var measurement in _appliedWatermarkLagSnapshot)
-        {
-            yield return new Measurement<long>(
-                measurement.LagMs,
-                new KeyValuePair<string, object?>("dc_id", measurement.DcId),
-                new KeyValuePair<string, object?>("env_id", measurement.EnvId.ToString()));
-        }
-    }
 
     /// <summary>
     /// #84: recompute the per-(dc, env) applied-watermark-lag snapshot from this tick's live set.
@@ -226,7 +210,7 @@ public sealed class CommitCoordinatorWorker : BackgroundService
             }
         }
 
-        _appliedWatermarkLagSnapshot = snapshot;
+        AppliedWatermarkLagSnapshot.Update(snapshot);
     }
 
     /// <summary>
@@ -328,20 +312,15 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
         // expected steady-state on every non-leader replica, not an error).
         //
-        // #105: also ZERO the static gauge fields here. The ObservableGauge callbacks
-        // (ObservePendingBacklog / ObserveAppliedWatermarkLag) read these fields on every export
-        // with no leader filter of their own, and they are refreshed only AFTER this gate — so a
-        // replica that loses leadership would otherwise keep exporting its stale last-leader
-        // snapshot indefinitely. Latent today (no exporter wired up), but activates the moment
-        // metrics are exported from more than one replica.
-        if (!_leaderElection.IsLeader)
+        // #105: also RESET the gauge snapshots here. The ObservableGauge callbacks read these
+        // snapshots on every export with no leader filter of their own, and they are refreshed only
+        // AFTER this gate — so a replica that loses leadership would otherwise keep exporting its
+        // stale last-leader snapshot indefinitely. Latent today (no exporter wired up), but activates
+        // the moment metrics are exported from more than one replica.
+        if (!_leaderElection.ShouldRunAsLeader(_logger, "Commit coordinator"))
         {
-            _logger.LogDebug(
-                "Commit coordinator: instance {InstanceId} is not leader; skipping tick.",
-                _leaderElection.InstanceId);
-            _pendingFlagBacklog = 0;
-            _pendingSegmentBacklog = 0;
-            _appliedWatermarkLagSnapshot = Array.Empty<AppliedWatermarkLagMeasurement>();
+            PendingBacklogSnapshot.Reset();
+            AppliedWatermarkLagSnapshot.Reset();
             return 0;
         }
 
@@ -360,8 +339,11 @@ public sealed class CommitCoordinatorWorker : BackgroundService
         // F1 (#24): refresh the observable pending-backlog gauge from this tick's GetPendingAsync
         // counts. Done up front so EVERY return path (including the no-pending and no-live-DC early
         // returns below) reports the current backlog. Side-effect-only; does not affect commits.
-        _pendingFlagBacklog = pending.Count;
-        _pendingSegmentBacklog = pendingSegments.Count;
+        PendingBacklogSnapshot.Update(
+        [
+            new ResourceTypeCount("flag", pending.Count),
+            new ResourceTypeCount("segment", pendingSegments.Count)
+        ]);
 
         // Live DCs = distinct DcIds that currently hold at least one unexpired lease. Loaded
         // unconditionally (even when nothing is pending) because the #84 applied-watermark-lag
