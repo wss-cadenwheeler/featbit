@@ -54,6 +54,14 @@ public static class ServicesRegister
             builder.Configuration.GetSection(PodHealthOptions.SectionName));
         builder.Services.AddHostedService<PodHealthChecker>();
 
+        // #71a leader election: single-active gating for the gated-commit workers (#71b consumes
+        // ILeaderElection). Runs in BOTH consistency modes (cheap; no _enabled gate). Registered as a
+        // singleton exposed both as ILeaderElection and as a hosted service so all three registrations
+        // resolve the SAME instance.
+        builder.Services.AddSingleton<RedisLeaderElector>();
+        builder.Services.AddSingleton<ILeaderElection>(sp => sp.GetRequiredService<RedisLeaderElector>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RedisLeaderElector>());
+
         // C3b-2 commit coordinator: gated-commit reconciliation of pending flag changes. No-ops
         // unless ControlPlane:ConsistencyMode == GatedCommit (checked inside the worker).
         builder.Services.AddHostedService<CommitCoordinatorWorker>();
