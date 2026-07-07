@@ -175,8 +175,14 @@ public class SegmentService(AppDbContext dbContext, ILogger<SegmentService> logg
     }
 
     // Committed-vs-pending, Postgres/EF parity with the Mongo SegmentService. Keyed by segment Id
-    // (a segment is a single entity, possibly shared across envs). Matches the Mongo behavior; the
-    // EF promote path has a documented residual non-atomic window (#33).
+    // (a segment is a single entity, possibly shared across envs). Matches the Mongo behavior.
+
+    // Bounded retry budget for the optimistic-concurrency loops below: a racing writer that
+    // wins the row makes SaveChanges throw DbUpdateConcurrencyException (Postgres xmin token,
+    // #72/#76). Each retry re-reads the fresh row and re-evaluates the version guard, so a
+    // losing racer converges to the same outcome the Mongo provider gets from its version-
+    // filtered UpdateOneAsync/ReplaceOneAsync: no-op (SetPendingAsync) or false (PromotePendingAsync).
+    private const int MaxRetries = 3;
 
     public async Task<Segment> GetCommittedAsync(Guid id)
     {
@@ -199,54 +205,72 @@ public class SegmentService(AppDbContext dbContext, ILogger<SegmentService> logg
 
     public async Task SetPendingAsync(Guid id, Segment pendingValue, long version)
     {
-        // load the committed row (left otherwise untouched)
-        var segment = await GetAsync(id);
-
-        // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
-        // than both the already-staged pending version (if any) AND the committed version. An
-        // out-of-order/stale stage carrying a lower version (but still above committed) must not
-        // clobber a newer pending — otherwise the coordinator could later commit the stale value.
-        if (version <= segment.CommittedVersion || (segment.Pending != null && version <= segment.Pending.Version))
+        for (var attempt = 0; ; attempt++)
         {
-            // stale / out-of-order stage — leave the existing pending (or lack of one) intact
-            return;
+            // load the committed row (left otherwise untouched)
+            var segment = await GetAsync(id);
+
+            // Monotonicity guard (#34): only stage this change when its version is STRICTLY GREATER
+            // than both the already-staged pending version (if any) AND the committed version. An
+            // out-of-order/stale stage carrying a lower version (but still above committed) must not
+            // clobber a newer pending — otherwise the coordinator could later commit the stale value.
+            if (version <= segment.CommittedVersion || (segment.Pending != null && version <= segment.Pending.Version))
+            {
+                // stale / out-of-order stage — leave the existing pending (or lack of one) intact
+                return;
+            }
+
+            // write ONLY the pending data; committed fields stay as they are
+            segment.SetPending(pendingValue, version);
+
+            try
+            {
+                await UpdateAsync(segment);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxRetries)
+            {
+                // The xmin token (#76) closes the race: a racing writer committed first, so this
+                // SaveChanges affected 0 rows. Detach the stale tracked entity — otherwise the
+                // context's identity map would hand back this same stale instance on the re-read
+                // below — and retry; the guard above re-evaluates against the fresh row.
+                DbContext.Entry(segment).State = EntityState.Detached;
+            }
         }
-
-        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
-        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync staging a
-        // newer pending in that window could be overwritten. The in-memory version check narrows
-        // but does not close it for the EF provider; closing it requires an optimistic-concurrency
-        // token (tracked in #33). The Mongo provider closes it via a version-filtered UpdateOneAsync.
-
-        // write ONLY the pending data; committed fields stay as they are
-        segment.SetPending(pendingValue, version);
-
-        await UpdateAsync(segment);
     }
 
     public async Task<bool> PromotePendingAsync(Guid id, long expectedVersion)
     {
-        var segment = await GetAsync(id);
-
-        // Version guard (#33/#34): only promote if the pending change still matches the version
-        // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
-        // or already promoted (null), do nothing.
-        if (segment.Pending?.Version != expectedVersion)
+        for (var attempt = 0; ; attempt++)
         {
-            return false;
+            var segment = await GetAsync(id);
+
+            // Version guard (#33/#34): only promote if the pending change still matches the version
+            // the caller observed. If it was replaced by a racing SetPendingAsync (different version)
+            // or already promoted (null), do nothing.
+            if (segment.Pending?.Version != expectedVersion)
+            {
+                return false;
+            }
+
+            // promote pending -> committed, then persist the full row so the committed
+            // value advances and the pending slot is cleared.
+            segment.PromotePending();
+
+            try
+            {
+                await UpdateAsync(segment);
+                return true;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxRetries)
+            {
+                // Same xmin-token race as SetPendingAsync above: a racing writer (re-stage or
+                // another promote) committed first. Detach the stale tracked entity and retry;
+                // the version guard re-evaluates against the fresh row and returns false if the
+                // pending it observed is no longer the pending that's actually there.
+                DbContext.Entry(segment).State = EntityState.Detached;
+            }
         }
-
-        // promote pending -> committed, then persist the full row so the committed
-        // value advances and the pending slot is cleared.
-        segment.PromotePending();
-
-        // NOTE (#33): without a rowversion/concurrency token there is a residual non-atomic window
-        // between the GetAsync above and SaveChanges here — a racing SetPendingAsync committing in
-        // that window could be overwritten. The in-memory version check narrows but does not close
-        // it for the EF provider; closing it requires an optimistic-concurrency token (tracked in
-        // #33). The Mongo provider closes it via a version-filtered ReplaceOneAsync.
-        await UpdateAsync(segment);
-        return true;
     }
 
     public async Task<IReadOnlyList<Segment>> GetPendingAsync()
