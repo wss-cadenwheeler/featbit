@@ -72,3 +72,32 @@ reconciler refills all visible in logs on the new images.
   static-pod containers via crictl; deleting the mirror pod is NOT enough).
 - The clusters remain in **GatedCommit** with heartbeat 5s, per-DC consumer groups, and staleness
   threshold 30s (east). Rollback path re-verified by CP-14's phase 3.
+
+---
+
+## ERRATUM + true-tip re-validation (2026-07-07, later the same day)
+
+**Erratum:** the "images built from `feat/control-plane-consistency-option-a` @ `afff1781`" claim
+above was WRONG. `Build-FeatBitImages.ps1` silently skipped rebuilds whenever a local `:latest`
+tag existed and pushed the stale image while reporting "built and pushed" (#112) — the clusters
+were actually running **2026-06-27 images** (core gated-commit machinery + original self-heal +
+config-level fixes only). The CP-suite results above remain valid for what that image contained —
+the config-driven findings (#99 heartbeat interval, #100 consumer groups) and the core
+stage→gate→commit→recover behavior were genuinely exercised — but the newer waves' code paths
+(only-advance guards, leader election, watermark lag gauge, secrets backfill, truthful metrics)
+were validated only by the integration suites at that point, not live.
+
+**Re-validation on the true tip (`2c2ec02f`, images force-rebuilt and provenance-verified):**
+- New-code markers confirmed live in both clusters: the `AlwaysLeaderElection` "leader election
+  disabled" startup hint (#111 opt-in default), the accepted/attempted backfill log wording
+  (#105), leases stable.
+- Full sweep `cp01–cp15`: the GatedCommit consistency set — **cp05, cp10, cp11, cp12, cp13,
+  cp15 — all PASS** on the true tip. cp14 passes only with the mode-flip commands (validated in
+  the morning run; not re-flipped here).
+- Remaining failures all triaged to harness/config drift, **zero product regressions** — full
+  table in issue #113 (cp01/02 flag-id wiring, cp03 stale manifest path, cp04 TypeError,
+  cp06 convergence-poll investigation, cp07 license prereq, cp08 dead control-plane
+  port-forward, cp09 shared-redis-era purge assertion vs per-cluster topology).
+- Live product verification during triage: PodHealthChecker heartbeat purge works once the
+  control-plane's plain `Redis__ConnectionString` points at the sentinel service — the
+  Deploy-RedisSentinel.ps1 gap is fixed alongside this erratum.

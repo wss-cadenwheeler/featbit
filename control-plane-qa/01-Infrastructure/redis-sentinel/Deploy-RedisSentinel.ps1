@@ -116,8 +116,13 @@ foreach ($ctx in $Contexts) {
     # DcId is required alongside the ConnectionString (per README) — without it,
     # standalone/re-run deploys leave Instances__0__DcId unset and the
     # DcIdConsistencyChecker reports persistent 'unknownDcs' warnings.
+    # Redis__ConnectionString (the PLAIN key) is what the back-end components embedded in the
+    # control-plane use (PodHealthChecker heartbeat purge, etc.). Without it they read the
+    # orphaned legacy redis and silently see nothing (#113); Instances__0/__1 cover only the
+    # composite/consistency paths.
     Invoke-Checked -FailureMessage "set env deploy/control-plane failed on $ctx" -Command {
         kubectl --context $ctx -n $Namespace set env deploy/control-plane `
+            "Redis__ConnectionString=$sentinelConn" `
             "Redis__Instances__0__ConnectionString=$sentinelConn" "Redis__Instances__0__DcId=$ctx" | Out-Null
     }
     Invoke-Checked -FailureMessage "api-server rollout not ready on $ctx" -Command {

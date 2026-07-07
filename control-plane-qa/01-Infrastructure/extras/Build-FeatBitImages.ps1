@@ -63,7 +63,15 @@ param(
 
     [switch]$NoPush,
 
-    [switch]$Force
+    # Deprecated (rebuild is now the default); kept so existing invocations don't break.
+    [switch]$Force,
+
+    # Opt-in: skip the docker build when the local tag already exists and only push it.
+    # DANGEROUS with a floating tag like :latest — the local tag can be arbitrarily stale
+    # (this exact trap shipped 11-day-old images while reporting "built and pushed"; #112).
+    # Docker's own layer cache already makes a no-change rebuild take seconds, so the
+    # default is to ALWAYS rebuild.
+    [switch]$SkipIfExists
 )
 
 $ErrorActionPreference = "Stop"
@@ -184,14 +192,19 @@ function Build-Image
         exit 1
     }
 
-    # Skip rebuild if image already exists locally and -Force is not set.
-    if (-not $Force)
+    # Rebuild by default (#112): docker's layer cache makes no-change rebuilds cheap, and
+    # skipping on tag existence silently shipped stale images while the summary claimed
+    # "built and pushed". Only -SkipIfExists (and not -Force) takes the fast path, and the
+    # skip is recorded so the summary tells the truth.
+    if ($SkipIfExists -and -not $Force)
     {
         $existing = docker images --format "{{.Repository}}:{{.Tag}}" 2>$null |
                     Where-Object { $_ -eq $fullTag }
         if ($existing)
         {
-            Write-Info "Image already exists locally. Use -Force to rebuild."
+            $created = docker inspect $fullTag --format '{{.Created}}' 2>$null
+            Write-Warn "Skipping build (-SkipIfExists): pushing EXISTING local image created $created"
+            $script:skippedBuilds += $ShortName
             if (-not $NoPush)
             {
                 Push-Image -FullTag $fullTag
@@ -214,7 +227,10 @@ function Build-Image
         exit 1
     }
 
-    Write-Success "Built $fullTag"
+    # Provenance: pin what source this image was built from, so deploy logs can verify
+    # the running image matches the intended commit (#112).
+    $describe = git -C $repoRoot describe --always --dirty 2>$null
+    Write-Success "Built $fullTag (source: $describe)"
 
     if (-not $NoPush)
     {
@@ -260,6 +276,7 @@ if (-not $NoPush)
 }
 
 $failed = @()
+$script:skippedBuilds = @()
 
 foreach ($name in $Images)
 {
@@ -287,6 +304,11 @@ foreach ($name in $Images)
     if ($name -in $failed)
     {
         Write-Fail "$name — FAILED"
+    }
+    elseif ($name -in $script:skippedBuilds)
+    {
+        # Truthful summary (#112): a skipped build must never read as a fresh one.
+        Write-Warn "$($def.ImageName):$Tag — pushed EXISTING image (build skipped via -SkipIfExists)"
     }
     else
     {
