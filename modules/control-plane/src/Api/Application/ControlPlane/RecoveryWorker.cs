@@ -173,6 +173,31 @@ public sealed class RecoveryWorker : BackgroundService
             return 0;
         }
 
+        // #92: check the composite-cache guard ONCE per tick, before the per-DC loop, so a
+        // misconfiguration (e.g. a None cache) logs a single warning per tick instead of once per
+        // returned DC — and skips the committed-snapshot fetch entirely instead of reading the DB only
+        // to discard it. The previous-live-set watermark was already advanced above (each returned
+        // DcId is now considered "seen"), so without corrective action a real reconnect immediately
+        // after a transient misconfiguration fix would never be re-detected as "returned". Mirror
+        // CacheReconciler's equivalent guard and explicitly un-advance the watermark for these DCs so
+        // the NEXT tick treats them as newly-returned again once the guard clears.
+        if (!_backfiller.IsCompositeCacheAvailable)
+        {
+            _logger.LogWarning(
+                "Recovery worker: composite Redis cache is unavailable; skipping backfill for " +
+                "{Count} returned DC(s) this tick ({DcIds}). Will retry once they are re-detected " +
+                "as returned.",
+                returned.Count,
+                string.Join(", ", returned));
+            // Force a retry: forget these DCs from the watermark so next tick treats them as
+            // newly-returned again once the guard clears.
+            foreach (var dcId in returned)
+            {
+                _previousLiveSet.Remove(dcId);
+            }
+            return 0;
+        }
+
         // #90 (extended by #91 to also cover secrets): fetch the committed snapshot (flags + segments
         // + segment env-ids + secret caches) ONCE per tick and share it across every DC returned this
         // tick, instead of letting each DC's backfill re-fetch
@@ -181,6 +206,12 @@ public sealed class RecoveryWorker : BackgroundService
         // for a multi-DC tick.
         var snapshot = await _backfiller.FetchCommittedSnapshotAsync(cancellationToken);
 
+        // #92: honest metrics — count a DC as "backfilled" only when the shared backfiller actually
+        // did work for it, not merely because it was in the "returned" set this tick. A DC's call
+        // returns IDcBackfiller.Skipped (not a repair) when it coalesced with a concurrent backfill of
+        // the same DC (e.g. CacheReconciler backfilling it at the same moment) — that DC IS being
+        // repaired, just not by this call, so it must not be double-counted, and a genuinely failed
+        // guard/coalesce must not be reported as a repair either.
         var backfilled = 0;
         foreach (var dcId in returned)
         {
@@ -190,8 +221,18 @@ public sealed class RecoveryWorker : BackgroundService
             // value + committed pointer + index) followed by a targeted PushFullSync — delegated to
             // the shared backfiller, which CacheReconciler also uses (with the mode-appropriate
             // write path).
-            await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, snapshot, cancellationToken);
-            backfilled++;
+            var result = await _backfiller.BackfillDcAsync(dcId, ConsistencyMode.GatedCommit, snapshot, cancellationToken);
+            if (result != IDcBackfiller.Skipped)
+            {
+                backfilled++;
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Recovery worker: backfill for returned DC {DcId} was skipped this tick " +
+                    "(coalesced with a concurrent backfill already in flight for that DC).",
+                    dcId);
+            }
         }
 
         return backfilled;

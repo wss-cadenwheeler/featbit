@@ -9,6 +9,21 @@ namespace Api.Infrastructure.Caches;
 
 public static class CacheServiceCollectionExtensions
 {
+    /// <summary>
+    /// Default StackExchange.Redis <c>connectTimeout</c>/<c>syncTimeout</c> (ms) applied to every
+    /// per-DC connection string (#92) when not already present and not overridden via
+    /// <c>ControlPlane:Redis:ConnectTimeoutMs</c> / <c>ControlPlane:Redis:SyncTimeoutMs</c>.
+    ///
+    /// Trade-off: with <c>abortConnect=false</c> and NO explicit timeout, a command issued to a
+    /// down/unreachable DC blocks for StackExchange.Redis's own default (~5s) before failing —
+    /// and RecoveryWorker/CacheReconciler process every flag/segment/secret write for a DC
+    /// SEQUENTIALLY within a tick, so that ~5s stall is incurred by EVERY write while the DC is down,
+    /// accumulating linearly. 1500ms is deliberately generous relative to a healthy Redis's normal
+    /// round-trip latency (to avoid false-positive command failures under real but slow load) while
+    /// still bounding the worst case far below the unbounded default.
+    /// </summary>
+    internal const int DefaultRedisTimeoutMs = 1500;
+
     public static void AddCache(this IServiceCollection services, IConfiguration configuration)
     {
         var cacheProvider = configuration.GetCacheProvider();
@@ -39,6 +54,13 @@ public static class CacheServiceCollectionExtensions
                 .GetSection("Redis:Instances")
                 .Get<RedisInstanceConfig[]>() ?? [];
 
+            // #92: explicit connect/sync timeouts, config-overridable, appended to every per-DC
+            // connection string below (see DefaultRedisTimeoutMs for the trade-off rationale).
+            var connectTimeoutMs =
+                configuration.GetValue<int?>("ControlPlane:Redis:ConnectTimeoutMs") ?? DefaultRedisTimeoutMs;
+            var syncTimeoutMs =
+                configuration.GetValue<int?>("ControlPlane:Redis:SyncTimeoutMs") ?? DefaultRedisTimeoutMs;
+
             var clients = redisInstances
                 .Select(instance =>
                 {
@@ -53,6 +75,7 @@ public static class CacheServiceCollectionExtensions
                     // background, so a returned peer accepts the backfill that repairs its cache.
                     if (!connStr.Contains("abortConnect", StringComparison.OrdinalIgnoreCase))
                         connStr += ",abortConnect=false";
+                    connStr = AppendRedisTimeouts(connStr, connectTimeoutMs, syncTimeoutMs);
                     return new RedisClient(connStr);
                 })
                 .ToList();
@@ -107,5 +130,38 @@ public static class CacheServiceCollectionExtensions
                     return new CompositeRedisCacheService(dcCacheServices, logger);
                 });
         }
+    }
+
+    /// <summary>
+    /// Appends explicit <c>connectTimeout</c>/<c>syncTimeout</c> StackExchange.Redis options (#92) to
+    /// <paramref name="connectionString"/>, skipping whichever one is ALREADY specified (case-
+    /// insensitive token match) so an operator's explicit per-instance override always wins. Safe for
+    /// Sentinel-style / multi-host connection strings (comma-separated host list followed by
+    /// <c>key=value</c> options) since StackExchange.Redis recognizes an option token anywhere after
+    /// the first endpoint — appending at the very end (as this method, and the existing
+    /// <c>abortConnect</c> append above, both do) is always valid regardless of how many hosts precede
+    /// it. Internal + <c>InternalsVisibleTo</c> so the connection-string shape can be unit tested
+    /// without a real Redis.
+    /// </summary>
+    internal static string AppendRedisTimeouts(string connectionString, int connectTimeoutMs, int syncTimeoutMs)
+    {
+        var result = connectionString;
+
+        if (!HasOption(result, "connectTimeout"))
+        {
+            result += $",connectTimeout={connectTimeoutMs}";
+        }
+
+        if (!HasOption(result, "syncTimeout"))
+        {
+            result += $",syncTimeout={syncTimeoutMs}";
+        }
+
+        return result;
+
+        static bool HasOption(string connStr, string optionName) =>
+            connStr
+                .Split(',')
+                .Any(token => token.TrimStart().StartsWith(optionName + "=", StringComparison.OrdinalIgnoreCase));
     }
 }

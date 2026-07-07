@@ -44,24 +44,43 @@ namespace Api.Application.ControlPlane;
 /// of each DC's backfill re-reading the source of truth. That fetch is LAZY — an idle tick where
 /// nothing is newly reachable (the steady-state common case) never touches the source of truth.
 /// Disable via <c>ControlPlane:CacheReconcile:Enabled=false</c>.
+///
+/// #92: cross-worker coalescing (the same DcId backfilling concurrently via this reconciler AND
+/// <see cref="RecoveryWorker"/>) is handled by the shared <see cref="IDcBackfiller"/> singleton, not
+/// here — see its in-flight set. This class additionally applies a per-DC MINIMUM BACKFILL INTERVAL
+/// (<c>ControlPlane:CacheReconcile:MinBackfillIntervalSeconds</c>, default 300s) since the last
+/// SUCCESSFUL backfill, so a DC whose Redis link is flapping (repeated disconnect→connect
+/// transitions) does not trigger a full re-read-and-rewrite of the source of truth on every
+/// reconnect. A DC's FIRST backfill (nothing recorded yet — includes the immediate local refill on
+/// control-plane startup, which is the documented intent, see the class summary above) is never
+/// throttled, since there is no prior timestamp to compare against.
 /// </summary>
 public sealed class CacheReconciler : BackgroundService
 {
     /// <summary>Default poll interval when not overridden via config.</summary>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Default minimum interval between successful backfills of the SAME DC when not overridden via
+    /// <c>ControlPlane:CacheReconcile:MinBackfillIntervalSeconds</c> (#92).
+    /// </summary>
+    public static readonly TimeSpan DefaultMinBackfillInterval = TimeSpan.FromSeconds(300);
+
     private readonly IReadOnlyList<DcRedisConnection> _dcs;
     private readonly IDcBackfiller _backfiller;
     private readonly ConsistencyMode _mode;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
+    private readonly TimeSpan _minBackfillInterval;
     private readonly ILogger<CacheReconciler> _logger;
 
     // Last observed IsConnected per DcId; key absent = never observed yet.
     private readonly Dictionary<string, bool> _lastConnected = new();
 
-    // DcIds with a backfill currently running, to coalesce overlapping reconciles.
-    private readonly HashSet<string> _inFlight = new();
+    // #92: UTC time of the last SUCCESSFUL (non-skipped) backfill per DcId, used for the
+    // min-backfill-interval cooldown below. Key absent = never successfully backfilled yet, so the
+    // cooldown never blocks a DC's first backfill (startup local refill stays immediate).
+    private readonly Dictionary<string, DateTimeOffset> _lastBackfillAt = new();
 
     public CacheReconciler(
         IReadOnlyList<DcRedisConnection> dcs,
@@ -79,6 +98,12 @@ public sealed class CacheReconciler : BackgroundService
         _interval = seconds is > 0
             ? TimeSpan.FromSeconds(seconds.Value)
             : DefaultInterval;
+
+        var minBackfillSeconds =
+            configuration.GetValue<int?>("ControlPlane:CacheReconcile:MinBackfillIntervalSeconds");
+        _minBackfillInterval = minBackfillSeconds is > 0
+            ? TimeSpan.FromSeconds(minBackfillSeconds.Value)
+            : DefaultMinBackfillInterval;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -165,6 +190,24 @@ public sealed class CacheReconciler : BackgroundService
             return;
         }
 
+        // #92: check the composite cache guard ONCE per tick, before the per-DC loop, so a
+        // misconfiguration (e.g. a None cache) logs a single warning per tick instead of once per
+        // newly-reachable DC — and skips the snapshot fetch entirely instead of reading the DB only to
+        // discard it.
+        if (!_backfiller.IsCompositeCacheAvailable)
+        {
+            _logger.LogWarning(
+                "Cache reconciler: composite Redis cache is unavailable; skipping backfill for " +
+                "{Count} newly reachable DC(s) this tick ({DcIds}). Will retry next tick.",
+                newlyReachable.Count,
+                string.Join(", ", newlyReachable.Select(dc => dc.DcId)));
+            foreach (var (dcId, _) in newlyReachable)
+            {
+                _lastConnected.Remove(dcId);
+            }
+            return;
+        }
+
         CommittedSnapshot snapshot;
         try
         {
@@ -197,9 +240,10 @@ public sealed class CacheReconciler : BackgroundService
 
     /// <summary>
     /// Backfill one DC's cache from the pre-fetched <paramref name="snapshot"/> (via
-    /// <see cref="IDcBackfiller"/>), coalescing overlapping calls per DcId. On failure the
-    /// last-connected watermark for the DC is cleared so the next tick re-detects it as newly reachable
-    /// and retries. Exposed for tests.
+    /// <see cref="IDcBackfiller"/>), subject to the per-DC min-backfill-interval cooldown (#92) below.
+    /// Cross-worker/overlapping-call coalescing for the SAME DcId is handled by the shared
+    /// <see cref="IDcBackfiller"/> singleton, not here. On failure the last-connected watermark for the
+    /// DC is cleared so the next tick re-detects it as newly reachable and retries. Exposed for tests.
     /// </summary>
     public async Task RunReconcileAsync(
         string dcId,
@@ -207,11 +251,22 @@ public sealed class CacheReconciler : BackgroundService
         CommittedSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
-        lock (_inFlight)
+        // #92: reconnect-flap cooldown. A DC with no recorded successful backfill yet (including the
+        // very first tick, i.e. the immediate startup local refill) is never throttled — only a DC
+        // that has ALREADY been successfully backfilled recently skips this reconcile.
+        if (_lastBackfillAt.TryGetValue(dcId, out var lastBackfillAt))
         {
-            if (!_inFlight.Add(dcId))
+            var elapsed = DateTimeOffset.UtcNow - lastBackfillAt;
+            if (elapsed < _minBackfillInterval)
             {
-                // A backfill for this DC is already running; coalesce.
+                _logger.LogInformation(
+                    "Cache reconciler: {Scope} DC {DcId} is reachable but was successfully backfilled " +
+                    "{ElapsedSeconds}s ago (< the {CooldownSeconds}s min-backfill-interval cooldown); " +
+                    "skipping this tick.",
+                    isLocal ? "local" : "peer",
+                    dcId,
+                    (int)elapsed.TotalSeconds,
+                    (int)_minBackfillInterval.TotalSeconds);
                 return;
             }
         }
@@ -223,7 +278,12 @@ public sealed class CacheReconciler : BackgroundService
                 isLocal ? "local" : "peer",
                 dcId,
                 _mode);
-            await _backfiller.BackfillDcAsync(dcId, _mode, snapshot, cancellationToken);
+            var result = await _backfiller.BackfillDcAsync(dcId, _mode, snapshot, cancellationToken);
+            if (result != IDcBackfiller.Skipped)
+            {
+                // Only a real (non-coalesced, non-guard-failed) backfill starts the cooldown clock.
+                _lastBackfillAt[dcId] = DateTimeOffset.UtcNow;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -237,13 +297,6 @@ public sealed class CacheReconciler : BackgroundService
                 dcId);
             // Force a retry next tick by forgetting the watermark for this DC.
             _lastConnected.Remove(dcId);
-        }
-        finally
-        {
-            lock (_inFlight)
-            {
-                _inFlight.Remove(dcId);
-            }
         }
     }
 }

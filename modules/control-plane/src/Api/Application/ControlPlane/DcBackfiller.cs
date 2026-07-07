@@ -67,23 +67,50 @@ public sealed record CommittedSnapshot(
 /// for each DC, instead of using the no-snapshot overload per DC (which re-fetches every call). This
 /// invariant (one fetch per tick) applies to secrets too (#91): they are part of the same
 /// <see cref="CommittedSnapshot"/>.
+///
+/// #92: the per-DC in-flight set lives HERE (a singleton shared by both <see cref="RecoveryWorker"/>
+/// and <see cref="CacheReconciler"/>), not on either caller, so a <see cref="RecoveryWorker"/> tick and
+/// a <see cref="CacheReconciler"/> tick backfilling the SAME DcId at the same time coalesce against
+/// each other rather than each running a redundant full read/write cycle — the second concurrent call
+/// for a given DcId returns immediately with <see cref="Skipped"/> instead of doing any work.
 /// </summary>
 public interface IDcBackfiller
 {
     /// <summary>
+    /// Sentinel <see cref="BackfillDcAsync(string,ConsistencyMode,CancellationToken)"/> /
+    /// <see cref="BackfillDcAsync(string,ConsistencyMode,CommittedSnapshot,CancellationToken)"/> return
+    /// value meaning the call did NO work — either the composite Redis cache is unavailable (see
+    /// <see cref="IsCompositeCacheAvailable"/>) or a backfill for that DcId was already in flight
+    /// (#92 coalescing). Distinct from a legitimate <c>0</c>, which means the backfill ran but the
+    /// committed snapshot happened to contain zero flags (e.g. a segment/secret-only tick).
+    /// </summary>
+    public const int Skipped = -1;
+
+    /// <summary>
+    /// Cheap, non-logging check of whether the composite Redis cache is configured (i.e. backfills can
+    /// actually do anything). Callers that process several DCs per tick (<see cref="RecoveryWorker"/>,
+    /// <see cref="CacheReconciler"/>) should check this ONCE per tick before looping so a
+    /// misconfiguration logs a single warning per tick instead of once per DC (#92) — see
+    /// <see cref="RecoveryWorker.RunOnceAsync"/>.
+    /// </summary>
+    bool IsCompositeCacheAvailable { get; }
+
+    /// <summary>
     /// Backfill <paramref name="dcId"/>'s Redis from the source of truth using the write path for
     /// <paramref name="mode"/>, then publish a targeted client refresh. Returns the number of flags
-    /// written (0 if the composite cache is unavailable). Convenience overload for single-DC callers:
-    /// fetches its own <see cref="CommittedSnapshot"/> internally. A caller backfilling multiple DCs in
-    /// one tick should instead call <see cref="FetchCommittedSnapshotAsync"/> once and use the
-    /// snapshot-accepting overload so every DC in that tick shares one fetch.
+    /// written, or <see cref="Skipped"/> if the composite cache is unavailable or this DcId's backfill
+    /// coalesced with one already in flight (#92). Convenience overload for single-DC callers: fetches
+    /// its own <see cref="CommittedSnapshot"/> internally. A caller backfilling multiple DCs in one tick
+    /// should instead call <see cref="FetchCommittedSnapshotAsync"/> once and use the snapshot-accepting
+    /// overload so every DC in that tick shares one fetch.
     /// </summary>
     Task<int> BackfillDcAsync(string dcId, ConsistencyMode mode, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Backfill <paramref name="dcId"/>'s Redis from the pre-fetched <paramref name="snapshot"/> using
     /// the write path for <paramref name="mode"/>, then publish a targeted client refresh. Returns the
-    /// number of flags written (0 if the composite cache is unavailable).
+    /// number of flags written, or <see cref="Skipped"/> if the composite cache is unavailable or this
+    /// DcId's backfill coalesced with one already in flight (#92).
     /// </summary>
     Task<int> BackfillDcAsync(
         string dcId,
@@ -106,6 +133,15 @@ public sealed class DcBackfiller(
     IMessageProducer messageProducer,
     ILogger<DcBackfiller> logger) : IDcBackfiller
 {
+    // #92: DcIds with a backfill currently running, shared across EVERY caller (RecoveryWorker and
+    // CacheReconciler both hold a reference to this same singleton), so the two workers coalesce
+    // against each other instead of each maintaining their own (previously CacheReconciler-only)
+    // in-flight set.
+    private readonly object _inFlightLock = new();
+    private readonly HashSet<string> _inFlight = new();
+
+    public bool IsCompositeCacheAvailable => compositeCache is CompositeRedisCacheService;
+
     public async Task<int> BackfillDcAsync(
         string dcId,
         ConsistencyMode mode,
@@ -116,7 +152,7 @@ public sealed class DcBackfiller(
         // skips the DB round-trip entirely, same as before #90.
         if (!TryGetComposite(dcId, out _))
         {
-            return 0;
+            return IDcBackfiller.Skipped;
         }
 
         var snapshot = await FetchCommittedSnapshotAsync(cancellationToken);
@@ -135,9 +171,45 @@ public sealed class DcBackfiller(
         // misconfiguration (e.g. None cache) degrades to a clear log instead of a crash loop.
         if (!TryGetComposite(dcId, out var composite))
         {
-            return 0;
+            return IDcBackfiller.Skipped;
         }
 
+        // #92: coalesce concurrent backfills of the SAME DcId — whether both come from this process's
+        // RecoveryWorker and CacheReconciler racing each other, or two overlapping ticks of the same
+        // caller. The loser returns immediately without touching Redis; the winner's in-progress (or
+        // just-completed) backfill already covers it, and every underlying write is idempotent/
+        // only-advance-guarded (#89) so there is nothing for the loser to "miss".
+        lock (_inFlightLock)
+        {
+            if (!_inFlight.Add(dcId))
+            {
+                logger.LogDebug(
+                    "DC backfill: a backfill for DC {DcId} is already in flight; coalescing (no-op).",
+                    dcId);
+                return IDcBackfiller.Skipped;
+            }
+        }
+
+        try
+        {
+            return await RunBackfillAsync(dcId, mode, snapshot, composite, cancellationToken);
+        }
+        finally
+        {
+            lock (_inFlightLock)
+            {
+                _inFlight.Remove(dcId);
+            }
+        }
+    }
+
+    private async Task<int> RunBackfillAsync(
+        string dcId,
+        ConsistencyMode mode,
+        CommittedSnapshot snapshot,
+        CompositeRedisCacheService composite,
+        CancellationToken cancellationToken)
+    {
         foreach (var flag in snapshot.Flags)
         {
             cancellationToken.ThrowIfCancellationRequested();

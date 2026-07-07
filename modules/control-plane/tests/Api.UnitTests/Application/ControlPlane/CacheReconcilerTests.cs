@@ -3,6 +3,7 @@ using Api.Infrastructure.Caches;
 using Application.Configuration;
 using Infrastructure.Caches.Redis;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using StackExchange.Redis;
@@ -21,7 +22,11 @@ public class CacheReconcilerTests
 
     public CacheReconcilerTests()
     {
-        // Default: backfill succeeds, returning 0 flags. Individual tests override as needed.
+        // Default: composite cache is available and backfill succeeds, returning 0 flags. Individual
+        // tests override as needed (e.g. IsCompositeCacheAvailable=false for the #92 guard-hoist tests).
+        _backfiller
+            .Setup(b => b.IsCompositeCacheAvailable)
+            .Returns(true);
         _backfiller
             .Setup(b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(0);
@@ -53,22 +58,29 @@ public class CacheReconcilerTests
     private CacheReconciler CreateSut(
         IReadOnlyList<DcRedisConnection> dcs,
         string consistencyMode = "BestEffort",
-        bool enabled = true)
+        bool enabled = true,
+        int? minBackfillIntervalSeconds = null,
+        ILogger<CacheReconciler>? logger = null)
     {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ControlPlane:ConsistencyMode"] = consistencyMode,
-                ["ControlPlane:CacheReconcile:Enabled"] = enabled.ToString(),
-                ["ControlPlane:CacheReconcile:IntervalSeconds"] = "1"
-            })
-            .Build();
+        var configDict = new Dictionary<string, string?>
+        {
+            ["ControlPlane:ConsistencyMode"] = consistencyMode,
+            ["ControlPlane:CacheReconcile:Enabled"] = enabled.ToString(),
+            ["ControlPlane:CacheReconcile:IntervalSeconds"] = "1"
+        };
+        if (minBackfillIntervalSeconds is not null)
+        {
+            configDict["ControlPlane:CacheReconcile:MinBackfillIntervalSeconds"] =
+                minBackfillIntervalSeconds.Value.ToString();
+        }
+
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(configDict).Build();
 
         return new CacheReconciler(
             dcs,
             _backfiller.Object,
             configuration,
-            NullLogger<CacheReconciler>.Instance);
+            logger ?? NullLogger<CacheReconciler>.Instance);
     }
 
     private void VerifyBackfill(string dcId, ConsistencyMode mode, Times times) =>
@@ -241,29 +253,135 @@ public class CacheReconcilerTests
         VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
     }
 
+    // ----- #92: cross-worker in-flight coalescing now lives in the shared IDcBackfiller, not here -----
+    // (see DcBackfillerTests.ConcurrentBackfillsForSameDc_AreCoalesced for the real coalescing test).
+    // CacheReconciler simply passes through whatever IDcBackfiller.BackfillDcAsync returns, including
+    // IDcBackfiller.Skipped when a concurrent caller (e.g. RecoveryWorker) is already backfilling the
+    // same DC — this is exercised by the cooldown tests below, which assert on the resulting call
+    // counts against the mocked backfiller rather than on any coalescing state within this class.
+
+    // ----- #92: per-DC min-backfill-interval cooldown -----
+
     [Fact]
-    public async Task ConcurrentReconcileForSameDc_IsCoalesced()
+    public async Task TwoTransitionsWithinCooldownWindow_TriggerOnlyOneBackfill()
     {
-        var gate = new TaskCompletionSource();
+        var connected = false;
+        var sut = CreateSut(new[] { Dc("east", () => connected) }, minBackfillIntervalSeconds: 300);
+
+        connected = true;
+        await sut.RunOnceAsync(); // first-seen -> backfill #1, starts the cooldown clock
+
+        connected = false;
+        await sut.RunOnceAsync(); // disconnect -> no backfill
+
+        connected = true;
+        await sut.RunOnceAsync(); // reconnect within the 300s cooldown -> must NOT backfill again
+
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
+    }
+
+    [Fact]
+    public async Task LocalDc_StartupRefill_IsImmediate_EvenWithLongCooldownConfigured()
+    {
+        // The documented intent (#92): a DC's FIRST backfill (nothing recorded yet, e.g. the local
+        // refill on control-plane startup) is never throttled by the cooldown, however long it is
+        // configured — only a DC that has ALREADY been successfully backfilled recently is throttled.
+        var sut = CreateSut(
+            new[] { Dc("west", () => true, isLocal: true) },
+            minBackfillIntervalSeconds: 3600);
+
+        await sut.RunOnceAsync();
+
+        VerifyBackfill("west", ConsistencyMode.BestEffort, Times.Once());
+    }
+
+    [Fact]
+    public async Task AfterCooldownElapses_ReconnectTriggersAnotherBackfill()
+    {
+        var connected = false;
+        var sut = CreateSut(new[] { Dc("east", () => connected) }, minBackfillIntervalSeconds: 1);
+
+        connected = true;
+        await sut.RunOnceAsync(); // backfill #1, starts a 1s cooldown
+
+        connected = false;
+        await sut.RunOnceAsync();
+
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+
+        connected = true;
+        await sut.RunOnceAsync(); // cooldown elapsed -> backfill #2
+
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task SkippedBackfill_DoesNotStartTheCooldownClock()
+    {
+        // A coalesced/guard-failed backfill (IDcBackfiller.Skipped) is not a "successful backfill", so
+        // it must not arm the cooldown — the very next tick's transition should still be free to try.
         _backfiller
             .Setup(b => b.BackfillDcAsync("east", It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()))
-            .Returns(async (string _, ConsistencyMode _, CommittedSnapshot _, CancellationToken _) =>
-            {
-                await gate.Task;
-                return 0;
-            });
+            .ReturnsAsync(IDcBackfiller.Skipped);
+
+        var connected = false;
+        var sut = CreateSut(new[] { Dc("east", () => connected) }, minBackfillIntervalSeconds: 300);
+
+        connected = true;
+        await sut.RunOnceAsync(); // first-seen -> "backfill" call #1, but it was coalesced/skipped
+
+        connected = false;
+        await sut.RunOnceAsync();
+
+        connected = true;
+        await sut.RunOnceAsync(); // no cooldown armed by the skipped call -> tries again immediately
+
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Exactly(2));
+    }
+
+    // ----- #92: composite-cache guard is checked ONCE per tick, not once per DC -----
+
+    [Fact]
+    public async Task CompositeCacheUnavailable_SkipsWholeTick_LogsOnce_AndNeverFetchesSnapshot()
+    {
+        _backfiller.Setup(b => b.IsCompositeCacheAvailable).Returns(false);
+        var logger = new Mock<ILogger<CacheReconciler>>();
+
+        var sut = CreateSut(
+            new[] { Dc("west", () => true, isLocal: true), Dc("east", () => true) },
+            logger: logger.Object);
+
+        await sut.RunOnceAsync();
+
+        VerifySnapshotFetch(Times.Never());
+        _backfiller.Verify(
+            b => b.BackfillDcAsync(It.IsAny<string>(), It.IsAny<ConsistencyMode>(), It.IsAny<CommittedSnapshot>(), It.IsAny<CancellationToken>()),
+            Times.Never());
+
+        // Exactly one warning for the whole tick, even though TWO DCs were newly reachable.
+        logger.Verify(
+            x => x.Log(
+                It.Is<LogLevel>(l => l == LogLevel.Warning),
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once());
+    }
+
+    [Fact]
+    public async Task CompositeCacheUnavailable_ClearsWatermark_SoNextTickRetries()
+    {
+        _backfiller.SetupSequence(b => b.IsCompositeCacheAvailable)
+            .Returns(false)
+            .Returns(true);
 
         var sut = CreateSut(new[] { Dc("east", () => true) });
 
-        var first = sut.RunReconcileAsync("east", isLocal: false, EmptySnapshot);  // acquires slot, blocks on gate
-        var second = sut.RunReconcileAsync("east", isLocal: false, EmptySnapshot); // sees in-flight -> returns now
+        await sut.RunOnceAsync(); // guard fails -> skipped, watermark cleared
+        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Never());
 
-        await second;
-        VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
-
-        gate.SetResult();
-        await first;
-
+        await sut.RunOnceAsync(); // re-detected as newly reachable -> guard now passes -> backfilled
         VerifyBackfill("east", ConsistencyMode.BestEffort, Times.Once());
     }
 

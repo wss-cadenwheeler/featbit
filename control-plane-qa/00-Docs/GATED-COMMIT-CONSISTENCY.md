@@ -87,6 +87,51 @@ multi-replica redundancy ever becomes a measurable cost, but it is out of scope 
 
 ---
 
+## 1c. Backfill trigger hygiene (#92)
+
+Four hardening items on top of the shared `IDcBackfiller`, all applying to **both**
+`CacheReconciler` and `RecoveryWorker` (they share one `IDcBackfiller` singleton):
+
+- **Reconnect cooldown (`CacheReconciler` only):** a per-DC minimum interval since that DC's last
+  *successful* backfill — `ControlPlane:CacheReconcile:MinBackfillIntervalSeconds` (default **300**).
+  Without it, a DC whose Redis link is flapping (repeated disconnect→connect) re-reads the full
+  source of truth and rewrites that DC's cache on every reconnect. A DC's FIRST backfill (nothing
+  recorded yet — this is what makes the immediate local refill on control-plane startup work) is
+  never throttled; only a DC that has already been successfully backfilled recently is. A
+  coalesced/guard-skipped call (see below) does **not** arm the cooldown, since it did no work. The
+  failure-path retry behavior (a failed backfill clears the connection watermark so the next tick
+  retries) is unchanged.
+- **Cross-worker coalescing (moved into `IDcBackfiller`):** the per-DC in-flight set used to live on
+  `CacheReconciler` only, so a `RecoveryWorker` tick and a `CacheReconciler` tick backfilling the
+  SAME DC at the same moment each ran their own independent read/write cycle. The in-flight set now
+  lives on the shared `DcBackfiller` singleton itself, so **either** caller's concurrent call for a
+  DcId already being backfilled returns immediately (`IDcBackfiller.Skipped`, see below) instead of
+  doing redundant work — safe because every underlying write is idempotent/only-advance-guarded
+  (#89).
+- **Honest recovery metrics/logs:** `BackfillDcAsync` returns the sentinel `IDcBackfiller.Skipped`
+  (`-1`) — distinct from a legitimate `0` (a real backfill that happened to touch zero flags, e.g. a
+  secret/segment-only tick) — when the composite cache is unavailable OR the call coalesced with one
+  already in flight. `RecoveryWorker.RunOnceAsync`'s returned/logged count now reflects actual
+  repairs (`result != Skipped`), not merely how many DCs were in the "returned" set that tick.
+- **Composite-cache guard hoisted to once per tick:** both `RecoveryWorker` and `CacheReconciler`
+  now check `IDcBackfiller.IsCompositeCacheAvailable` ONCE, before their per-DC loop; a
+  misconfiguration (e.g. a `None` cache provider) logs a single warning for the whole tick — and
+  skips the committed-snapshot fetch entirely — instead of one warning (and one wasted snapshot
+  fetch) per DC.
+- **Redis command-timeout policy:** with `abortConnect=false` and no override, a command to a
+  down/unreachable DC blocks for StackExchange.Redis's own default (~5s) `syncTimeout` before
+  failing — and RecoveryWorker/CacheReconciler write every flag/segment/secret for a DC
+  **sequentially** within a tick, so that stall accumulates linearly for the whole outage.
+  `CacheServiceCollectionExtensions.AddRedis` now appends explicit `connectTimeout`/`syncTimeout`
+  (default **1500ms** each, see `ControlPlane:Redis:ConnectTimeoutMs` /
+  `ControlPlane:Redis:SyncTimeoutMs` in §3) to every per-DC connection string, UNLESS that option is
+  already present in the instance's configured `ConnectionString` (an operator override always
+  wins). Trade-off: 1500ms is deliberately generous relative to a healthy Redis's normal latency to
+  avoid false-positive command failures under real but slow load, while still bounding the worst
+  case far below the unbounded default.
+
+---
+
 ## 2. Enabling it
 
 ### 2.1 Control plane (`modules/control-plane`)
@@ -96,7 +141,15 @@ multi-replica redundancy ever becomes a measurable cost, but it is out of scope 
   "LeaseTtlSeconds": 15,              // how long a heartbeat keeps a DC "live"
   "CommitCoordinator": { "IntervalSeconds": 5 },
   "Recovery":          { "IntervalSeconds": 10 },
-  "DcIdConsistency":   { "IntervalSeconds": 60 }
+  "DcIdConsistency":   { "IntervalSeconds": 60 },
+  "CacheReconcile": {
+    "IntervalSeconds": 10,
+    "MinBackfillIntervalSeconds": 300  // #92: per-DC reconnect-flap cooldown
+  },
+  "Redis": {
+    "ConnectTimeoutMs": 1500,          // #92: per-DC connection-string timeout overrides
+    "SyncTimeoutMs": 1500
+  }
 }
 ```
 And one `Redis:Instances` entry **per DC**, each labeled with its `DcId`:
@@ -144,6 +197,9 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:LeaderElection:TtlSeconds` | `30` | CP | Leader lock TTL (#71, see §1a) |
 | `ControlPlane:LeaderElection:RenewIntervalSeconds` | `10` | CP | Leader lock acquire/renew tick |
 | `ControlPlane:StagedFlagGc:IntervalSeconds` | `300` | API/back-end | GC of superseded `v{ts}` keys |
+| `ControlPlane:CacheReconcile:MinBackfillIntervalSeconds` | `300` | CP | Per-DC reconnect-flap backfill cooldown (#92, see §1c) |
+| `ControlPlane:Redis:ConnectTimeoutMs` | `1500` | CP | Per-DC Redis connect timeout override (#92, see §1c) |
+| `ControlPlane:Redis:SyncTimeoutMs` | `1500` | CP | Per-DC Redis command (sync) timeout override (#92, see §1c) |
 | `Redis:Instances[].DcId` | — | CP | DC label per Redis instance (join key) |
 | `ControlPlane:DcId` / `:Region` | — | ELS | This pod's DC identity (must match a Redis `DcId`) |
 
