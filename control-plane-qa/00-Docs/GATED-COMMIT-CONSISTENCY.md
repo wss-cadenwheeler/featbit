@@ -218,6 +218,7 @@ Watch for those warnings (and the `unmatched_dc_count` metric) right after enabl
 | `ControlPlane:ConsistencyMode` | `BestEffort` | CP + ELS | `GatedCommit` turns the whole feature on |
 | `ControlPlane:LeaseTtlSeconds` | `15` | CP | Heartbeat → lease lifetime; eviction threshold |
 | `ControlPlane:HeartbeatIntervalSeconds` | `5` | ELS | Heartbeat cadence. **MUST be `<= LeaseTtlSeconds/3`** (e.g. 5s against the 15s TTL default) — a slower cadence lets each DC's lease expire between heartbeats, flapping the live set and stalling GatedCommit (#99). The control plane logs a one-time-per-DC warning when it detects this. |
+| `ControlPlane:HeartbeatStalenessThresholdSeconds` | `15` | ELS | Self-fence (D5, #22) readiness threshold: an eval-server pod fails `/health/readiness` (HTTP 503) once it has been unable to publish a heartbeat for longer than this. Default is 3x the `HeartbeatIntervalSeconds` default (5s), coinciding with the `LeaseTtlSeconds` default (15s) — a few missed heartbeats before the fence trips (#104; previously 180s, incoherent with the post-#99 5s interval default). |
 | `ControlPlane:CommitCoordinator:IntervalSeconds` | `5` | CP | Commit-evaluation tick |
 | `ControlPlane:Recovery:IntervalSeconds` | `10` | CP | Returning-DC backfill tick |
 | `ControlPlane:DcIdConsistency:IntervalSeconds` | `60` | CP | DcId-mismatch advisory check |
@@ -344,10 +345,10 @@ automation suite cp13 --env-id <env> --no-dashboard `
 ```
 
 > **CP-13 timing:** the fence trips after `ControlPlane:HeartbeatStalenessThresholdSeconds`
-> (default 180s). For a fast test, set it low on the east eval deployment **and** pass the
-> same value to the suite — but keep it **above** `ControlPlane:HeartbeatIntervalSeconds`
-> (default 60s) or the pod looks stale between heartbeats and flaps. E.g. interval=5,
-> threshold=30.
+> (default 15s, i.e. 3x the interval default — see below). For a fast test, set it low on the
+> east eval deployment **and** pass the same value to the suite — but keep it **above**
+> `ControlPlane:HeartbeatIntervalSeconds` (default 5s) or the pod looks stale between
+> heartbeats and flaps. E.g. interval=5, threshold=30.
 
 Scenarios that need a disruption **skip** (they do not fail) when their command is not
 configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gracefully.
@@ -363,8 +364,12 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   segments, #83) is persisted per-DC in `DcLease.AppliedWatermarks` and consumed by the
   `applied_watermark_lag_ms` gauge (#84) — it is **not** used for commit gating (Model A remains
   staged-everywhere), only for the per-DC/per-env lag metric above.
-- **Self-fence (D5, #22):** a partitioned DC serves last-committed (consistent-but-stale) rather
-  than refusing to serve. Optional stricter mode, not implemented.
+- **Self-fence (D5, #22):** implemented as a hard readiness fence — `HeartbeatFreshnessHealthCheck`
+  fails `/health/readiness` (HTTP 503) once a pod has been unable to publish a heartbeat for longer
+  than `ControlPlane:HeartbeatStalenessThresholdSeconds` (default 15s), pulling a
+  partitioned/evicted DC's eval servers out of load-balancer rotation rather than letting them keep
+  serving last-committed (consistent-but-stale) values. Liveness is unaffected (the pod is not
+  restarted); it rejoins rotation once heartbeats resume. See CP-13 above.
 - **EF residual window:** the optimistic guards on `SetPending`/`PromotePending` are atomic on
   Mongo but load-check-save on EF/Postgres (no rowversion) — a documented narrow window.
 - **Multi-replica control plane (#71 — resolved):** the coordinator/recovery/checker workers now
