@@ -251,4 +251,106 @@ public class HeartbeatMessageHandlerTests
 
         _leaseStore.Verify(x => x.UpsertLeaseAsync(It.IsAny<DcLease>()), Times.Never);
     }
+
+    // #99: HeartbeatMessageHandler is registered AddKeyedTransient (a new instance per message),
+    // so cadence state is tracked process-wide (static). Each test below uses a unique DcId to
+    // avoid bleeding state into other tests sharing that process-wide state.
+
+    private void VerifyWarningLogged(Times times)
+    {
+        _logger.Verify(
+            x => x.Log(
+                It.Is<LogLevel>(l => l == LogLevel.Warning),
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            times);
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenHeartbeatGapExceedsLeaseTtl_LogsWarningOnce()
+    {
+        var dcId = $"dc-cadence-slow-{Guid.NewGuid()}";
+        var config = BuildConfig(consistencyMode: "GatedCommit", leaseTtlSeconds: "15");
+        var t0 = DateTimeOffset.UtcNow;
+
+        // Baseline heartbeat: no previous timestamp to compare against yet, so no warning.
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0,
+            DcId = dcId
+        }));
+        VerifyWarningLogged(Times.Never());
+
+        // Next heartbeat arrives 60s later — well beyond the 15s TTL, so the lease already
+        // expired between the two heartbeats.
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0.AddSeconds(60),
+            DcId = dcId
+        }));
+        VerifyWarningLogged(Times.Once());
+
+        // A third slow heartbeat for the same DC does not warn again (rate-limited once per
+        // DcId per process).
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0.AddSeconds(120),
+            DcId = dcId
+        }));
+        VerifyWarningLogged(Times.Once());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenHeartbeatGapWithinLeaseTtl_DoesNotLogWarning()
+    {
+        var dcId = $"dc-cadence-ok-{Guid.NewGuid()}";
+        var config = BuildConfig(consistencyMode: "GatedCommit", leaseTtlSeconds: "15");
+        var t0 = DateTimeOffset.UtcNow;
+
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0,
+            DcId = dcId
+        }));
+
+        // 5s later — coherent with a 15s TTL (<= TTL/3).
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0.AddSeconds(5),
+            DcId = dcId
+        }));
+
+        VerifyWarningLogged(Times.Never());
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenBestEffortAndCadenceSlow_DoesNotLogWarning()
+    {
+        // Cadence tracking only runs when a lease is being upserted (GatedCommit).
+        var dcId = $"dc-cadence-besteffort-{Guid.NewGuid()}";
+        var config = BuildConfig(consistencyMode: "BestEffort");
+        var t0 = DateTimeOffset.UtcNow;
+
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0,
+            DcId = dcId
+        }));
+        await CreateSut(config).HandleAsync(JsonSerializer.Serialize(new HealthMessage
+        {
+            PodId = Guid.NewGuid().ToString(),
+            Timestamp = t0.AddSeconds(60),
+            DcId = dcId
+        }));
+
+        VerifyWarningLogged(Times.Never());
+    }
 }

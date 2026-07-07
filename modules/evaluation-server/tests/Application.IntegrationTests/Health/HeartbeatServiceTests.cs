@@ -120,4 +120,47 @@ public class HeartbeatServiceTests
         Assert.False(string.IsNullOrEmpty(heartbeat.PodId));
         Assert.NotEqual(default, heartbeat.Timestamp);
     }
+
+    // #99: ControlPlane:HeartbeatIntervalSeconds must fall back to a value coherent with the
+    // control plane's default ControlPlane:LeaseTtlSeconds (15s) when unset/0, not the old 60s
+    // (which meant every DC lease expired between heartbeats and GatedCommit stalled).
+
+    [Fact]
+    public void ResolveHeartbeatIntervalSeconds_FallsBackToDefault_WhenUnset()
+    {
+        var interval = HeartbeatService.ResolveHeartbeatIntervalSeconds(Config());
+
+        Assert.Equal(HeartbeatService.DefaultHeartbeatIntervalSeconds, interval);
+        Assert.Equal(5, interval);
+    }
+
+    [Fact]
+    public void ResolveHeartbeatIntervalSeconds_FallsBackToDefault_WhenZero()
+    {
+        var config = Config(("ControlPlane:HeartbeatIntervalSeconds", "0"));
+
+        var interval = HeartbeatService.ResolveHeartbeatIntervalSeconds(config);
+
+        Assert.Equal(HeartbeatService.DefaultHeartbeatIntervalSeconds, interval);
+    }
+
+    [Fact]
+    public void ResolveHeartbeatIntervalSeconds_FallsBackToDefault_WhenNegative()
+    {
+        var config = Config(("ControlPlane:HeartbeatIntervalSeconds", "-5"));
+
+        var interval = HeartbeatService.ResolveHeartbeatIntervalSeconds(config);
+
+        Assert.Equal(HeartbeatService.DefaultHeartbeatIntervalSeconds, interval);
+    }
+
+    [Fact]
+    public void ResolveHeartbeatIntervalSeconds_HonorsExplicitValue()
+    {
+        var config = Config(("ControlPlane:HeartbeatIntervalSeconds", "30"));
+
+        var interval = HeartbeatService.ResolveHeartbeatIntervalSeconds(config);
+
+        Assert.Equal(30, interval);
+    }
 }
