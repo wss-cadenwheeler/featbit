@@ -57,7 +57,10 @@ public class SegmentChangeMessageHandler(
                     await segmentService.SetPendingAsync(
                         deserializedSegmentNonEnvironmentSpecificNode.Id,
                         deserializedSegmentNonEnvironmentSpecificNode,
-                        ts);
+                        ts,
+                        deserializedNotificationNode.OperatorId,
+                        deserializedNotificationNode.Operation,
+                        deserializedNotificationNode.IsTargetingChange);
                 }
                 else
                 {

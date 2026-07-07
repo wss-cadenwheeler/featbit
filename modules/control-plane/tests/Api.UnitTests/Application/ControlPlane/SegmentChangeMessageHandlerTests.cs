@@ -47,13 +47,25 @@ public class SegmentChangeMessageHandlerTests
             BuildConfiguration(consistencyMode),
             _producer.Object);
 
-    private static string BuildMessage(Guid env1, Guid env2, Guid segmentId, DateTime updatedAt)
+    private static string BuildMessage(
+        Guid env1, Guid env2, Guid segmentId, DateTime updatedAt,
+        Guid? operatorId = null, string? operation = null, bool? isTargetingChange = null)
     {
+        var notification = operatorId is null && operation is null && isTargetingChange is null
+            ? "{}"
+            : $$"""
+                {
+                  "operatorId": "{{operatorId}}",
+                  "operation": "{{operation}}",
+                  "isTargetingChange": {{(isTargetingChange!.Value ? "true" : "false")}}
+                }
+                """;
+
         return $$"""
                  {
                    "segmentNonSpecific": { "id": "{{segmentId}}", "updatedAt": "{{updatedAt:O}}" },
                    "envIds": ["{{env1}}","{{env2}}"],
-                   "notification": {},
+                   "notification": {{notification}},
                    "region": "{{Region}}"
                  }
                  """;
@@ -148,7 +160,16 @@ public class SegmentChangeMessageHandlerTests
         var updatedAt = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
         var expectedTs = new DateTimeOffset(updatedAt).ToUnixTimeMilliseconds();
 
-        var payload = BuildMessage(env1, env2, segmentId, updatedAt);
+        // Use non-default attribution values (a real operator, a non-Update operation, and
+        // isTargetingChange = false) so the assertions below can't be satisfied by accident with
+        // the legacy hardcoded reconstruction values (Guid.Empty / Update / true).
+        var operatorId = Guid.NewGuid();
+        const string operation = "Archive";
+        const bool isTargetingChange = false;
+
+        var payload = BuildMessage(
+            env1, env2, segmentId, updatedAt,
+            operatorId: operatorId, operation: operation, isTargetingChange: isTargetingChange);
 
         await sut.HandleAsync(payload);
 
@@ -156,7 +177,13 @@ public class SegmentChangeMessageHandlerTests
             x => x.StageSegmentAsync(It.Is<Segment>(s => s.Id == segmentId), expectedTs),
             Times.Once);
         _segmentService.Verify(
-            x => x.SetPendingAsync(segmentId, It.Is<Segment>(s => s.Id == segmentId), expectedTs),
+            x => x.SetPendingAsync(
+                segmentId,
+                It.Is<Segment>(s => s.Id == segmentId),
+                expectedTs,
+                operatorId,
+                operation,
+                isTargetingChange),
             Times.Once);
 
         // GatedCommit must hold the affected-flags / segment-change propagation for the coordinator.
