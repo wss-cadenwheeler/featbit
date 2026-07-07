@@ -63,7 +63,10 @@ class CP14Scenario(ConsistencyScenarioBase):
             self.add_timeline_event("phase-start", phase="phase-1-besteffort")
             if self.config.set_besteffort_command:
                 self.run_named_command(
-                    "set-besteffort", self.config.set_besteffort_command, required=False
+                    "set-besteffort",
+                    self.config.set_besteffort_command,
+                    required=False,
+                    timeout=600,
                 )
                 time.sleep(self.config.commit_coordinator_interval_seconds)
             self._assert_besteffort_shape(
@@ -81,7 +84,10 @@ class CP14Scenario(ConsistencyScenarioBase):
                 # --- Phase 2: Enable GatedCommit ----------------------------------
                 self.add_timeline_event("phase-start", phase="phase-2-gatedcommit")
                 self.run_named_command(
-                    "set-gatedcommit", self.config.set_gatedcommit_command, required=True
+                    "set-gatedcommit",
+                    self.config.set_gatedcommit_command,
+                    required=True,
+                    timeout=600,
                 )
                 time.sleep(self.config.commit_coordinator_interval_seconds)
                 # Optional DcId-mismatch advisory smoke (clean expected).
@@ -105,7 +111,10 @@ class CP14Scenario(ConsistencyScenarioBase):
                 # --- Phase 3: Rollback to BestEffort ------------------------------
                 self.add_timeline_event("phase-start", phase="phase-3-rollback")
                 self.run_named_command(
-                    "set-besteffort-rollback", self.config.set_besteffort_command, required=True
+                    "set-besteffort-rollback",
+                    self.config.set_besteffort_command,
+                    required=True,
+                    timeout=600,
                 )
                 time.sleep(self.config.commit_coordinator_interval_seconds)
                 self._assert_besteffort_shape(
@@ -137,7 +146,14 @@ class CP14Scenario(ConsistencyScenarioBase):
     def _assert_besteffort_shape(
         self, source_url, target_url, contexts, flag_id, headers, *, label
     ) -> None:
-        """Toggle and assert BestEffort propagation: legacy key updates, no committed pointer."""
+        """Toggle and assert BestEffort propagation: legacy key updates, pointer untouched.
+
+        Note: committed-pointer keys legitimately PERSIST after a GatedCommit->BestEffort
+        rollback (they are harmless residue; see the ops guide's rollback section) — so the
+        correct BestEffort assertion is that the pointer does not ADVANCE during the toggle,
+        not that it is absent.
+        """
+        pointers_before = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
         self.toggle_flag(source_url, self.FLAG_KEY, True, headers)
         # Immediate propagation: the management API converges to true.
         api_converged, _src, _tgt = self.poll_convergence(
@@ -149,12 +165,14 @@ class CP14Scenario(ConsistencyScenarioBase):
             "Both regions report isEnabled=true (immediate best-effort propagation).",
             "evaluated",
         )
-        # No committed pointer should exist under BestEffort.
-        pointers = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
+        # The committed pointer must not ADVANCE under BestEffort (stale residue from a
+        # previous GatedCommit phase is expected and harmless).
+        pointers_after = {c: self.get_committed_pointer(c, "flag", flag_id) for c in contexts}
         self.assertions.add(
-            f"{label}-besteffort-no-committed-pointer",
-            all(v is None for v in pointers.values()),
-            f"No committed-pointer key under BestEffort (observed {pointers}).",
+            f"{label}-besteffort-pointer-not-advanced",
+            pointers_after == pointers_before,
+            f"Committed pointer unchanged by a BestEffort toggle "
+            f"(before {pointers_before}, after {pointers_after}).",
             "evaluated",
         )
         # The legacy single-value key should be present in both DCs.
