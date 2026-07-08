@@ -807,6 +807,13 @@ class _null_context:
     help="Max seconds to keep retrying post-reset health checks",
 )
 @click.option(
+    "--timeout-seconds",
+    type=int,
+    default=lambda: int(get_env("TIMEOUT_SECONDS", "60")),
+    help="Per-assertion convergence timeout for every scenario in the suite "
+    "(e.g. committed-pointer polls; the first post-flip gated commit can take >60s)",
+)
+@click.option(
     "--health-poll-interval-seconds",
     type=int,
     default=5,
@@ -943,6 +950,7 @@ def suite(
     reset_env: bool,
     stabilization_seconds: int,
     health_timeout_seconds: int,
+    timeout_seconds: int,
     health_poll_interval_seconds: int,
     log_detail: str,
     env_id: Optional[str],
@@ -1164,7 +1172,7 @@ def suite(
                 skip_certificate_check=skip_cert_check,
                 flag_key=None,
                 target_status=True,
-                timeout_seconds=60,
+                timeout_seconds=timeout_seconds,
                 poll_interval_ms=1000,
                 disruption_hold_seconds=15,
                 start_disruption_command=start_cmd,
