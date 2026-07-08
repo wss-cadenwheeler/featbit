@@ -324,6 +324,14 @@ class CP06Scenario(BaseScenario):
         try:
             response = client.get(endpoint, headers=headers)
             data = extract_data(response)
+            # EnvironmentVm exposes a "secrets" collection ({id,name,type,value});
+            # there is no clientSideAvailabilitySecretKey field (#113 — polling
+            # on it made convergence unachievable). Any secret with a value
+            # proves the env's secrets propagated.
+            secrets = (data.get("secrets") or []) if data else []
+            secret_value = next(
+                (s.get("value") for s in secrets if s.get("value")), None
+            )
             return EnvironmentState(
                 region=region,
                 observed_at_utc=self._get_utc_timestamp(),
@@ -331,9 +339,7 @@ class CP06Scenario(BaseScenario):
                 id=data.get("id") if data else None,
                 key=data.get("key") if data else None,
                 name=data.get("name") if data else None,
-                secret_key=data.get("clientSideAvailabilitySecretKey")
-                if data
-                else None,
+                secret_key=secret_value,
                 error=None,
             )
         except Exception as e:
