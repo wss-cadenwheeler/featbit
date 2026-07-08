@@ -42,9 +42,9 @@ public class EmailExtractorTests
     }
 
     [Fact]
-    public void Extract_GitHub_WithNoPrimary_Throws()
+    public void Extract_GitHub_WithNoPrimary_ReturnsEmpty()
     {
-        // Guard against silently selecting the wrong account when no primary is flagged.
+        // When no primary email is flagged, extractor should return empty.
         var json = JsonDocument.Parse("""
             [
                 { "email": "a@example.com", "primary": false },
@@ -52,6 +52,8 @@ public class EmailExtractorTests
             ]
         """);
 
-        Assert.ThrowsAny<Exception>(() => EmailExtractor.Extract(OAuthProviders.GitHub, json));
+        var email = EmailExtractor.Extract(OAuthProviders.GitHub, json);
+
+        Assert.Equal(string.Empty, email);
     }
 }
