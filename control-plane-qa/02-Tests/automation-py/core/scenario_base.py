@@ -336,32 +336,15 @@ class BaseScenario(ABC):
         )
 
     def _discover_redis_pod(self, context: str, namespace: str) -> Optional[str]:
-        """Discover a Redis pod name in the target cluster."""
-        by_label = self._run_kubectl(
-            [
-                "--context",
-                context,
-                "-n",
-                namespace,
-                "get",
-                "pods",
-                "-l",
-                "app=redis",
-                "-o",
-                "json",
-            ]
-        )
-        if by_label.returncode == 0:
-            try:
-                items = json.loads(by_label.stdout).get("items", [])
-                for item in items:
-                    name = item.get("metadata", {}).get("name")
-                    phase = item.get("status", {}).get("phase")
-                    if name and phase == "Running":
-                        return name
-            except json.JSONDecodeError:
-                pass
+        """Discover a Redis pod name in the target cluster.
 
+        The Sentinel statefulset (featbit-redis-node-*) is the authoritative
+        per-cluster cache whenever it is present: a fresh deploy also leaves a
+        legacy "redis" pod Running (labeled app=redis) that points at an empty
+        orphan Redis, so a label match must never win over a sentinel node
+        (#113 follow-up — the old label-first order sent every observation to
+        the orphan).
+        """
         all_pods = self._run_kubectl(
             ["--context", context, "-n", namespace, "get", "pods", "-o", "json"]
         )
@@ -370,15 +353,26 @@ class BaseScenario(ABC):
 
         try:
             items = json.loads(all_pods.stdout).get("items", [])
-            for item in items:
-                name = item.get("metadata", {}).get("name", "")
-                phase = item.get("status", {}).get("phase")
-                # "redis" covers the legacy single-pod topology; "featbit-redis-node"
-                # covers the bitnami Redis+Sentinel statefulset (per-cluster HA topology).
-                if (name.startswith("redis") or name.startswith("featbit-redis-node")) and phase == "Running":
-                    return name
         except json.JSONDecodeError:
             return None
+
+        running = [
+            item for item in items
+            if item.get("metadata", {}).get("name")
+            and item.get("status", {}).get("phase") == "Running"
+        ]
+        # 1. Sentinel statefulset nodes (per-cluster HA topology).
+        for item in running:
+            if item.get("metadata", {}).get("name", "").startswith("featbit-redis-node"):
+                return item["metadata"]["name"]
+        # 2. Pods labeled app=redis (legacy single-pod topology).
+        for item in running:
+            if (item.get("metadata", {}).get("labels") or {}).get("app") == "redis":
+                return item["metadata"]["name"]
+        # 3. Name-prefix fallback for unlabeled legacy pods.
+        for item in running:
+            if item.get("metadata", {}).get("name", "").startswith("redis"):
+                return item["metadata"]["name"]
 
         return None
 
