@@ -129,3 +129,102 @@ def test_auto_topic_check_fails_cleanly_without_broker_pod(monkeypatch):
     check = results["source-topic-check"]
     assert not check.passed
     assert "no running kafka broker pod" in check.details
+
+
+def test_auto_topic_check_falls_back_to_peer_context(monkeypatch):
+    """Under GatedCommit the eval publish lands in the committing coordinator's
+    DC, which may be the peer — a source-context miss must consult the
+    fallback context before failing (#113)."""
+    scenario = CP09Scenario(_config())
+
+    def fake_kubectl(self, args, timeout=60, **kw):
+        if args[4] == "get":
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps({"items": KAFKA_FLEET}), stderr=""
+            )
+        ctx = args[args.index("--context") + 1]
+        stdout = '{"id": "flag-123"}\n' if ctx == "west" else ""
+        # A timed-out (possibly empty) read always carries TimeoutException.
+        return SimpleNamespace(
+            returncode=1,
+            stdout=stdout,
+            stderr="org.apache.kafka.common.errors.TimeoutException\n",
+        )
+
+    monkeypatch.setattr(CP09Scenario, "_run_kubectl", fake_kubectl)
+
+    scenario.run_kafka_topic_check(
+        "downstream-topic-check",
+        None,
+        context="east",
+        bootstrap="kafka:9092",
+        topic="featbit-feature-flag-change",
+        flag_id="flag-123",
+        fallback_context="west",
+    )
+
+    result = {a.name: a for a in scenario.assertions.assertions}["downstream-topic-check"]
+    assert result.passed, result.details
+    assert "west" in result.details
+
+
+def test_auto_topic_check_fails_when_both_contexts_miss(monkeypatch):
+    scenario = CP09Scenario(_config())
+
+    def fake_kubectl(self, args, timeout=60, **kw):
+        if args[4] == "get":
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps({"items": KAFKA_FLEET}), stderr=""
+            )
+        # Timed-out empty reads in BOTH contexts (TimeoutException = a valid
+        # empty read, not a consumer failure).
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="org.apache.kafka.common.errors.TimeoutException\n",
+        )
+
+    monkeypatch.setattr(CP09Scenario, "_run_kubectl", fake_kubectl)
+
+    scenario.run_kafka_topic_check(
+        "downstream-topic-check",
+        None,
+        context="east",
+        bootstrap="kafka:9092",
+        topic="featbit-feature-flag-change",
+        flag_id="flag-123",
+        fallback_context="west",
+    )
+
+    result = {a.name: a for a in scenario.assertions.assertions}["downstream-topic-check"]
+    assert not result.passed
+    assert "east" in result.details and "west" in result.details
+
+
+def test_auto_topic_check_hard_consumer_failure_does_not_fall_back(monkeypatch):
+    """rc!=0 with NO TimeoutException is a broken consumer, not an empty
+    read — fail on the primary context without consulting the fallback."""
+    scenario = CP09Scenario(_config())
+
+    def fake_kubectl(self, args, timeout=60, **kw):
+        if args[4] == "get":
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps({"items": KAFKA_FLEET}), stderr=""
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="connection refused")
+
+    monkeypatch.setattr(CP09Scenario, "_run_kubectl", fake_kubectl)
+
+    scenario.run_kafka_topic_check(
+        "downstream-topic-check",
+        None,
+        context="east",
+        bootstrap="kafka:9092",
+        topic="featbit-feature-flag-change",
+        flag_id="flag-123",
+        fallback_context="west",
+    )
+
+    result = {a.name: a for a in scenario.assertions.assertions}["downstream-topic-check"]
+    assert not result.passed
+    assert "consumer failed" in result.details

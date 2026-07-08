@@ -581,43 +581,62 @@ class BaseScenario(ABC):
         expected_status: Optional[bool] = None,
         context: Optional[str] = None,
     ) -> None:
-        """Run Redis check for flag via provided command or automatic Kubernetes discovery."""
+        """Run Redis check for flag via provided command or automatic Kubernetes discovery.
+
+        When ``expected_status`` is given, the value check POLLS until it
+        matches or ``config.timeout_seconds`` elapses: under GatedCommit the
+        legacy ``featbit:flag:{id}`` key only updates at commit time
+        (coordinator tick), while the management API converges instantly
+        (shared Mongo) — a single sample races the commit (#113).
+        """
         assertion_name = f"redis-{region}-check"
 
-        found, keys, sampled_values = self._run_redis_key_lookup(
-            assertion_name=assertion_name,
-            command=command,
-            redis_key=f"featbit:flag:{flag_id}" if flag_id else "",
-            identifier=flag_id or "",
-            identifier_label="flag_id",
-            region=region,
-            context=context,
-            diagnostics=True,
-            timeline_event="redis-auto-check",
-            timeline_extra={
-                "flag_key": flag_key,
-                "expected_status": expected_status,
-            },
-        )
-        if not found or command:
-            return
+        deadline = time.time() + (self.config.timeout_seconds or 60)
+        poll_interval = (self.config.poll_interval_ms or 1000) / 1000.0
 
-        expected_state_ok = True
-        if expected_status is not None:
-            expected_token = f'"isenabled":{str(expected_status).lower()}'
-            expected_state_ok = any(expected_token in value.lower() for value in sampled_values)
-
-        if expected_state_ok:
-            self.assertions.add_pass(
-                assertion_name,
-                f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context or region}.",
+        while True:
+            found, keys, sampled_values = self._run_redis_key_lookup(
+                assertion_name=assertion_name,
+                command=command,
+                redis_key=f"featbit:flag:{flag_id}" if flag_id else "",
+                identifier=flag_id or "",
+                identifier_label="flag_id",
+                region=region,
+                context=context,
+                diagnostics=True,
+                timeline_event="redis-auto-check",
+                timeline_extra={
+                    "flag_key": flag_key,
+                    "expected_status": expected_status,
+                },
             )
-            self._notify_step(assertion_name, "ok")
-            return
+            if not found or command:
+                return
+
+            expected_state_ok = True
+            if expected_status is not None:
+                expected_token = f'"isenabled":{str(expected_status).lower()}'
+                expected_state_ok = any(
+                    expected_token in value.lower() for value in sampled_values
+                )
+
+            if expected_state_ok:
+                self.assertions.add_pass(
+                    assertion_name,
+                    f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context or region}.",
+                )
+                self._notify_step(assertion_name, "ok")
+                return
+
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_interval)
 
         self.assertions.add_fail(
             assertion_name,
-            f"Redis contains keys for flag_key={flag_key} in context={context or region}, but sampled values did not include expected isEnabled={expected_status}.",
+            f"Redis contains keys for flag_key={flag_key} in context={context or region}, "
+            f"but sampled values did not include expected isEnabled={expected_status} "
+            f"within {self.config.timeout_seconds}s.",
         )
         self._notify_step(assertion_name, "failed", "isEnabled mismatch")
 
@@ -754,11 +773,17 @@ class BaseScenario(ABC):
         topic: str,
         flag_id: Optional[str] = None,
         namespace: str = "featbit",
+        fallback_context: Optional[str] = None,
     ) -> None:
         """Assert a flag-change message exists on a Kafka topic.
 
         Uses kubectl exec into the main kafka pod with kafka-console-consumer.sh.
         Delegates to a custom shell command when one is provided.
+
+        ``fallback_context``: under GatedCommit the evaluation-server publish
+        happens at commit time in the COMMITTING coordinator's DC — which may
+        be the peer, not the source region (#113). When given, a GUID miss in
+        the primary context consults the fallback context before failing.
         """
         if command:
             self.run_optional_check(name, command)
@@ -771,56 +796,77 @@ class BaseScenario(ABC):
             self._notify_step(name, "failed", "flag_id not resolved")
             return
 
+        contexts_to_check = [context]
+        if fallback_context and fallback_context != context:
+            contexts_to_check.append(fallback_context)
+
         try:
-            kafka_pod = self._discover_kafka_pod(context, namespace)
-            if not kafka_pod:
-                self.assertions.add_fail(
-                    name,
-                    f"Kafka topic check found no running kafka broker pod "
-                    f"(label app=kafka) in context={context} namespace={namespace}.",
-                )
-                self._notify_step(name, "failed", "no kafka pod found")
-                return
+            checked: list[str] = []
+            for ctx in contexts_to_check:
+                kafka_pod = self._discover_kafka_pod(ctx, namespace)
+                if not kafka_pod:
+                    self.assertions.add_fail(
+                        name,
+                        f"Kafka topic check found no running kafka broker pod "
+                        f"(label app=kafka) in context={ctx} namespace={namespace}.",
+                    )
+                    self._notify_step(name, "failed", "no kafka pod found")
+                    return
 
-            result = self._run_kubectl(
-                [
-                    "--context", context,
-                    "-n", namespace,
-                    "exec", kafka_pod, "--",
-                    f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
-                    "--bootstrap-server", bootstrap,
-                    "--topic", topic,
-                    "--from-beginning",
-                    "--timeout-ms", "5000",
-                ],
-                timeout=30,
+                result = self._run_kubectl(
+                    [
+                        "--context", ctx,
+                        "-n", namespace,
+                        "exec", kafka_pod, "--",
+                        f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
+                        "--bootstrap-server", bootstrap,
+                        "--topic", topic,
+                        "--from-beginning",
+                        "--timeout-ms", "5000",
+                    ],
+                    timeout=30,
+                )
+
+                # kafka-console-consumer exits 1 on timeout even when messages were
+                # found; treat any output as potentially valid and rely on content
+                # search. A hard consumer failure in the PRIMARY context is an
+                # infrastructure error, not a miss — fail without the fallback.
+                output = result.stdout + result.stderr
+                if (
+                    result.returncode != 0
+                    and not result.stdout.strip()
+                    and ctx == context
+                    and "TimeoutException" not in output
+                ):
+                    self.assertions.add_fail(
+                        name,
+                        f"Kafka consumer failed for topic={topic} on bootstrap={bootstrap} "
+                        f"in context={ctx}. Output: {output.strip()[:200]}",
+                    )
+                    self._notify_step(name, "failed", "consumer error")
+                    return
+
+                checked.append(ctx)
+                if flag_id in output:
+                    where = (
+                        f"context={ctx}"
+                        if ctx == context
+                        else f"fallback context={ctx} (eval publish lands in the "
+                        f"committing coordinator's DC under GatedCommit)"
+                    )
+                    self.assertions.add_pass(
+                        name,
+                        f"Flag GUID found in topic={topic} on bootstrap={bootstrap} in {where}.",
+                    )
+                    self._notify_step(name, "ok")
+                    return
+
+            self.assertions.add_fail(
+                name,
+                f"Flag GUID not found in topic={topic} on bootstrap={bootstrap} "
+                f"in context(s)={', '.join(checked)}.",
             )
-
-            # kafka-console-consumer exits 1 on timeout even when messages were found;
-            # treat any output as potentially valid and rely on content search.
-            output = result.stdout + result.stderr
-            if result.returncode != 0 and not result.stdout.strip():
-                self.assertions.add_fail(
-                    name,
-                    f"Kafka consumer failed for topic={topic} on bootstrap={bootstrap} "
-                    f"in context={context}. Output: {output.strip()[:200]}",
-                )
-                self._notify_step(name, "failed", "consumer error")
-                return
-
-            if flag_id in output:
-                self.assertions.add_pass(
-                    name,
-                    f"Flag GUID found in topic={topic} on bootstrap={bootstrap} in context={context}.",
-                )
-                self._notify_step(name, "ok")
-            else:
-                self.assertions.add_fail(
-                    name,
-                    f"Flag GUID not found in topic={topic} on bootstrap={bootstrap} "
-                    f"in context={context}. Consumed {len(result.stdout.splitlines())} message(s).",
-                )
-                self._notify_step(name, "failed", "guid not in messages")
+            self._notify_step(name, "failed", "guid not in messages")
 
         except subprocess.TimeoutExpired:
             self.assertions.add_fail(name, f"Kafka topic check timed out for topic={topic} in context={context}.")
