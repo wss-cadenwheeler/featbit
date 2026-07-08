@@ -110,6 +110,17 @@ foreach ($envKey in $raw.Keys) {
     }
 }
 
+# Some settings are read by deploy scripts as process env vars rather than
+# parameters (Deploy-FeatBitClusters.ps1 reads $env:CONSISTENCY_MODE). Export
+# those explicitly — before this, CONSISTENCY_MODE in deployment.env was
+# silently ignored and a "GatedCommit" deploy came up BestEffort (#113).
+$envExportKeys = @("CONSISTENCY_MODE")
+foreach ($envKey in $envExportKeys) {
+    if ($raw.ContainsKey($envKey)) {
+        Set-Item -Path "env:$envKey" -Value $raw[$envKey]
+    }
+}
+
 # Build a PSCredential if username + password are both provided.
 $user = $raw["CUSTOM_REGISTRY_USERNAME"]
 $pass = $raw["CUSTOM_REGISTRY_PASSWORD"]
