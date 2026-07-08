@@ -1,4 +1,6 @@
-namespace Domain.Shared;
+using Domain.Shared;
+
+namespace TestBase;
 
 /// <summary>
 /// Test-side aggregator for fake-mode constants. Forwards the production seed values from
