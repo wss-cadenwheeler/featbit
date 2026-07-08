@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Http.Json;
+using Api.Controllers;
 using Application.Identity;
 
 namespace Application.IntegrationTests.Identity;
@@ -39,5 +42,29 @@ public class IdentityControllerTests
         );
 
         await Verify(response, settings: settings);
+    }
+    
+    [Fact]
+    public async Task RefreshToken_MissingRefreshCookie_Returns401WithRequiredError()
+    {
+        var response = await _app.PostAsync("/api/v1/identity/refresh-token", new { }, authenticated: false);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<object>>();
+        Assert.NotNull(body);
+        Assert.False(body.Success);
+        Assert.Contains(body.Errors, e => e.Contains("refresh-token", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Logout_NoRefreshCookie_ReturnsSuccessWithoutCallingMediator()
+    {
+        var response = await _app.PostAsync("/api/v1/identity/logout", new { }, authenticated: true);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<bool>>();
+        Assert.NotNull(body);
+        Assert.True(body.Success);
+        Assert.True(body.Data);
     }
 }
