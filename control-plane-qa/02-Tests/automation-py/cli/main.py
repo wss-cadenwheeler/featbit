@@ -409,7 +409,8 @@ def seed(
 @click.option(
     "--license-key",
     default=lambda: get_env("LICENSE_KEY", ""),
-    help="Valid FeatBit license key for CP-07 license change test",
+    help="Valid FeatBit license key for CP-07 license change test. "
+    "When unset, CP-07 records a skip instead of failing.",
 )
 @click.option(
     "--login-api-base-url",
