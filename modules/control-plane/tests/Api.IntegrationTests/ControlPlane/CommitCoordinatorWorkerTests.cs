@@ -1,5 +1,6 @@
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Application.Caches;
 using Application.ControlPlane;
 using Application.Services;
@@ -26,17 +27,13 @@ namespace Api.IntegrationTests.ControlPlane;
 /// indexes simulate two DCs' Redis (dc-a = db 0, dc-b = db 1). The coordinator commits a pending
 /// version only once EVERY live DC has it staged.
 ///
-/// Requires:
-///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6384 (override via C3B2_REDIS):
-///      docker run -d --rm -p 6384:6379 --name c3b2-redis redis:7-alpine
-/// Fails loudly (not silently skips) if either is unreachable.
+/// Uses shared Testcontainers MongoDB and Redis fixtures; Redis logical DB indexes simulate DCs.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
+[Collection(MongoRedisCollection.Name)]
+public sealed class CommitCoordinatorWorkerTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6384";
+    private readonly MongoDbFixture _mongoFixture;
+    private readonly RedisFixture _redisFixture;
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
@@ -53,15 +50,23 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
     private RedisCacheService _dcbCache = null!; // db 1
     private CompositeRedisCacheService _composite = null!;
 
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("C3B2_REDIS") ?? DefaultRedis;
+    public CommitCoordinatorWorkerTests(MongoDbFixture mongoFixture, RedisFixture redisFixture)
+    {
+        _mongoFixture = mongoFixture;
+        _redisFixture = redisFixture;
+    }
 
     public async Task InitializeAsync()
     {
+        if (!DockerAvailability.IsAvailable)
+        {
+            return;
+        }
+
         // ---- Mongo ----
         var options = Options.Create(new MongoDbOptions
         {
-            ConnectionString = MongoConnectionString,
+            ConnectionString = _mongoFixture.ConnectionString,
             Database = _dbName
         });
         _mongoDb = new MongoDbClient(options);
@@ -71,18 +76,12 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
+        var redisOptions = ConfigurationOptions.Parse(_redisFixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
 
         _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
-        {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6384:6379 --name c3b2-redis redis:7-alpine " +
-                "(or set the C3B2_REDIS env var).");
-        }
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
 
         _dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
         _dcbCache = new RedisCacheService(new TestRedisClient(_mux, db: 1));
@@ -195,7 +194,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- acceptance cases -----
 
-    [Fact]
+    [DockerFact]
     public async Task NoCommit_When_OnlyOneOfTwoLiveDcs_HasStaged()
     {
         const string key = "only-one-dc-staged";
@@ -231,7 +230,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.False(await _dcbCache.HasStagedFlagAsync(flag.Id, v));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Commits_When_AllLiveDcs_HaveStaged()
     {
         const string key = "all-dcs-staged";
@@ -276,7 +275,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(flag.Id, publishedFlag.Id);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Commits_Ignoring_ExpiredDc_When_OnlyLiveDc_HasStaged()
     {
         const string key = "expired-dc-ignored";
@@ -304,7 +303,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Single(producer.Published);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Skips_When_PendingVersion_NotNewerThanCommitted()
     {
         // committed v5, pending staged at v2 (stale) -> must be skipped on monotonicity (#34)
@@ -338,7 +337,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(5, read.CommittedVersion);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task NoCommit_When_NoLiveDcs()
     {
         const string key = "no-live-dcs";
@@ -362,7 +361,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(1, read.CommittedVersion);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task SecondTick_IsIdempotent_AfterCommit()
     {
         const string key = "idempotent";
@@ -389,7 +388,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- #71b leader gating -----
 
-    [Fact]
+    [DockerFact]
     public async Task Coordinator_NotLeader_SkipsTick()
     {
         // Seed a fully committable pending change (both live DCs have it staged) -> if leadership
@@ -428,7 +427,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- eviction observability (#16) -----
 
-    [Fact]
+    [DockerFact]
     public async Task EvictedCommit_Logs_And_IncrementsCounter_NamingEvictedDc()
     {
         // dc-a live + staged; dc-b is CONFIGURED (composite probes it) but its lease has EXPIRED, so
@@ -467,7 +466,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Contains(DcB, warning);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task NoEviction_When_AllConfiguredDcsLive_DoesNotLogOrIncrement()
     {
         // both configured DCs are live + staged -> no eviction; no extra warning, no counter.

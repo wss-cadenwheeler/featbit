@@ -1,5 +1,6 @@
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Application.Caches;
 using Application.Configuration;
 using Application.Services;
@@ -27,17 +28,13 @@ namespace Api.IntegrationTests.ControlPlane;
 /// MongoDB (the "stale snapshot" it reads) and a real Redis DC (holding a fresher committed value
 /// than the Mongo snapshot, simulating the race).
 ///
-/// Requires:
-///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6391 (override via OA2_REDIS):
-///      docker run -d --rm -p 6391:6379 --name featbit-test-redis-6391 redis:7-alpine
-/// Fails loudly (not silently skips) if either is unreachable.
+/// Uses shared Testcontainers MongoDB and Redis fixtures; Redis logical DB indexes simulate DCs.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
+[Collection(MongoRedisCollection.Name)]
+public sealed class DcBackfillerOnlyAdvanceTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6391";
+    private readonly MongoDbFixture _mongoFixture;
+    private readonly RedisFixture _redisFixture;
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
@@ -54,14 +51,22 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
     private RedisCacheService _dcbCache = null!; // db 1 -- the DC under backfill in these tests
     private CompositeRedisCacheService _composite = null!;
 
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("OA2_REDIS") ?? DefaultRedis;
+    public DcBackfillerOnlyAdvanceTests(MongoDbFixture mongoFixture, RedisFixture redisFixture)
+    {
+        _mongoFixture = mongoFixture;
+        _redisFixture = redisFixture;
+    }
 
     public async Task InitializeAsync()
     {
+        if (!DockerAvailability.IsAvailable)
+        {
+            return;
+        }
+
         var options = Options.Create(new MongoDbOptions
         {
-            ConnectionString = MongoConnectionString,
+            ConnectionString = _mongoFixture.ConnectionString,
             Database = _dbName
         });
         _mongoDb = new MongoDbClient(options);
@@ -71,18 +76,12 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         _segmentService = new SegmentService(_mongoDb, NullLogger<SegmentService>.Instance);
         _environmentService = new EnvironmentService(_mongoDb, NullLogger<EnvironmentService>.Instance);
 
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
+        var redisOptions = ConfigurationOptions.Parse(_redisFixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
 
         _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
-        {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6391:6379 --name featbit-test-redis-6391 redis:7-alpine " +
-                "(or set the OA2_REDIS env var).");
-        }
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
 
         var dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
         _dcbCache = new RedisCacheService(new TestRedisClient(_mux, db: 1));
@@ -176,7 +175,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
 
     // ----- acceptance -----
 
-    [Fact]
+    [DockerFact]
     public async Task GatedCommit_BackfillHoldingStaleSnapshot_CannotRevertFresherCommittedPointer()
     {
         const string key = "stale-snapshot-flag";
@@ -225,7 +224,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         Assert.True(await _dcbCache.HasStagedFlagAsync(flagAtTs2.Id, ts2));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task GatedCommit_BackfillHoldingStaleSnapshot_CannotRevertFresherCommittedSegmentPointer()
     {
         const string key = "stale-snapshot-segment";
@@ -286,7 +285,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         Assert.Equal(ts2, (long)indexScore!.Value);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task BestEffort_BackfillHoldingStaleSnapshot_CannotRevertFresherLegacyUpsert()
     {
         const string key = "stale-snapshot-besteffort-flag";
@@ -329,7 +328,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
 
     // ----- #91 acceptance: secrets are backfilled unconditionally, in both modes -----
 
-    [Theory]
+    [DockerTheory]
     [InlineData(ConsistencyMode.GatedCommit)]
     [InlineData(ConsistencyMode.BestEffort)]
     public async Task Backfill_WritesSecrets_ToTargetDcOnly_RegardlessOfMode(ConsistencyMode mode)
@@ -363,7 +362,7 @@ public sealed class DcBackfillerOnlyAdvanceTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Backfill_RepairsSecrets_AfterTargetDcSecretKeysAreWiped()
     {
         var env = await CreateEnvironmentWithSecretsAsync();

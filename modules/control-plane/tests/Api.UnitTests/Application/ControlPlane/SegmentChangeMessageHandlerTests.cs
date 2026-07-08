@@ -7,6 +7,7 @@ using Domain.Messages;
 using Domain.Segments;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -19,7 +20,7 @@ public class SegmentChangeMessageHandlerTests
     private readonly Mock<IFeatureFlagAppService> _ff = new();
     private readonly Mock<ISegmentMessageService> _segSvc = new();
     private readonly Mock<ISegmentService> _segmentService = new();
-    private readonly Mock<ILogger<SegmentChangeMessageHandler>> _logger = new();
+    private readonly FakeLogger<SegmentChangeMessageHandler> _logger = new();
     private readonly Mock<IMessageProducer> _producer = new();
 
     private static IConfiguration BuildConfiguration(string? consistencyMode)
@@ -43,7 +44,7 @@ public class SegmentChangeMessageHandlerTests
             _ff.Object,
             _segSvc.Object,
             _segmentService.Object,
-            _logger.Object,
+            _logger,
             BuildConfiguration(consistencyMode),
             _producer.Object);
 

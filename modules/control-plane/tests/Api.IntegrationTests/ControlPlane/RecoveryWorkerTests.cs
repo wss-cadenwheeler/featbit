@@ -1,6 +1,7 @@
 using System.Reflection;
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Application.Caches;
 using Application.ControlPlane;
 using Application.Services;
@@ -33,17 +34,13 @@ namespace Api.IntegrationTests.ControlPlane;
 /// (dc-b absent); dc-b's lease returns -> a recovery tick backfills dc-b's Redis so it reaches v2
 /// (versioned value key + committed pointer + index all at v2). A DC already current is a no-op.
 ///
-/// Requires:
-///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6387 (override via E1_REDIS):
-///      docker run -d --rm -p 6387:6379 --name cp-e1-recovery-redis redis:7-alpine
-/// Fails loudly (not silently skips) if either is unreachable.
+/// Uses shared Testcontainers MongoDB and Redis fixtures; Redis logical DB indexes simulate DCs.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class RecoveryWorkerTests : IAsyncLifetime
+[Collection(MongoRedisCollection.Name)]
+public sealed class RecoveryWorkerTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6387";
+    private readonly MongoDbFixture _mongoFixture;
+    private readonly RedisFixture _redisFixture;
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
@@ -65,15 +62,23 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
     // Spy producer the SUT publishes the per-DC client-refresh command to. Set by CreateSut.
     private RecordingMessageProducer _producer = null!;
 
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("E1_REDIS") ?? DefaultRedis;
+    public RecoveryWorkerTests(MongoDbFixture mongoFixture, RedisFixture redisFixture)
+    {
+        _mongoFixture = mongoFixture;
+        _redisFixture = redisFixture;
+    }
 
     public async Task InitializeAsync()
     {
+        if (!DockerAvailability.IsAvailable)
+        {
+            return;
+        }
+
         // ---- Mongo ----
         var options = Options.Create(new MongoDbOptions
         {
-            ConnectionString = MongoConnectionString,
+            ConnectionString = _mongoFixture.ConnectionString,
             Database = _dbName
         });
         _mongoDb = new MongoDbClient(options);
@@ -85,18 +90,12 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
+        var redisOptions = ConfigurationOptions.Parse(_redisFixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
 
         _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
-        {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6387:6379 --name cp-e1-recovery-redis redis:7-alpine " +
-                "(or set the E1_REDIS env var).");
-        }
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
 
         _dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
         _dcbCache = new RedisCacheService(new TestRedisClient(_mux, db: 1));
@@ -253,7 +252,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
     // ----- acceptance -----
 
-    [Fact]
+    [DockerFact]
     public async Task Backfills_ReturningDc_To_LatestCommittedVersion()
     {
         const string key = "returning-dc";
@@ -329,7 +328,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         Assert.Equal(v2Ts, (long)dcaPointer);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Backfills_ReturningDc_With_LatestCommittedSegmentVersion()
     {
         const string flagKey = "returning-dc-flag";
@@ -427,7 +426,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
     // ----- #91: secrets are backfilled to a returning DC too, unconditionally -----
 
-    [Fact]
+    [DockerFact]
     public async Task Backfills_ReturningDc_With_Secrets()
     {
         var env = await CreateEnvironmentWithSecretsAsync();
@@ -482,7 +481,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task NoOp_When_NoDcReturned()
     {
         const string key = "steady-state";
@@ -520,7 +519,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
     // ----- #90: one shared committed snapshot per tick -----
 
-    [Fact]
+    [DockerFact]
     public async Task TwoDcsReturnedInOneTick_ShareOneCommittedSnapshotFetch()
     {
         const string flagKey = "shared-snapshot-flag";
@@ -592,7 +591,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Publishes_Targeted_ClientRefresh_For_ReturningDc()
     {
         const string key = "returning-dc-refresh";
@@ -660,7 +659,7 @@ public sealed class RecoveryWorkerTests : IAsyncLifetime
 
     // ----- #71b leader gating -----
 
-    [Fact]
+    [DockerFact]
     public async Task Recovery_NotLeader_SkipsTick()
     {
         const string key = "not-leader-recovery";

@@ -3,6 +3,7 @@ using Application.Caches;
 using Domain.Environments;
 using Domain.Health;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.Caches;
@@ -14,7 +15,7 @@ public class CompositeRedisCacheServiceTests
 
     private readonly Mock<ICacheService> _local = new();
     private readonly Mock<ICacheService> _remote = new();
-    private readonly Mock<ILogger<CompositeRedisCacheService>> _logger = new();
+    private readonly FakeLogger<CompositeRedisCacheService> _logger = new();
 
     private CompositeRedisCacheService CreateSut()
         => new(
@@ -23,7 +24,7 @@ public class CompositeRedisCacheServiceTests
                 new DcCacheService(LocalDcId, _local.Object),
                 new DcCacheService(RemoteDcId, _remote.Object)
             },
-            _logger.Object);
+            _logger);
 
     [Fact]
     public async Task UpsertPodHeartbeat_WritesToLocalInstanceOnly()
@@ -113,7 +114,7 @@ public class CompositeRedisCacheServiceTests
                 new DcCacheService(LocalDcId, _local.Object),
                 new DcCacheService(RemoteDcId, failing.Object)
             },
-            _logger.Object);
+            _logger);
 
         // Should not throw out of the broadcast.
         var result = await sut.BroadcastAsync(

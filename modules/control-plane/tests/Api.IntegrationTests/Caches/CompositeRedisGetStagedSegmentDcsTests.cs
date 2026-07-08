@@ -1,4 +1,5 @@
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Domain.Segments;
 using Infrastructure.Caches.Redis;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,35 +16,34 @@ namespace Api.IntegrationTests.Caches;
 /// indexes (0 = west, 1 = east) on a single throwaway Redis. Staging into west's DB only must
 /// produce a per-DcId map showing present in west and absent in east.
 ///
-/// Requires a real Redis on a NON-default port (6388). Override via S2_REDIS env var. Fails
-/// loudly if Redis is unreachable.
+/// Uses the shared Testcontainers Redis fixture.
 /// </summary>
-[Trait("Category", "Integration")]
-public class CompositeRedisGetStagedSegmentDcsTests : IAsyncLifetime
+[Collection(RedisCollection.Name)]
+public class CompositeRedisGetStagedSegmentDcsTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string DefaultConnection = "localhost:6388";
     private const string WestDcId = "dc-west";
     private const string EastDcId = "dc-east";
 
+    private readonly RedisFixture _fixture;
     private ConnectionMultiplexer? _mux;
 
-    private static string ConnectionString =>
-        Environment.GetEnvironmentVariable("S2_REDIS") ?? DefaultConnection;
+    public CompositeRedisGetStagedSegmentDcsTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+    }
 
     public async Task InitializeAsync()
     {
-        var options = ConfigurationOptions.Parse(ConnectionString);
-        options.AbortOnConnectFail = false;
-        options.ConnectTimeout = 2000;
-
-        _mux = await ConnectionMultiplexer.ConnectAsync(options);
-        if (!_mux.IsConnected)
+        if (!DockerAvailability.IsAvailable)
         {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{ConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6388:6379 --name s2-redis redis:7-alpine " +
-                "(or set the S2_REDIS env var).");
+            return;
         }
+
+        var options = ConfigurationOptions.Parse(_fixture.ConnectionString);
+        options.AllowAdmin = true;
+        _mux = await ConnectionMultiplexer.ConnectAsync(options);
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
     }
 
     public Task DisposeAsync()
@@ -52,7 +52,7 @@ public class CompositeRedisGetStagedSegmentDcsTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    [Fact]
+    [DockerFact]
     public async Task GetStagedSegmentDcs_ReportsPerDc_StagedPresence()
     {
         // west -> logical db 0, east -> logical db 1 (independent keyspaces on one server)

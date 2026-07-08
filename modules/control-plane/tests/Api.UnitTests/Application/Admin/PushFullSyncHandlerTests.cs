@@ -1,6 +1,7 @@
 using Api.Application.Admin;
 using Domain.Messages;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.Admin;
@@ -8,10 +9,10 @@ namespace Api.UnitTests.Application.Admin;
 public class PushFullSyncHandlerTests
 {
     private readonly Mock<IMessageProducer> _producer = new();
-    private readonly Mock<ILogger<PushFullSyncHandler>> _logger = new();
+    private readonly FakeLogger<PushFullSyncHandler> _logger = new();
 
     private PushFullSyncHandler CreateSut()
-        => new(_producer.Object, _logger.Object);
+        => new(_producer.Object, _logger);
 
     [Fact]
     public async Task Handle_WhenPublishSucceeds_ReturnsTrue_AndPublishesToExpectedTopic()
@@ -32,14 +33,7 @@ public class PushFullSyncHandlerTests
             ControlPlaneTopics.ControlPlaneCommand,
             It.IsAny<object>()), Times.Once);
 
-        _logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Error),
-                It.IsAny<EventId>(),
-                It.IsAny<It.IsAnyType>(),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Never);
+        Assert.DoesNotContain(_logger.Collector.GetSnapshot(), x => x.Level == LogLevel.Error);
     }
 
     [Fact]
@@ -63,13 +57,7 @@ public class PushFullSyncHandlerTests
             ControlPlaneTopics.ControlPlaneCommand,
             It.IsAny<object>()), Times.Once);
 
-        _logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Error),
-                It.IsAny<EventId>(),
-                It.IsAny<It.IsAnyType>(),
-                It.Is<Exception>(e => ReferenceEquals(e, ex)),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Once);
+        var record = Assert.Single(_logger.Collector.GetSnapshot(), x => x.Level == LogLevel.Error);
+        Assert.Same(ex, record.Exception);
     }
 }

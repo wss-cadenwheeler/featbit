@@ -3,6 +3,7 @@ using Api.Application.ControlPlane;
 using Application.Caches;
 using Domain.Connections;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -10,10 +11,10 @@ namespace Api.UnitTests.Application.ControlPlane;
 public class ClientConnectionMadeHandlerTests
 {
     private readonly Mock<ICacheService> _cache = new();
-    private readonly Mock<ILogger<ClientConnectionMadeHandler>> _logger = new();
+    private readonly FakeLogger<ClientConnectionMadeHandler> _logger = new();
 
     private ClientConnectionMadeHandler CreateSut()
-        => new(_cache.Object, _logger.Object);
+        => new(_cache.Object, _logger);
 
     [Fact]
     public async Task HandleAsync_WhenJsonInvalid_DoesNotCallCache()

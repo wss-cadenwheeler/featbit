@@ -5,6 +5,7 @@ using Domain.ControlPlane;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
@@ -172,10 +173,10 @@ public class RecoveryWorkerTests
     public async Task CompositeCacheUnavailable_ReturnsZero_LogsOnce_AndNeverFetchesSnapshotOrCallsBackfill()
     {
         _backfiller.Setup(b => b.IsCompositeCacheAvailable).Returns(false);
-        var logger = new Mock<ILogger<RecoveryWorker>>();
+        var logger = new FakeLogger<RecoveryWorker>();
 
         SetLiveSet("east", "west"); // two DCs return in the SAME tick
-        var sut = CreateSut(logger.Object);
+        var sut = CreateSut(logger);
 
         var backfilled = await sut.RunOnceAsync();
 
@@ -188,14 +189,7 @@ public class RecoveryWorkerTests
             Times.Never());
 
         // Exactly one warning for the whole tick, even though TWO DCs returned.
-        logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Warning),
-                It.IsAny<EventId>(),
-                It.IsAny<It.IsAnyType>(),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Once());
+        Assert.Single(logger.Collector.GetSnapshot(), x => x.Level == LogLevel.Warning);
     }
 
     [Fact]

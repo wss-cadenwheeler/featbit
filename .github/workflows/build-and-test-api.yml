@@ -39,4 +39,12 @@ jobs:
       - name: Run Tests
         # Category=Integration tests require external Docker infrastructure (Mongo, Kafka,
         # Postgres, Redis) that CI does not provision; they are local-only.
-        run: dotnet test -c Release --no-build --verbosity normal --filter "Category!=Integration"
+        run: dotnet test -c Release --no-build --verbosity normal --filter "Category!=Integration" --collect:"XPlat Code Coverage" --results-directory TestResults
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-back-end
+          path: modules/back-end/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: warn

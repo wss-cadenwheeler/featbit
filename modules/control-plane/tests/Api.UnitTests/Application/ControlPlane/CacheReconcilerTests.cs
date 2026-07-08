@@ -4,6 +4,7 @@ using Application.Configuration;
 using Infrastructure.Caches.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using StackExchange.Redis;
@@ -307,7 +308,10 @@ public class CacheReconcilerTests
         connected = false;
         await sut.RunOnceAsync();
 
-        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        var lastBackfillAt = typeof(CacheReconciler)
+            .GetField("_lastBackfillAt", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(sut) as Dictionary<string, DateTimeOffset>;
+        lastBackfillAt!["east"] = DateTimeOffset.UtcNow.AddSeconds(-2);
 
         connected = true;
         await sut.RunOnceAsync(); // cooldown elapsed -> backfill #2
@@ -345,11 +349,11 @@ public class CacheReconcilerTests
     public async Task CompositeCacheUnavailable_SkipsWholeTick_LogsOnce_AndNeverFetchesSnapshot()
     {
         _backfiller.Setup(b => b.IsCompositeCacheAvailable).Returns(false);
-        var logger = new Mock<ILogger<CacheReconciler>>();
+        var logger = new FakeLogger<CacheReconciler>();
 
         var sut = CreateSut(
             new[] { Dc("west", () => true, isLocal: true), Dc("east", () => true) },
-            logger: logger.Object);
+            logger: logger);
 
         await sut.RunOnceAsync();
 
@@ -359,14 +363,7 @@ public class CacheReconcilerTests
             Times.Never());
 
         // Exactly one warning for the whole tick, even though TWO DCs were newly reachable.
-        logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Warning),
-                It.IsAny<EventId>(),
-                It.IsAny<It.IsAnyType>(),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Once());
+        Assert.Single(logger.Collector.GetSnapshot(), x => x.Level == LogLevel.Warning);
     }
 
     [Fact]

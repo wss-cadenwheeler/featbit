@@ -9,6 +9,7 @@ using Domain.Messages;
 using Domain.Utils;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -20,7 +21,7 @@ public class FeatureFlagChangeMessageHandlerTests
     private readonly Mock<ICacheService> _cache = new();
     private readonly Mock<IMessageProducer> _producer = new();
     private readonly Mock<IFeatureFlagService> _flagService = new();
-    private readonly Mock<ILogger<FeatureFlagChangeMessageHandler>> _logger = new();
+    private readonly FakeLogger<FeatureFlagChangeMessageHandler> _logger = new();
 
     private static IConfiguration BuildConfiguration(string? consistencyMode)
     {
@@ -42,7 +43,7 @@ public class FeatureFlagChangeMessageHandlerTests
             _cache.Object,
             _producer.Object,
             _flagService.Object,
-            _logger.Object,
+            _logger,
             BuildConfiguration(consistencyMode));
 
     private static string BuildMessage(out FeatureFlag flag)

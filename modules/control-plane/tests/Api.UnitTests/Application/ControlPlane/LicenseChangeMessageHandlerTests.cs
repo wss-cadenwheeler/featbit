@@ -4,6 +4,7 @@ using Application.Caches;
 using Domain.Utils;
 using Domain.Workspaces;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -11,10 +12,10 @@ namespace Api.UnitTests.Application.ControlPlane;
 public class LicenseChangeMessageHandlerTests
 {
     private readonly Mock<ICacheService> _cache = new();
-    private readonly Mock<ILogger<LicenseChangeMessageHandler>> _logger = new();
+    private readonly FakeLogger<LicenseChangeMessageHandler> _logger = new();
 
     private LicenseChangeMessageHandler CreateSut()
-        => new(_cache.Object, _logger.Object);
+        => new(_cache.Object, _logger);
 
     [Fact]
     public async Task HandleAsync_WhenDeserializesToNull_DoesNothing()

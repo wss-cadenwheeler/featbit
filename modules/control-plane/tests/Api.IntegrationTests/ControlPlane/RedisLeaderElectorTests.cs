@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Api.Application.ControlPlane;
+using Api.IntegrationTests.Fixtures;
 using Infrastructure.Caches.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -11,40 +12,32 @@ namespace Api.IntegrationTests.ControlPlane;
 /// #71a acceptance tests for <see cref="RedisLeaderElector"/>. Exercises exactly-one-leader semantics,
 /// immediate handover on graceful stop, and TTL-based takeover on crash, against a real Redis.
 ///
-/// Requires:
-///  - Redis on port 6392 (override via LEADER_REDIS):
-///      docker run -d --rm -p 6392:6379 --name featbit-test-redis-6392 redis:7-alpine
-/// Fails loudly (not silently skips) if unreachable. Uses short TTLs (1-2s) to keep the suite fast, and
+/// Uses the shared Testcontainers Redis fixture. Uses short TTLs (1-2s) to keep the suite fast, and
 /// flushes the lock key between tests so they don't interfere with each other.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class RedisLeaderElectorTests : IAsyncLifetime
+[Collection(RedisCollection.Name)]
+public sealed class RedisLeaderElectorTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string DefaultRedis = "localhost:6392";
-
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("LEADER_REDIS") ?? DefaultRedis;
-
+    private readonly RedisFixture _fixture;
     private ConnectionMultiplexer _mux = null!;
     private readonly List<RedisLeaderElector> _electors = new();
 
+    public RedisLeaderElectorTests(RedisFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     public async Task InitializeAsync()
     {
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
-
-        _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
+        if (!DockerAvailability.IsAvailable)
         {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6392:6379 --name featbit-test-redis-6392 redis:7-alpine " +
-                "(or set the LEADER_REDIS env var).");
+            return;
         }
 
-        // Start each test from a clean slate.
-        await _mux.GetDatabase().KeyDeleteAsync(RedisLeaderElector.LockKey);
+        var redisOptions = ConfigurationOptions.Parse(_fixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
+        _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
+        await _mux.GetDatabase().ExecuteAsync("FLUSHDB");
     }
 
     public async Task DisposeAsync()
@@ -63,8 +56,11 @@ public sealed class RedisLeaderElectorTests : IAsyncLifetime
             elector.Dispose();
         }
 
-        await _mux.GetDatabase().KeyDeleteAsync(RedisLeaderElector.LockKey);
-        _mux.Dispose();
+        if (_mux is not null)
+        {
+            await _mux.GetDatabase().ExecuteAsync("FLUSHDB");
+            _mux.Dispose();
+        }
     }
 
     // ----- helpers -----
@@ -129,7 +125,7 @@ public sealed class RedisLeaderElectorTests : IAsyncLifetime
 
     // ----- acceptance cases -----
 
-    [Fact]
+    [DockerFact]
     public async Task SingleElector_BecomesLeader_OnFirstAttempt()
     {
         var elector = CreateElector(ttl: TimeSpan.FromSeconds(2), renewInterval: TimeSpan.FromSeconds(1));
@@ -145,7 +141,7 @@ public sealed class RedisLeaderElectorTests : IAsyncLifetime
         Assert.True(becameLeader, "Single elector should become leader on its first attempt.");
     }
 
-    [Fact]
+    [DockerFact]
     public async Task TwoElectors_ExactlyOneBecomesLeader()
     {
         var electorA = CreateElector(ttl: TimeSpan.FromSeconds(2), renewInterval: TimeSpan.FromSeconds(1));
@@ -168,7 +164,7 @@ public sealed class RedisLeaderElectorTests : IAsyncLifetime
             $"Expected exactly one leader; got A={electorA.IsLeader}, B={electorB.IsLeader}.");
     }
 
-    [Fact]
+    [DockerFact]
     public async Task StoppedLeader_ReleasesLock_And_OtherTakesOver()
     {
         // TTL is intentionally much larger than the takeover window we assert on, so a pass here can
@@ -199,7 +195,7 @@ public sealed class RedisLeaderElectorTests : IAsyncLifetime
         Assert.True(bTookOver, "Elector B should take over promptly after A releases the lock.");
     }
 
-    [Fact]
+    [DockerFact]
     public async Task ExpiredLeader_IsSupersededAfterTtl()
     {
         var ttl = TimeSpan.FromSeconds(1);

@@ -2,14 +2,14 @@ using Api.Cors;
 
 namespace Application.IntegrationTests.Cors;
 
-[Trait("Category", "Integration")]
+[Trait("Category", "Host")]
 public class OptionsValidationTests
 {
     private readonly CorsOptionsValidator _validator = new();
 
     [Theory]
     [ClassData(typeof(InvalidOptions))]
-    public void Validate_ReturnsFailure_ForInvalidOptions(CorsOptions options, string expectedMessage)
+    public void Validate_InvalidOptions_ReturnsFailureWithExpectedMessage(CorsOptions options, string expectedMessage)
     {
         var result = _validator.Validate(null, options);
 
@@ -18,7 +18,7 @@ public class OptionsValidationTests
     }
 
     [Fact]
-    public void ValidSetting()
+    public void Validate_FullyConfiguredEnabledOptions_Succeeds()
     {
         var options = new CorsOptions
         {
@@ -34,7 +34,7 @@ public class OptionsValidationTests
     }
 
     [Fact]
-    public void SkipWhenDisabled()
+    public void Validate_DisabledOptions_SucceedsRegardlessOfOtherFields()
     {
         var options = new CorsOptions
         {

@@ -5,6 +5,7 @@ using Domain.Environments;
 using Domain.Environments.MessagePublishing;
 using Domain.Utils;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -12,10 +13,10 @@ namespace Api.UnitTests.Application.ControlPlane;
 public class SecretChangeMessageHandlerTests
 {
     private readonly Mock<ICacheService> _cache = new();
-    private readonly Mock<ILogger<SecretChangeMessageHandler>> _logger = new();
+    private readonly FakeLogger<SecretChangeMessageHandler> _logger = new();
 
     private SecretChangeMessageHandler CreateSut()
-        => new(_cache.Object, _logger.Object);
+        => new(_cache.Object, _logger);
     
     [Fact]
     public async Task HandleAsync_WhenOperationMissing_Throws()

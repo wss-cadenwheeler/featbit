@@ -6,6 +6,7 @@ using Domain.ControlPlane;
 using Domain.Health;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -13,11 +14,11 @@ namespace Api.UnitTests.Application.ControlPlane;
 public class HeartbeatMessageHandlerTests
 {
     private readonly Mock<ICacheService> _cache = new();
-    private readonly Mock<ILogger<HeartbeatMessageHandler>> _logger = new();
+    private readonly FakeLogger<HeartbeatMessageHandler> _logger = new();
     private readonly Mock<ILeaseStore> _leaseStore = new();
 
     private HeartbeatMessageHandler CreateSut(IConfiguration? configuration = null)
-        => new(_cache.Object, _logger.Object, _leaseStore.Object, configuration ?? BuildConfig());
+        => new(_cache.Object, _logger, _leaseStore.Object, configuration ?? BuildConfig());
 
     private static IConfiguration BuildConfig(
         string? consistencyMode = null, string? leaseTtlSeconds = null)
@@ -258,14 +259,15 @@ public class HeartbeatMessageHandlerTests
 
     private void VerifyWarningLogged(Times times)
     {
-        _logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Warning),
-                It.IsAny<EventId>(),
-                It.IsAny<It.IsAnyType>(),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            times);
+        var count = _logger.Collector.GetSnapshot().Count(x => x.Level == LogLevel.Warning);
+        if (times == Times.Never())
+        {
+            Assert.Equal(0, count);
+        }
+        else if (times == Times.Once())
+        {
+            Assert.Equal(1, count);
+        }
     }
 
     [Fact]

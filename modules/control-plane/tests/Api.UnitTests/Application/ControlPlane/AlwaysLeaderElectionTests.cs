@@ -1,6 +1,7 @@
 using System.Diagnostics.Metrics;
 using Api.Application.ControlPlane;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Moq;
 
 namespace Api.UnitTests.Application.ControlPlane;
@@ -14,12 +15,12 @@ namespace Api.UnitTests.Application.ControlPlane;
 /// </summary>
 public sealed class AlwaysLeaderElectionTests
 {
-    private readonly Mock<ILogger<AlwaysLeaderElection>> _logger = new();
+    private readonly FakeLogger<AlwaysLeaderElection> _logger = new();
 
     [Fact]
     public void IsLeader_IsAlwaysTrue()
     {
-        using var sut = new AlwaysLeaderElection(_logger.Object);
+        using var sut = new AlwaysLeaderElection(_logger);
 
         Assert.True(sut.IsLeader);
     }
@@ -27,7 +28,7 @@ public sealed class AlwaysLeaderElectionTests
     [Fact]
     public void InstanceId_IsSetAndStable()
     {
-        using var sut = new AlwaysLeaderElection(_logger.Object);
+        using var sut = new AlwaysLeaderElection(_logger);
 
         Assert.NotEqual(Guid.Empty, sut.InstanceId);
         Assert.Equal(sut.InstanceId, sut.InstanceId);
@@ -36,24 +37,20 @@ public sealed class AlwaysLeaderElectionTests
     [Fact]
     public async Task StartAsync_LogsDiscoverabilityHint()
     {
-        using var sut = new AlwaysLeaderElection(_logger.Object);
+        using var sut = new AlwaysLeaderElection(_logger);
 
         await sut.StartAsync(CancellationToken.None);
 
-        _logger.Verify(
-            x => x.Log(
-                It.Is<LogLevel>(l => l == LogLevel.Information),
-                It.IsAny<EventId>(),
-                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Leader election disabled")),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Once);
+        var record = Assert.Single(_logger.Collector.GetSnapshot(), x =>
+            x.Level == LogLevel.Information &&
+            x.Message.Contains("Leader election disabled"));
+        Assert.Null(record.Exception);
     }
 
     [Fact]
     public async Task StopAsync_CompletesWithoutError()
     {
-        using var sut = new AlwaysLeaderElection(_logger.Object);
+        using var sut = new AlwaysLeaderElection(_logger);
 
         await sut.StartAsync(CancellationToken.None);
         await sut.StopAsync(CancellationToken.None);
@@ -62,7 +59,7 @@ public sealed class AlwaysLeaderElectionTests
     [Fact]
     public void IsLeaderGauge_ReportsConstantOne_WithSameNameAndTagAsRedisLeaderElector()
     {
-        using var sut = new AlwaysLeaderElection(_logger.Object);
+        using var sut = new AlwaysLeaderElection(_logger);
 
         var values = new List<(int Value, string? InstanceId)>();
 

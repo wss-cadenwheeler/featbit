@@ -1,5 +1,6 @@
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Application.Caches;
 using Application.ControlPlane;
 using Application.Segments;
@@ -32,20 +33,16 @@ namespace Api.IntegrationTests.ControlPlane;
 /// (version-guarded), and the affected-flags segment-change is published per env (replicating
 /// SegmentChangeMessageHandler's BestEffort propagation, deferred to commit time).
 ///
-/// Real infra (fails loudly, never silently skips):
-///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6389 (override via S3_REDIS): two logical DB indexes simulate two DCs
-///    (dc-a = db 0, dc-b = db 1).
-///      docker run -d --rm -p 6389:6379 --name s3-redis redis:7-alpine
+/// Uses shared Testcontainers MongoDB and Redis fixtures; Redis logical DB indexes simulate DCs.
 ///
 /// The segment publish is spied via a fake <see cref="ISegmentMessageService"/> so the tests assert
 /// the per-env segment change fires ONLY on commit.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
+[Collection(MongoRedisCollection.Name)]
+public sealed class SegmentCommitCoordinatorWorkerTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6389";
+    private readonly MongoDbFixture _mongoFixture;
+    private readonly RedisFixture _redisFixture;
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
@@ -62,15 +59,23 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
     private RedisCacheService _dcbCache = null!; // db 1
     private CompositeRedisCacheService _composite = null!;
 
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("S3_REDIS") ?? DefaultRedis;
+    public SegmentCommitCoordinatorWorkerTests(MongoDbFixture mongoFixture, RedisFixture redisFixture)
+    {
+        _mongoFixture = mongoFixture;
+        _redisFixture = redisFixture;
+    }
 
     public async Task InitializeAsync()
     {
+        if (!DockerAvailability.IsAvailable)
+        {
+            return;
+        }
+
         // ---- Mongo ----
         var options = Options.Create(new MongoDbOptions
         {
-            ConnectionString = MongoConnectionString,
+            ConnectionString = _mongoFixture.ConnectionString,
             Database = _dbName
         });
         _mongoDb = new MongoDbClient(options);
@@ -80,18 +85,12 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
+        var redisOptions = ConfigurationOptions.Parse(_redisFixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
 
         _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
-        {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6389:6379 --name s3-redis redis:7-alpine " +
-                "(or set the S3_REDIS env var).");
-        }
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
 
         _dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
         _dcbCache = new RedisCacheService(new TestRedisClient(_mux, db: 1));
@@ -225,7 +224,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- acceptance cases -----
 
-    [Fact]
+    [DockerFact]
     public async Task NoCommit_When_OnlyOneOfTwoLiveDcs_HasStaged()
     {
         const string key = "seg-only-one-dc-staged";
@@ -260,7 +259,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.False(await _dcbCache.HasStagedSegmentAsync(segment.Id, v));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Commits_When_AllLiveDcs_HaveStaged()
     {
         const string key = "seg-all-dcs-staged";
@@ -304,7 +303,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(new[] { "bob" }, publish.Segment.Included);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Commits_Ignoring_ExpiredDc_When_OnlyLiveDc_HasStaged()
     {
         const string key = "seg-expired-dc-ignored";
@@ -330,7 +329,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Single(spy.Published);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Skips_When_PendingVersion_NotNewerThanCommitted()
     {
         // committed v5, pending staged at v2 (stale) -> must be skipped on monotonicity (#34)
@@ -365,7 +364,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(new[] { "alice" }, read.Included);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task NoCommit_When_NoLiveDcs()
     {
         const string key = "seg-no-live-dcs";
@@ -388,7 +387,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(1, read.CommittedVersion);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task SecondTick_IsIdempotent_AfterCommit()
     {
         const string key = "seg-idempotent";
@@ -415,7 +414,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- attribution reconstruction (#73b) -----
 
-    [Fact]
+    [DockerFact]
     public async Task Commit_Reconstruction_Carries_Staged_Attribution()
     {
         const string key = "seg-staged-attribution";
@@ -451,7 +450,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(segment.Id, notification.Segment.Id);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Commit_LegacyPending_Defaults_To_Previous_Behavior()
     {
         const string key = "seg-legacy-pending";
@@ -486,7 +485,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
 
     // ----- eviction observability (#16) -----
 
-    [Fact]
+    [DockerFact]
     public async Task EvictedCommit_Logs_And_IncrementsCounter_NamingEvictedDc()
     {
         const string key = "seg-evicted-commit-observed";

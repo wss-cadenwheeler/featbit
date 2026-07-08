@@ -1,5 +1,6 @@
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
+using Api.IntegrationTests.Fixtures;
 using Application.Caches;
 using Application.ControlPlane;
 using Application.Segments;
@@ -34,18 +35,13 @@ namespace Api.IntegrationTests.ControlPlane;
 ///   3. <see cref="CommitCoordinatorWorker.PendingBacklogGaugeName"/> — observable gauge reporting the
 ///      currently-pending count per <c>resource_type</c>, updated at the end of each tick.
 ///
-/// Requires:
-///  - MongoDB at mongodb://admin:password@localhost:27017 (unique throwaway DB, dropped on dispose).
-///  - Redis on port 6390 (override via F1_REDIS): two logical DB indexes simulate two DCs
-///    (dc-a = db 0, dc-b = db 1).
-///      docker run -d --rm -p 6390:6379 --name f1-redis redis:7-alpine
-/// Fails loudly (not silently skips) if either is unreachable.
+/// Uses shared Testcontainers MongoDB and Redis fixtures; Redis logical DB indexes simulate DCs.
 /// </summary>
-[Trait("Category", "Integration")]
-public sealed class ConsistencyMetricsTests : IAsyncLifetime
+[Collection(MongoRedisCollection.Name)]
+public sealed class ConsistencyMetricsTests : IntegrationTestBase, IAsyncLifetime
 {
-    private const string MongoConnectionString = "mongodb://admin:password@localhost:27017/?authSource=admin";
-    private const string DefaultRedis = "localhost:6390";
+    private readonly MongoDbFixture _mongoFixture;
+    private readonly RedisFixture _redisFixture;
 
     private const string DcA = "dc-a";
     private const string DcB = "dc-b";
@@ -63,15 +59,23 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
     private RedisCacheService _dcbCache = null!; // db 1
     private CompositeRedisCacheService _composite = null!;
 
-    private static string RedisConnectionString =>
-        Environment.GetEnvironmentVariable("F1_REDIS") ?? DefaultRedis;
+    public ConsistencyMetricsTests(MongoDbFixture mongoFixture, RedisFixture redisFixture)
+    {
+        _mongoFixture = mongoFixture;
+        _redisFixture = redisFixture;
+    }
 
     public async Task InitializeAsync()
     {
+        if (!DockerAvailability.IsAvailable)
+        {
+            return;
+        }
+
         // ---- Mongo ----
         var options = Options.Create(new MongoDbOptions
         {
-            ConnectionString = MongoConnectionString,
+            ConnectionString = _mongoFixture.ConnectionString,
             Database = _dbName
         });
         _mongoDb = new MongoDbClient(options);
@@ -82,18 +86,12 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         _leaseStore = new MongoLeaseStore(_mongoDb);
 
         // ---- Redis (two DB indexes = two DCs) ----
-        var redisOptions = ConfigurationOptions.Parse(RedisConnectionString);
-        redisOptions.AbortOnConnectFail = false;
-        redisOptions.ConnectTimeout = 2000;
+        var redisOptions = ConfigurationOptions.Parse(_redisFixture.ConnectionString);
+        redisOptions.AllowAdmin = true;
 
         _mux = await ConnectionMultiplexer.ConnectAsync(redisOptions);
-        if (!_mux.IsConnected)
-        {
-            throw new InvalidOperationException(
-                $"No Redis reachable at '{RedisConnectionString}'. Start one with: " +
-                "docker run -d --rm -p 6390:6379 --name f1-redis redis:7-alpine " +
-                "(or set the F1_REDIS env var).");
-        }
+        await _mux.GetDatabase(0).ExecuteAsync("FLUSHDB");
+        await _mux.GetDatabase(1).ExecuteAsync("FLUSHDB");
 
         _dcaCache = new RedisCacheService(new TestRedisClient(_mux, db: 0));
         _dcbCache = new RedisCacheService(new TestRedisClient(_mux, db: 1));
@@ -258,7 +256,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
 
     // ----- acceptance cases -----
 
-    [Fact]
+    [DockerFact]
     public async Task Commit_Increments_CommitsCounter_And_Records_TimeToCommit_PerResourceType()
     {
         // one flag + one segment, both staged on both live DCs -> both commit this tick.
@@ -306,7 +304,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         Assert.True(segLatency.Value >= 1000, $"segment latency was {segLatency.Value}");
     }
 
-    [Fact]
+    [DockerFact]
     public async Task PendingBacklog_Gauge_Reports_RemainingPendingCounts_PerResourceType()
     {
         // 2 pending flags + 1 pending segment, but NOTHING staged -> nothing commits, so after the
@@ -329,7 +327,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         Assert.Equal(1, backlog["segment"]);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task PendingBacklog_Gauge_Reports_Zero_AfterBacklogDrained()
     {
         // one flag + one segment staged on both DCs -> both commit on tick 1. A second tick finds an
@@ -447,7 +445,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
 
     // ----- #84 applied-watermark-lag gauge acceptance cases -----
 
-    [Fact]
+    [DockerFact]
     public async Task Lag_Reports_Zero_For_Frontier_Dc_And_Delta_For_Straggler()
     {
         // DC A is the frontier (higher watermark); DC B lags behind by a known delta. No pending
@@ -473,7 +471,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         Assert.Equal(delta, straggler.LagMs);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Lag_Omits_Envs_A_Dc_Does_Not_Report()
     {
         // DC A reports {e1, e2}; DC B only reports {e1} -> no (DcB, e2) measurement should ever be
@@ -507,7 +505,7 @@ public sealed class ConsistencyMetricsTests : IAsyncLifetime
         Assert.Equal(1_000, dcBe1.LagMs); // frontier(e1) = 5000 (DcA) - 4000 (DcB) = 1000
     }
 
-    [Fact]
+    [DockerFact]
     public async Task No_Watermarks_No_Measurements()
     {
         // Two live DCs, neither reporting any watermark -> the gauge must emit nothing.

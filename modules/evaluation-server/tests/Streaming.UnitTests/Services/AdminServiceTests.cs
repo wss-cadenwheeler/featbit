@@ -316,6 +316,7 @@ public class AdminServiceTests
         var observedMax = 0;
         var lockObj = new object();
         var releaseGate = new TaskCompletionSource();
+        var capReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Build `connectionCount` client connections. Sends never block — the gating instead
         // happens inside the data-sync mock so we can observe how many evals are in flight at
@@ -346,6 +347,7 @@ public class AdminServiceTests
                     observedCurrent++;
                     now = observedCurrent;
                     if (now > observedMax) observedMax = now;
+                    if (now >= cap) capReached.TrySetResult();
                 }
 
                 await releaseGate.Task;
@@ -361,14 +363,7 @@ public class AdminServiceTests
         var pushTask = sut.PushFullSyncToAllActiveSdks();
 
         // Wait until the in-flight count saturates the cap (or fail fast after a deadline).
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            int now;
-            lock (lockObj) now = observedCurrent;
-            if (now >= cap) break;
-            await Task.Delay(10);
-        }
+        var reachedCap = await WaitForSignalAsync(capReached.Task, TimeSpan.FromSeconds(5));
 
         // Snapshot before releasing so the assertion isn't racing with the drain.
         int sawAtSaturation;
@@ -377,6 +372,7 @@ public class AdminServiceTests
         releaseGate.SetResult();
         await pushTask;
 
+        Assert.True(reachedCap, $"Timed out waiting for {cap} concurrent evaluations");
         Assert.True(
             sawAtSaturation == cap,
             $"Expected exactly {cap} concurrent evaluations at saturation, observed {sawAtSaturation}");
@@ -405,6 +401,7 @@ public class AdminServiceTests
         var observedMax = 0;
         var lockObj = new object();
         var releaseGate = new TaskCompletionSource();
+        var capReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var connections = new List<Connection>();
         var sockets = new List<Mock<WebSocket>>();
@@ -436,6 +433,7 @@ public class AdminServiceTests
                     observedCurrent++;
                     now = observedCurrent;
                     if (now > observedMax) observedMax = now;
+                    if (now >= cap) capReached.TrySetResult();
                 }
 
                 await releaseGate.Task;
@@ -446,18 +444,12 @@ public class AdminServiceTests
 
         var pushTask = sut.PushFullSyncToAllActiveSdks();
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            int now;
-            lock (lockObj) now = observedCurrent;
-            if (now >= cap) break;
-            await Task.Delay(10);
-        }
+        var reachedCap = await WaitForSignalAsync(capReached.Task, TimeSpan.FromSeconds(5));
 
         releaseGate.SetResult();
         await pushTask;
 
+        Assert.True(reachedCap, $"Timed out waiting for {cap} concurrent evaluations");
         Assert.True(
             observedMax <= cap,
             $"Max concurrent evaluations {observedMax} exceeded the cap {cap}");
@@ -554,4 +546,17 @@ public class AdminServiceTests
                 It.IsAny<bool>(),
                 It.IsAny<CancellationToken>()),
             Times.Never);
+
+    private static async Task<bool> WaitForSignalAsync(Task task, TimeSpan timeout)
+    {
+        try
+        {
+            await task.WaitAsync(timeout);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
 }

@@ -13,7 +13,7 @@ namespace Application.IntegrationTests.Health;
 /// The applied watermarks come from an <see cref="IAppliedWatermarkReader"/>; the Redis-backed
 /// reader itself is covered by <see cref="RedisAppliedWatermarkReaderTests"/>.
 /// </summary>
-[Trait("Category", "Integration")]
+[Trait("Category", "Host")]
 public class HeartbeatServiceTests
 {
     private sealed class NoopMessageProducer : IMessageProducer
