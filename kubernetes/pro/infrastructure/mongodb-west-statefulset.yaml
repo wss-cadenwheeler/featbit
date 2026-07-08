@@ -102,11 +102,11 @@ spec:
           mountPath: /docker-entrypoint-initdb.d
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "384Mi"
+            cpu: "100m"
           limits:
-            memory: "1Gi"
-            cpu: "1000m"
+            memory: "768Mi"
+            cpu: "1500m"
       volumes:
       - name: mongodb-init
         configMap:

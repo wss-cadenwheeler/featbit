@@ -30,6 +30,13 @@ namespace Api.Application.ControlPlane;
 /// Advisory only: it changes no commit behavior. It logs and emits an observable gauge on the shared
 /// <see cref="CommitCoordinatorWorker.MeterName"/> meter so operators can alert on a non-zero
 /// unmatched-DC count.
+///
+/// #71b: this worker only runs its tick on the elected leader (<see cref="ILeaderElection"/>,
+/// backed by <see cref="RedisLeaderElector"/>) when leader election is enabled; non-leaders skip the
+/// tick entirely. When disabled (default — <c>ControlPlane:LeaderElection:Enabled</c>) every
+/// instance runs — safe (advisory and idempotent) but redundant under multiple replicas. The check
+/// is advisory and idempotent, so this is purely to avoid redundant work across replicas, not a
+/// correctness requirement.
 /// </summary>
 public sealed class DcIdConsistencyChecker : BackgroundService
 {
@@ -49,32 +56,26 @@ public sealed class DcIdConsistencyChecker : BackgroundService
 
     private static readonly Meter Meter = new(CommitCoordinatorWorker.MeterName);
 
-    // Most recent unmatched counts, refreshed at the end of each tick. Static + volatile so a single
-    // gauge registration on the shared meter survives across worker instances and the gauge callback
-    // may run on a different thread than the tick that updates the fields (matching the coordinator).
-    private static volatile int _missingLeaseCount;
-    private static volatile int _unknownDcCount;
+    /// <summary>One (direction, count) row captured for the unmatched-DC-count gauge below.</summary>
+    private readonly record struct DirectionCount(string Direction, long Count);
 
-    private static readonly ObservableGauge<long> UnmatchedDcCountGauge = Meter.CreateObservableGauge(
+    // Most recent unmatched counts, refreshed at the end of each tick, via the shared
+    // ObservableGaugeSnapshot helper (#108 item 5; previously a hand-rolled pair of static volatile
+    // ints + an ObservableGauge iterator method, matching what CommitCoordinatorWorker had).
+    private static readonly ObservableGaugeSnapshot<DirectionCount> UnmatchedDcCountSnapshot = new(
+        m => new Measurement<long>(m.Count, new KeyValuePair<string, object?>("direction", m.Direction)));
+
+    private static readonly ObservableGauge<long> UnmatchedDcCountGauge = UnmatchedDcCountSnapshot.CreateGauge(
+        Meter,
         UnmatchedDcCountGaugeName,
-        ObserveUnmatchedDcCount,
         unit: "{dc}",
         description:
         "Count of DCs whose configured Redis DcId and reporting ELS lease DcId do not line up, " +
         "tagged direction = missing_lease | unknown_dc.");
 
-    private static IEnumerable<Measurement<long>> ObserveUnmatchedDcCount()
-    {
-        yield return new Measurement<long>(
-            _missingLeaseCount,
-            new KeyValuePair<string, object?>("direction", "missing_lease"));
-        yield return new Measurement<long>(
-            _unknownDcCount,
-            new KeyValuePair<string, object?>("direction", "unknown_dc"));
-    }
-
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly ILeaderElection _leaderElection;
     private readonly bool _enabled;
     private readonly TimeSpan _interval;
     private readonly ILogger<DcIdConsistencyChecker> _logger;
@@ -82,10 +83,12 @@ public sealed class DcIdConsistencyChecker : BackgroundService
     public DcIdConsistencyChecker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        ILeaderElection leaderElection,
         ILogger<DcIdConsistencyChecker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _leaderElection = leaderElection;
         _logger = logger;
         _enabled = configuration.GetConsistencyMode() == ConsistencyMode.GatedCommit;
 
@@ -177,11 +180,26 @@ public sealed class DcIdConsistencyChecker : BackgroundService
     /// <summary>
     /// Performs a single check tick: reads the configured Redis DcIds and the reporting lease DcIds,
     /// compares them, warns on each mismatch, and refreshes the unmatched-DC gauge. Returns the
-    /// comparison result. Exposed so it can be invoked directly (e.g. by integration tests) without
-    /// waiting on the periodic timer.
+    /// comparison result, or <c>null</c> if this instance is not the elected leader (see #71b gate
+    /// below) — meaning the tick was skipped entirely, not that no mismatch was found. Exposed so it
+    /// can be invoked directly (e.g. by integration tests) without waiting on the periodic timer.
     /// </summary>
-    public async Task<ComparisonResult> RunOnceAsync(CancellationToken cancellationToken = default)
+    public async Task<ComparisonResult?> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        // #71b: only the elected leader runs the tick. Non-leaders skip entirely (Debug — this is
+        // expected steady-state on every non-leader replica, not an error).
+        //
+        // #105: also RESET the gauge snapshot here. The ObservableGauge callback reads this snapshot
+        // on every export with no leader filter of its own, and it is refreshed only AFTER this
+        // gate — so a replica that loses leadership would otherwise keep exporting its stale
+        // last-leader snapshot indefinitely. Latent today (no exporter wired up), but activates the
+        // moment metrics are exported from more than one replica.
+        if (!_leaderElection.ShouldRunAsLeader(_logger, "DcId consistency checker"))
+        {
+            UnmatchedDcCountSnapshot.Reset();
+            return null;
+        }
+
         // The configured DcIds are read from the SAME Redis:Instances section the cache extension
         // binds (see CacheServiceCollectionExtensions.AddRedis). Empty DcIds are ordinal-fallback
         // placeholders and are excluded by Compare.
@@ -205,8 +223,11 @@ public sealed class DcIdConsistencyChecker : BackgroundService
 
         // Refresh the observable gauge from this tick regardless of mismatch, so a return to a
         // matched state resets the reported count back to zero.
-        _missingLeaseCount = result.MissingLeases.Count;
-        _unknownDcCount = result.UnknownDcs.Count;
+        UnmatchedDcCountSnapshot.Update(
+        [
+            new DirectionCount("missing_lease", result.MissingLeases.Count),
+            new DirectionCount("unknown_dc", result.UnknownDcs.Count)
+        ]);
 
         if (result.MissingLeases.Count > 0)
         {

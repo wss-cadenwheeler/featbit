@@ -344,6 +344,113 @@ For production deployments with real multi-zone clusters:
 
 ---
 
+# Analytics & Insights Pipeline
+
+This explains how feature-flag **evaluation insights** (the per-flag evaluation
+counts shown in the FeatBit UI "Insights" view) get from an SDK to the UI, and
+why this deployment stores them in **ClickHouse**.
+
+## Data flow
+
+```
+SDK (.variation())                       per evaluation, the SDK batches an
+  → POST {event_url}/api/public/insight/track   insight event back to the eval server
+  → evaluation-server                    produces to the message queue
+  → Kafka topic: featbit-insights        (one row per evaluation)
+  → analytics store                      ClickHouse (pro) OR Mongo/Postgres (standard)
+  → da-server (data-analytics)           queries the analytics store
+  → api-server  /feature-flags/insights  delegates to da-server when IS_PRO=true
+  → UI "Insights"
+```
+
+The event carries the **environment secret**, so each evaluation is attributed
+to the right project/environment. otel-demo's instrumented components
+(`recommendation`, `product-catalog`, `cart`, `ad`, `payment`) each evaluate
+against their own `otel-*` project and therefore appear under that project's env.
+
+## Provider rule (important)
+
+The **api-server** has `IS_PRO=true` in this deployment. In pro mode the
+flag-insights query (`GET /api/v{n}/envs/{envId}/feature-flags/insights`) is
+**delegated to da-server** (`http://da-server:8200/api/events/stat/featureflag`)
+rather than read from the app database. Therefore:
+
+> **da-server must point at the store that actually ingests `featbit-insights`.**
+> With `IS_PRO=true` that store is **ClickHouse** — ClickHouse's Kafka-engine
+> table drains `featbit-insights` into queryable tables. The app database
+> (Mongo/Postgres) is **not** populated with insights in pro mode (the API's
+> Mongo insight consumer is inactive), so pointing da-server at Mongo while the
+> API is pro leaves the UI Insights empty.
+
+`Deploy-FeatBitClusters.ps1` configures this automatically:
+
+- App services (`api-server`, `control-plane`, `evaluation-server`) use the app
+  DB (`MongoDb`/`Postgres`) for flags/segments/users.
+- **da-server** is configured separately: `DB_PROVIDER=ClickHouse` when
+  ClickHouse is in the deployed infra (the default `HostInfraComponents`),
+  otherwise it falls back to the app DB.
+
+### Single-node ClickHouse
+
+The test topology runs a **single-node** ClickHouse (`featbit-infra-clickhouse-server`),
+with no cluster or Keeper/ZooKeeper. The data-analytics migrations default to
+`CLICKHOUSE_REPLICATION=true` (which emits `ON CLUSTER featbit_ch_cluster` +
+`ReplicatedMergeTree` DDL and **fails** on a single node), so the deploy sets:
+
+```
+CLICKHOUSE_REPLICATION=false
+```
+
+On da-server startup, `flask migrate-database` (dispatched to the ClickHouse
+migrations because `DB_PROVIDER=ClickHouse`) creates the `featbit` database, the
+`kafka_events_queue` (Kafka engine), the `events` table, and the `events_mv`
+materialized view that moves rows from the queue into `events`.
+
+## Verifying / troubleshooting
+
+**Symptom:** UI Insights shows 0 evaluations for every flag, even though flags
+are clearly being evaluated.
+
+Check, in order:
+
+```bash
+# 1. Are insight events being produced? (offset should grow)
+docker exec featbit-infra-kafka-1 \
+  kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list localhost:9092 --topic featbit-insights
+
+# 2. Is da-server pointed at the right store?
+kubectl --context west -n featbit get deploy da-server \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' | grep -E 'DB_PROVIDER|CLICKHOUSE'
+#   IS_PRO=true  => DB_PROVIDER must be ClickHouse
+
+# 3. Is ClickHouse ingesting? (row count should grow)
+docker exec featbit-infra-clickhouse-server-1 clickhouse-client --query "SELECT count() FROM featbit.events"
+```
+
+**Fix (live):**
+
+```bash
+kubectl --context west -n featbit set env deployment/da-server \
+  DB_PROVIDER=ClickHouse DbProvider=ClickHouse CLICKHOUSE_REPLICATION=false
+kubectl --context east -n featbit set env deployment/da-server \
+  DB_PROVIDER=ClickHouse DbProvider=ClickHouse CLICKHOUSE_REPLICATION=false
+```
+
+This is applied automatically by `Deploy-FeatBitClusters.ps1` (the "Configuring
+Analytics Store (da-server)" step), so a fresh deploy does not need it.
+
+> **Time range gotcha:** the UI Insights query uses a time window around the
+> browser's clock. If the cluster/host clock differs from the browser, set the
+> UI time range to include the cluster's "now" or the data will look empty.
+
+## Related files
+
+- `01-Infrastructure/Deploy-FeatBitClusters.ps1` - "Configuring Analytics Store (da-server)" step
+- `modules/data-analytics/app/clickhouse/` - ClickHouse migrations + Kafka-engine ingestion
+- `modules/back-end/src/Infrastructure/MQ/InsightMessageHandler.cs` - the Mongo/Postgres (non-pro) insight consumer
+
+---
+
 # Registry Setup — Plain English Guide
 
 If you have never thought about container registries before, this guide is for you.

@@ -26,11 +26,29 @@ public class CompositeRedisCacheService(
     public Task UpsertFlagAsync(FeatureFlag flag) =>
         BroadcastAsync(s => s.UpsertFlagAsync(flag), nameof(UpsertFlagAsync));
 
-    public Task StageFlagAsync(FeatureFlag flag, long ts) =>
-        BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+    // ICacheService contract member (#89): broadcasts the only-advance-guarded upsert to every DC.
+    // Not used by the normal upsert flow (that's UpsertFlagAsync above) — this exists so
+    // CompositeRedisCacheService satisfies ICacheService; the backfiller reaches the guard via the
+    // TARGETED UpsertFlagToDcAsync below instead. #105: the interface now returns Task<bool>, so
+    // this collapses BroadcastAsync's per-DC accept map down to a single bool ("every DC accepted")
+    // — unused today (see above), so the exact reduction is not load-bearing.
+    public async Task<bool> UpsertFlagIfNewerAsync(FeatureFlag flag)
+    {
+        var results = await BroadcastAsync(s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagIfNewerAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task CommitFlagAsync(Guid envId, string flagId, long ts) =>
-        BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+    public async Task<bool> StageFlagAsync(FeatureFlag flag, long ts)
+    {
+        var results = await BroadcastAsync(s => s.StageFlagAsync(flag, ts), nameof(StageFlagAsync));
+        return results.Values.All(accepted => accepted);
+    }
+
+    public async Task<bool> CommitFlagAsync(Guid envId, string flagId, long ts)
+    {
+        var results = await BroadcastAsync(s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
     // ICacheService probe: returns the LOCAL DC's result (first instance), consistent with
     // the heartbeat/health local-first convention above. This is NOT the coordinator API —
@@ -47,11 +65,27 @@ public class CompositeRedisCacheService(
     public Task UpsertSegmentAsync(ICollection<Guid> envIds, Segment segment) =>
         BroadcastAsync(s => s.UpsertSegmentAsync(envIds, segment), nameof(UpsertSegmentAsync));
 
-    public Task StageSegmentAsync(Segment segment, long ts) =>
-        BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+    // ICacheService contract member (#89, segment counterpart of UpsertFlagIfNewerAsync above);
+    // same rationale — the backfiller reaches the guard via the TARGETED UpsertSegmentToDcAsync.
+    public async Task<bool> UpsertSegmentIfNewerAsync(ICollection<Guid> envIds, Segment segment)
+    {
+        var results = await BroadcastAsync(
+            s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentIfNewerAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
-    public Task CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts) =>
-        BroadcastAsync(s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+    public async Task<bool> StageSegmentAsync(Segment segment, long ts)
+    {
+        var results = await BroadcastAsync(s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentAsync));
+        return results.Values.All(accepted => accepted);
+    }
+
+    public async Task<bool> CommitSegmentAsync(ICollection<Guid> envIds, string segmentId, long ts)
+    {
+        var results = await BroadcastAsync(
+            s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentAsync));
+        return results.Values.All(accepted => accepted);
+    }
 
     // ICacheService probe: returns the LOCAL DC's result (first instance), mirroring
     // HasStagedFlagAsync. This is NOT the coordinator API — the coordinator must use
@@ -154,23 +188,8 @@ public class CompositeRedisCacheService(
     /// swallow-and-continue resilience as <see cref="BroadcastAsync"/>: a DC whose probe throws
     /// is reported as <c>false</c> rather than failing the whole call.
     /// </summary>
-    public async Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts)
-    {
-        var instances = cacheServices.ToList();
-        var tasks = instances
-            .Select(dc => ProbeStagedSafelyAsync(dc, id, ts))
-            .ToList();
-
-        var outcomes = await Task.WhenAll(tasks);
-
-        var results = new Dictionary<string, bool>(outcomes.Length);
-        for (var i = 0; i < outcomes.Length; i++)
-        {
-            results[instances[i].DcId] = outcomes[i];
-        }
-
-        return results;
-    }
+    public Task<IReadOnlyDictionary<string, bool>> GetStagedDcsAsync(Guid id, long ts) =>
+        ProbeStagedAsync(s => s.HasStagedFlagAsync(id, ts), "Staged-flag");
 
     /// <summary>
     /// Coordinator-facing probe (segment counterpart of <see cref="GetStagedDcsAsync"/>):
@@ -179,11 +198,22 @@ public class CompositeRedisCacheService(
     /// <see cref="HasStagedSegmentAsync"/>) with the same swallow-and-continue resilience: a DC
     /// whose probe throws is reported as <c>false</c> rather than failing the whole call.
     /// </summary>
-    public async Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts)
+    public Task<IReadOnlyDictionary<string, bool>> GetStagedSegmentDcsAsync(Guid id, long ts) =>
+        ProbeStagedAsync(s => s.HasStagedSegmentAsync(id, ts), "Staged-segment");
+
+    /// <summary>
+    /// Shared fan-out for the staged-probe methods above (#108 item 4): parameterizes the per-DC
+    /// probe the same way <see cref="BroadcastAsync"/> parameterizes its per-DC action, instead of
+    /// each probe re-implementing its own identical instances/tasks/outcomes-map plumbing. A DC
+    /// whose probe throws is caught and reported as <c>false</c> (never fails the whole call).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, bool>> ProbeStagedAsync(
+        Func<ICacheService, Task<bool>> probe,
+        string probeName)
     {
         var instances = cacheServices.ToList();
         var tasks = instances
-            .Select(dc => ProbeStagedSegmentSafelyAsync(dc, id, ts))
+            .Select(dc => ProbeStagedSafelyAsync(dc, probe, probeName))
             .ToList();
 
         var outcomes = await Task.WhenAll(tasks);
@@ -204,17 +234,26 @@ public class CompositeRedisCacheService(
     /// <see cref="StageFlagAsync"/>. If no DC matches, logs a warning and no-ops. A failing write is
     /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
+    public Task<bool> StageFlagToDcAsync(string dcId, FeatureFlag flag, long ts) =>
         TargetedAsync(dcId, s => s.StageFlagAsync(flag, ts), nameof(StageFlagToDcAsync));
 
     /// <summary>
     /// Recovery-facing targeted write (E1): commits <paramref name="flagId"/> at version
     /// <paramref name="ts"/> into ONE DC's Redis (advancing that DC's committed pointer + index),
-    /// unlike the broadcast <see cref="CommitFlagAsync"/>. If no DC matches <paramref name="dcId"/>,
-    /// logs a warning and no-ops. A failing write is swallowed and logged with the same resilience
+    /// unlike the broadcast <see cref="CommitFlagAsync"/>. Only-advance guarded at the underlying
+    /// <see cref="ICacheService.CommitFlagAsync"/> implementation (#89): a stale <paramref name="ts"/>
+    /// (e.g. from a backfill holding an older snapshot racing a newer normal commit) is a no-op and
+    /// never reverts a fresher committed pointer. If no DC matches <paramref name="dcId"/>, logs a
+    /// warning and no-ops. A failing write is swallowed and logged with the same resilience
     /// as <see cref="BroadcastAsync"/>.
+    /// <para>
+    /// #105: returns whether the write was ACCEPTED (advanced the committed pointer) — <c>false</c>
+    /// for a no-matching-DC no-op, a swallowed failure, AND a guard-rejected stale write. Callers
+    /// (the DC backfiller) must use this to report honest repair counts instead of assuming every
+    /// call landed.
+    /// </para>
     /// </summary>
-    public Task CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
+    public Task<bool> CommitFlagToDcAsync(string dcId, Guid envId, string flagId, long ts) =>
         TargetedAsync(dcId, s => s.CommitFlagAsync(envId, flagId, ts), nameof(CommitFlagToDcAsync));
 
     /// <summary>
@@ -225,19 +264,70 @@ public class CompositeRedisCacheService(
     /// matches, logs a warning and no-ops. A failing write is swallowed and logged with the same
     /// resilience as <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
+    public Task<bool> StageSegmentToDcAsync(string dcId, Segment segment, long ts) =>
         TargetedAsync(dcId, s => s.StageSegmentAsync(segment, ts), nameof(StageSegmentToDcAsync));
 
     /// <summary>
     /// Recovery-facing targeted write (#58, segment counterpart of <see cref="CommitFlagToDcAsync"/>):
     /// commits <paramref name="segmentId"/> at version <paramref name="ts"/> into ONE DC's Redis
     /// (advancing that DC's committed pointer + per-env index), unlike the broadcast
-    /// <see cref="CommitSegmentAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// <see cref="CommitSegmentAsync"/>. Only-advance guarded (#89), mirroring
+    /// <see cref="CommitFlagToDcAsync"/>. If no DC matches <paramref name="dcId"/>, logs a warning and
     /// no-ops. A failing write is swallowed and logged with the same resilience as
     /// <see cref="BroadcastAsync"/>.
     /// </summary>
-    public Task CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
+    public Task<bool> CommitSegmentToDcAsync(string dcId, ICollection<Guid> envIds, string segmentId, long ts) =>
         TargetedAsync(dcId, s => s.CommitSegmentAsync(envIds, segmentId, ts), nameof(CommitSegmentToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted BestEffort write: upserts <paramref name="flag"/>'s legacy value
+    /// key (<c>featbit:flag:{id}</c>) + index into ONE DC's Redis, unlike the broadcast
+    /// <see cref="UpsertFlagAsync"/>. Used by the cross-DC reconciler/backfiller to backfill a
+    /// returning DC under BestEffort, where the eval-server reads the legacy key (no committed
+    /// pointer). Only-advance guarded (#89) via <see cref="ICacheService.UpsertFlagIfNewerAsync"/>:
+    /// the backfiller snapshots the source of truth and then awaits per-item writes, so a racing
+    /// normal upsert can land a newer value on this DC first — the guard stops the backfill's stale
+    /// snapshot from reverting it. If no DC matches <paramref name="dcId"/>, logs a warning and
+    /// no-ops; a failing write is swallowed and logged with the same resilience as
+    /// <see cref="BroadcastAsync"/>.
+    /// <para>
+    /// #105: returns whether the write was ACCEPTED (the guard let it land) — <c>false</c> for a
+    /// no-matching-DC no-op, a swallowed failure, AND a guard-rejected stale write.
+    /// </para>
+    /// </summary>
+    public Task<bool> UpsertFlagToDcAsync(string dcId, FeatureFlag flag) =>
+        TargetedAsync(dcId, s => s.UpsertFlagIfNewerAsync(flag), nameof(UpsertFlagToDcAsync));
+
+    /// <summary>
+    /// Segment counterpart of <see cref="UpsertFlagToDcAsync"/>: targeted, only-advance-guarded
+    /// (#89) BestEffort upsert of <paramref name="segment"/> (+ per-env index) into ONE DC's Redis
+    /// via <see cref="ICacheService.UpsertSegmentIfNewerAsync"/>. If no DC matches
+    /// <paramref name="dcId"/>, logs a warning and no-ops. #105: return-value semantics mirror
+    /// <see cref="UpsertFlagToDcAsync"/>.
+    /// </summary>
+    public Task<bool> UpsertSegmentToDcAsync(string dcId, ICollection<Guid> envIds, Segment segment) =>
+        TargetedAsync(dcId, s => s.UpsertSegmentIfNewerAsync(envIds, segment), nameof(UpsertSegmentToDcAsync));
+
+    /// <summary>
+    /// Recovery-facing targeted write (#91): upserts one secret's cache entry
+    /// (<c>featbit:secret:{value}</c>, a hash of descriptor fields) into ONE DC's Redis, unlike the
+    /// broadcast <see cref="UpsertSecretAsync"/>. Used by the cross-DC reconciler/backfiller to
+    /// backfill a DC whose Redis lost its secret keys — without this, SDK auth (a per-key existence
+    /// check with no DB fallback; see <see cref="Domain.Environments.Secret"/>) keeps failing on that
+    /// DC even after flags/segments are healed.
+    /// <para>
+    /// Unlike the flag/segment targeted writes above, this is NOT only-advance guarded: the secret
+    /// hash carries no version/timestamp (it is keyed by the secret's own value, not by env+id), so
+    /// there is nothing to compare against — <see cref="RedisCacheService.UpsertSecretAsync"/> is
+    /// already an unconditional last-write-wins <c>HASH SET</c>, exactly like the existing broadcast
+    /// <see cref="UpsertSecretAsync"/>. Applies in BOTH consistency modes (secrets are never
+    /// staged/gated).
+    /// </para>
+    /// If no DC matches <paramref name="dcId"/>, logs a warning and no-ops. A failing write is
+    /// swallowed and logged with the same resilience as <see cref="BroadcastAsync"/>.
+    /// </summary>
+    public Task UpsertSecretToDcAsync(string dcId, ResourceDescriptor resourceDescriptor, Secret secret) =>
+        TargetedAsync(dcId, s => s.UpsertSecretAsync(resourceDescriptor, secret), nameof(UpsertSecretToDcAsync));
 
     private async Task TargetedAsync(string dcId, Func<ICacheService, Task> action, string operationName)
     {
@@ -254,32 +344,38 @@ public class CompositeRedisCacheService(
         await ExecuteSafelyAsync(dc, action, operationName);
     }
 
-    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Guid id, long ts)
+    /// <summary>
+    /// #105: bool-returning counterpart of <see cref="TargetedAsync(string,Func{ICacheService,Task},string)"/>
+    /// for the accept-signalling targeted writes (Stage/Commit/UpsertIfNewer). A no-matching-DC
+    /// no-op returns <c>false</c> (same as a guard-rejected or swallowed-failure write) — callers
+    /// cannot distinguish "no DC configured" from "guard rejected" from this return value alone,
+    /// but both are correctly excluded from an "accepted" count either way.
+    /// </summary>
+    private async Task<bool> TargetedAsync(string dcId, Func<ICacheService, Task<bool>> action, string operationName)
     {
-        try
+        var dc = cacheServices.FirstOrDefault(c => c.DcId == dcId);
+        if (dc == null)
         {
-            return await dc.Service.HasStagedFlagAsync(id, ts);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(
-                ex,
-                "Staged-flag probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
-                dc.DcId,
-                dc.Service.GetType().FullName);
+            logger.LogWarning(
+                "Targeted cache operation '{Operation}' requested for unknown DC {DcId}; no matching cache instance. No-op.",
+                operationName,
+                dcId);
             return false;
         }
+
+        return await ExecuteSafelyAsync(dc, action, operationName);
     }
 
-    private async Task<bool> ProbeStagedSegmentSafelyAsync(DcCacheService dc, Guid id, long ts)
+    /// <summary>
+    /// #108 item 4: shared per-DC probe execution for <see cref="ProbeStagedAsync"/>, parameterized
+    /// by <paramref name="probe"/> (previously duplicated once per resource type as
+    /// ProbeStagedSafelyAsync / ProbeStagedSegmentSafelyAsync).
+    /// </summary>
+    private async Task<bool> ProbeStagedSafelyAsync(DcCacheService dc, Func<ICacheService, Task<bool>> probe, string probeName)
     {
         try
         {
-            return await dc.Service.HasStagedSegmentAsync(id, ts);
+            return await probe(dc.Service);
         }
         catch (OperationCanceledException)
         {
@@ -289,7 +385,8 @@ public class CompositeRedisCacheService(
         {
             logger.LogError(
                 ex,
-                "Staged-segment probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                "{ProbeName} probe failed for DC {DcId} (implementation {CacheService}). Reporting not-staged.",
+                probeName,
                 dc.DcId,
                 dc.Service.GetType().FullName);
             return false;
@@ -315,6 +412,37 @@ public class CompositeRedisCacheService(
             logger.LogError(
                 ex,
                 "Redis cache broadcast operation '{Operation}' failed for DC {DcId} (implementation {CacheService}). Continuing.",
+                operationName,
+                dc.DcId,
+                dc.Service.GetType().FullName);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #105: bool-returning counterpart of <see cref="ExecuteSafelyAsync(DcCacheService,Func{ICacheService,Task},string)"/>
+    /// for the accept-signalling targeted writes — returns the underlying call's own accept result
+    /// instead of a fixed "did not throw" <c>true</c>, and <c>false</c> (not merely swallowed) on a
+    /// thrown exception, so a genuine failure is never counted as accepted.
+    /// </summary>
+    private async Task<bool> ExecuteSafelyAsync(
+        DcCacheService dc,
+        Func<ICacheService, Task<bool>> action,
+        string operationName)
+    {
+        try
+        {
+            return await action(dc.Service);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Redis cache targeted operation '{Operation}' failed for DC {DcId} (implementation {CacheService}).",
                 operationName,
                 dc.DcId,
                 dc.Service.GetType().FullName);

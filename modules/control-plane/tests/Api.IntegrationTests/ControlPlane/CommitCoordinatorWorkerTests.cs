@@ -164,7 +164,8 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
 
     private CommitCoordinatorWorker CreateSut(
         SpyMessageProducer producer,
-        ILogger<CommitCoordinatorWorker>? logger = null)
+        ILogger<CommitCoordinatorWorker>? logger = null,
+        bool isLeader = true)
     {
         // Wire IFeatureFlagService + ILeaseStore through a real DI scope, matching how the worker
         // resolves them at runtime via IServiceScopeFactory. ISegmentService is also registered
@@ -187,6 +188,7 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
             producer,
+            new FakeLeaderElection(isLeader),
             configuration,
             logger ?? NullLogger<CommitCoordinatorWorker>.Instance);
     }
@@ -383,6 +385,45 @@ public sealed class CommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Equal(1, first);
         Assert.Equal(0, second); // nothing left pending -> no-op
         Assert.Single(producer.Published);
+    }
+
+    // ----- #71b leader gating -----
+
+    [Fact]
+    public async Task Coordinator_NotLeader_SkipsTick()
+    {
+        // Seed a fully committable pending change (both live DCs have it staged) -> if leadership
+        // were NOT gating, this tick would commit. A not-leader SUT must skip entirely instead.
+        const string key = "not-leader-skip";
+        var (_, _, v) = await SeedCommittedV1PendingV2(key);
+        var flag = await _flagService.GetAsync(_envId, key);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        await _dcaCache.StageFlagAsync(flag.Pending!.Value, v);
+        await _dcbCache.StageFlagAsync(flag.Pending!.Value, v);
+
+        var producer = new SpyMessageProducer();
+        var sut = CreateSut(producer, isLeader: false);
+
+        using var commits = new CounterCollector(CommitCoordinatorWorker.CommitsCounterName);
+
+        var committed = await sut.RunOnceAsync();
+
+        Assert.Equal(0, committed);
+        Assert.Empty(producer.Published);
+        Assert.Empty(commits.Measurements);
+
+        // pending is untouched: still v2, not promoted
+        var read = await _flagService.GetCommittedAsync(_envId, key);
+        Assert.False(read.IsEnabled);
+        Assert.Equal(1, read.CommittedVersion);
+
+        var raw = await _flagService.GetAsync(_envId, key);
+        Assert.NotNull(raw.Pending);
+        Assert.Equal(v, raw.Pending!.Version);
     }
 
     // ----- eviction observability (#16) -----

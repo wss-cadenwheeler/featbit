@@ -131,6 +131,15 @@ function Test-Administrator
     }
 }
 
+# Shared privilege/sudo-session helpers (Linux). Provides Initialize-FbSudoSession
+# / Get-FbSudoMode so root is acquired at most once and never prompts mid-run.
+if ($script:onLinux)
+{
+    $privHelper = Join-Path $PSScriptRoot "Initialize-Privilege.ps1"
+    if (-not (Test-Path $privHelper)) { Write-Fail "Initialize-Privilege.ps1 not found at $privHelper"; exit 1 }
+    . $privHelper
+}
+
 # Runs a command with sudo on Linux when not already root; runs directly on Windows.
 function Invoke-Elevated
 {
@@ -138,7 +147,14 @@ function Invoke-Elevated
 
     if ($script:onLinux -and -not (Test-Administrator))
     {
-        & sudo @ArgumentList
+        # Prime the sudo session on the FIRST escalation only (i.e. only when a
+        # tool is actually missing and must be installed) — a single password
+        # prompt, passwordless sudo, or fast-fail if neither is available. Then
+        # run non-interactively so the rest never prompts.
+        if (-not (Get-FbSudoMode)) {
+            [void](Initialize-FbSudoSession -Required -Purpose "installing developer prerequisites via apt")
+        }
+        & sudo -n @ArgumentList
     }
     else
     {

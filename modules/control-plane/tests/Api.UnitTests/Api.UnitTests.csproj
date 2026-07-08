@@ -23,4 +23,13 @@
       <ProjectReference Include="..\..\src\Api\Api.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <!-- #105: the real shipped appsettings, linked (not copied at edit time) so
+           MqServiceCollectionExtensionsTests can bind the REAL Kafka:Consumer section and assert
+           group.id stays pinned to DefaultConsumerGroupId — drift breaks CI instead of silently
+           diverging. -->
+      <None Include="..\..\src\Api\appsettings.json" Link="TestData\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+      <None Include="..\..\src\Api\appsettings.Development.json" Link="TestData\appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
 </Project>

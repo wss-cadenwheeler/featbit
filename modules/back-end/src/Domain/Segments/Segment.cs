@@ -194,7 +194,12 @@ public class Segment : AuditedEntity
     /// The committed value is left untouched, so a committed read still returns the
     /// old value until <see cref="PromotePending"/> is called.
     /// </summary>
-    public void SetPending(Segment pendingValue, long version)
+    public void SetPending(
+        Segment pendingValue,
+        long version,
+        Guid operatorId = default,
+        string operation = Operations.Update,
+        bool isTargetingChange = true)
     {
         // A pending value must never itself carry a pending change (no pending-within-pending):
         // the staged payload describes a single committed-to-be state, so null out any nested
@@ -207,7 +212,10 @@ public class Segment : AuditedEntity
         Pending = new PendingSegmentChange
         {
             Version = version,
-            Value = pendingValue
+            Value = pendingValue,
+            OperatorId = operatorId,
+            Operation = operation,
+            IsTargetingChange = isTargetingChange
         };
     }
 

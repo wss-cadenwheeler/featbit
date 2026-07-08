@@ -1,5 +1,6 @@
 using Application.Bases.Models;
 using Application.Segments;
+using Domain.AuditLogs;
 using Domain.Segments;
 
 namespace Application.Services;
@@ -38,8 +39,20 @@ public interface ISegmentService : IService<Segment>
     /// version; otherwise it is a no-op. This prevents an out-of-order/stale stage from clobbering
     /// a newer pending change (which the coordinator could then commit).
     /// </para>
+    /// <para>
+    /// <paramref name="operatorId"/>, <paramref name="operation"/> and
+    /// <paramref name="isTargetingChange"/> are the attribution context of the original change
+    /// notification (#73), persisted alongside the pending value so the coordinator can later
+    /// reconstruct the notification with the real operator instead of inventing one at commit time.
+    /// </para>
     /// </summary>
-    Task SetPendingAsync(Guid id, Segment pendingValue, long version);
+    Task SetPendingAsync(
+        Guid id,
+        Segment pendingValue,
+        long version,
+        Guid operatorId = default,
+        string operation = Operations.Update,
+        bool isTargetingChange = true);
 
     /// <summary>
     /// Optimistically promote the staged pending change to committed for the segment identified by

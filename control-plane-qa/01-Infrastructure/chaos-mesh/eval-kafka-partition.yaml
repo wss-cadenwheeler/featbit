@@ -24,11 +24,10 @@ spec:
     labelSelectors:
       app: evaluation-server
   direction: both
-  target:
-    mode: all
-    selector:
-      namespaces:
-        - featbit
-      labelSelectors:
-        app: kafka
+  # Kafka is NOT an in-cluster pod in this topology — it lives on the host
+  # (kafka ExternalName -> host.minikube.internal). Block the eval pods' egress to
+  # east's host gateway instead; that severs their kafka producer (heartbeats) while
+  # in-cluster serving (Redis, /health endpoints) stays up.
+  externalTargets:
+    - "192.168.58.1"
   duration: "10m"

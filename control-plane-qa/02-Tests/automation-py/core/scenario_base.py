@@ -270,6 +270,7 @@ class BaseScenario(ABC):
         name: str,
         command: Optional[str],
         required: bool = False,
+        timeout: int = 30,
     ) -> None:
         """Run optional check command.
 
@@ -277,6 +278,8 @@ class BaseScenario(ABC):
             name: Check name
             command: Shell command to run
             required: If True, fail if command not provided or fails
+            timeout: Seconds before the command is killed (ops commands that wait
+                for kubectl rollouts need far more than the 30s default)
         """
         self._notify_step(name, "running")
         if not command:
@@ -296,7 +299,7 @@ class BaseScenario(ABC):
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
             )
             output = result.stdout + result.stderr
 
@@ -370,7 +373,9 @@ class BaseScenario(ABC):
             for item in items:
                 name = item.get("metadata", {}).get("name", "")
                 phase = item.get("status", {}).get("phase")
-                if name.startswith("redis") and phase == "Running":
+                # "redis" covers the legacy single-pod topology; "featbit-redis-node"
+                # covers the bitnami Redis+Sentinel statefulset (per-cluster HA topology).
+                if (name.startswith("redis") or name.startswith("featbit-redis-node")) and phase == "Running":
                     return name
         except json.JSONDecodeError:
             return None
@@ -420,17 +425,16 @@ class BaseScenario(ABC):
                 ]
             )
             if svc_result.returncode != 0:
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Auto-discovery failed: could not read service '{service_name}' in context '{effective_context}'. {svc_result.stderr.strip()}",
-                )
-                self._notify_step(assertion_name, "failed", "service discovery failed")
-                return (False, [], [])
-
-            svc = json.loads(svc_result.stdout)
-            cluster_ip = svc.get("spec", {}).get("clusterIP")
-            ports = svc.get("spec", {}).get("ports", [])
-            redis_port = ports[0].get("port") if ports else 6379
+                # No legacy "redis" service — Sentinel topology (featbit-redis-node-*).
+                # Fall back to exec'ing redis-cli against localhost inside the node pod.
+                service_name = None
+                cluster_ip = None
+                redis_port = 6379
+            else:
+                svc = json.loads(svc_result.stdout)
+                cluster_ip = svc.get("spec", {}).get("clusterIP")
+                ports = svc.get("spec", {}).get("ports", [])
+                redis_port = ports[0].get("port") if ports else 6379
 
             pod_name = self._discover_redis_pod(context=effective_context, namespace=namespace)
             if not pod_name:
@@ -441,6 +445,16 @@ class BaseScenario(ABC):
                 self._notify_step(assertion_name, "failed", "no redis pod found")
                 return (False, [], [])
 
+            # Sentinel node pods run two containers (redis + sentinel): pin the exec to
+            # the redis container AND target localhost in-pod — an orphaned legacy
+            # "redis" service may still resolve to the wrong (empty) redis, so the
+            # sentinel topology always wins over the service name.
+            if pod_name.startswith("featbit-redis-node"):
+                container_args = ["-c", "redis"]
+                service_name = None
+            else:
+                container_args = []
+            host_args = ["-h", service_name] if service_name else []
             ping_result = self._run_kubectl(
                 [
                     "--context",
@@ -449,10 +463,10 @@ class BaseScenario(ABC):
                     namespace,
                     "exec",
                     pod_name,
+                    *container_args,
                     "--",
                     "redis-cli",
-                    "-h",
-                    service_name,
+                    *host_args,
                     "-p",
                     str(redis_port),
                     "ping",
@@ -489,10 +503,10 @@ class BaseScenario(ABC):
                         namespace,
                         "exec",
                         pod_name,
+                        *container_args,
                         "--",
                         "redis-cli",
-                        "-h",
-                        service_name,
+                        *host_args,
                         "-p",
                         str(redis_port),
                         *args,

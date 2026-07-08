@@ -4,6 +4,7 @@ using Application.Caches;
 using Application.ControlPlane;
 using Application.Segments;
 using Application.Services;
+using Domain.AuditLogs;
 using Domain.ControlPlane;
 using Domain.FeatureFlags;
 using Domain.Messages;
@@ -18,6 +19,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MongoDB.Bson;
+using MongoDB.Driver;
 using StackExchange.Redis;
 
 namespace Api.IntegrationTests.ControlPlane;
@@ -133,8 +135,15 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
     /// Seeds a committed segment (v1, included=["alice"]) with a staged pending change
     /// (v2, included=["bob"]). The pending value carries the SAME Id and its
     /// <c>UpdatedAt</c> is set so its unix-ms equals the pending version, matching how S2 stages.
+    /// <paramref name="operatorId"/>/<paramref name="operation"/>/<paramref name="isTargetingChange"/>
+    /// are the attribution context (#73) staged alongside the pending value; they default to
+    /// legacy-matching values so existing callers are unaffected.
     /// </summary>
-    private async Task<long> SeedCommittedV1PendingV2(string key)
+    private async Task<long> SeedCommittedV1PendingV2(
+        string key,
+        Guid operatorId = default,
+        string operation = Operations.Update,
+        bool isTargetingChange = true)
     {
         var committed = CreateSegment(key, "alice");
         committed.CommittedVersion = 1;
@@ -146,9 +155,30 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         pendingValue.Id = committed.Id;
         pendingValue.UpdatedAt = DateTimeOffset.FromUnixTimeMilliseconds(pendingVersion).UtcDateTime;
 
-        await _segmentService.SetPendingAsync(committed.Id, pendingValue, pendingVersion);
+        await _segmentService.SetPendingAsync(
+            committed.Id, pendingValue, pendingVersion, operatorId, operation, isTargetingChange);
 
         return pendingVersion;
+    }
+
+    /// <summary>
+    /// Rewrites the segment's staged Pending sub-document via the RAW Mongo collection, removing
+    /// the attribution fields (#73) entirely so it looks exactly like a row staged before #73
+    /// existed. Verifies the coordinator falls back to <see cref="PendingSegmentChange"/>'s
+    /// property-initializer defaults (Guid.Empty / Operations.Update / true) on deserialization,
+    /// not merely because a caller happened to pass those same values through SetPendingAsync.
+    /// </summary>
+    private async Task StripAttributionFieldsViaRawCollection(Guid segmentId)
+    {
+        var rawCollection = _mongoDb.CollectionOf("Segments");
+        var filter = Builders<BsonDocument>.Filter.Eq("_id", segmentId);
+        var unset = Builders<BsonDocument>.Update
+            .Unset("Pending.OperatorId")
+            .Unset("Pending.Operation")
+            .Unset("Pending.IsTargetingChange");
+
+        var result = await rawCollection.UpdateOneAsync(filter, unset);
+        Assert.Equal(1, result.MatchedCount);
     }
 
     private async Task UpsertLeaseAsync(string dcId, DateTimeOffset expiresAt)
@@ -188,6 +218,7 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
             provider.GetRequiredService<IServiceScopeFactory>(),
             _composite,
             new SpyMessageProducer(),
+            new FakeLeaderElection(isLeader: true),
             configuration,
             logger ?? NullLogger<CommitCoordinatorWorker>.Instance);
     }
@@ -382,6 +413,77 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
         Assert.Single(spy.Published);
     }
 
+    // ----- attribution reconstruction (#73b) -----
+
+    [Fact]
+    public async Task Commit_Reconstruction_Carries_Staged_Attribution()
+    {
+        const string key = "seg-staged-attribution";
+        var stagedOperatorId = Guid.NewGuid();
+        const string stagedOperation = Operations.Remove;
+        const bool stagedIsTargetingChange = false;
+
+        var v = await SeedCommittedV1PendingV2(
+            key, stagedOperatorId, stagedOperation, stagedIsTargetingChange);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
+        await _dcbCache.StageSegmentAsync(segment.Pending!.Value, v);
+
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
+
+        var committed = await sut.RunOnceAsync();
+
+        Assert.Equal(1, committed);
+
+        // GetAffectedFlagsAsync is invoked once per env (single env-specific segment -> once);
+        // the reconstructed notification must carry the ORIGINAL staged attribution, not the
+        // coordinator's old hardcoded Guid.Empty/Update/true.
+        var notification = Assert.Single(spy.Notifications);
+        Assert.Equal(stagedOperatorId, notification.OperatorId);
+        Assert.Equal(stagedOperation, notification.Operation);
+        Assert.Equal(stagedIsTargetingChange, notification.IsTargetingChange);
+        Assert.Equal(segment.Id, notification.Segment.Id);
+    }
+
+    [Fact]
+    public async Task Commit_LegacyPending_Defaults_To_Previous_Behavior()
+    {
+        const string key = "seg-legacy-pending";
+
+        // Stage normally, then strip the #73 attribution fields via the RAW collection so the
+        // document is byte-for-byte what a pre-#73 pending row looked like.
+        var v = await SeedCommittedV1PendingV2(key);
+        var segment = await _segmentService.GetAsync(await PendingId(key));
+        await StripAttributionFieldsViaRawCollection(segment.Id);
+
+        var now = DateTimeOffset.UtcNow;
+        await UpsertLeaseAsync(DcA, now.AddMinutes(5));
+        await UpsertLeaseAsync(DcB, now.AddMinutes(5));
+
+        await _dcaCache.StageSegmentAsync(segment.Pending!.Value, v);
+        await _dcbCache.StageSegmentAsync(segment.Pending!.Value, v);
+
+        var spy = new SpySegmentMessageService();
+        var sut = CreateSut(spy);
+
+        var committed = await sut.RunOnceAsync();
+
+        Assert.Equal(1, committed);
+
+        // Legacy row (missing OperatorId/Operation/IsTargetingChange) must deserialize to exactly
+        // today's prior hardcoded reconstruction: Guid.Empty / Operations.Update / true.
+        var notification = Assert.Single(spy.Notifications);
+        Assert.Equal(Guid.Empty, notification.OperatorId);
+        Assert.Equal(Operations.Update, notification.Operation);
+        Assert.True(notification.IsTargetingChange);
+    }
+
     // ----- eviction observability (#16) -----
 
     [Fact]
@@ -434,8 +536,17 @@ public sealed class SegmentCommitCoordinatorWorkerTests : IAsyncLifetime
     {
         public List<(Guid EnvId, ICollection<FlagReference> AffectedFlags, Segment Segment)> Published { get; } = new();
 
+        /// <summary>
+        /// Captures every <see cref="OnSegmentChange"/> notification the coordinator reconstructs
+        /// (#73b), so tests can assert its attribution (OperatorId/Operation/IsTargetingChange)
+        /// without needing any affected flags to be computed.
+        /// </summary>
+        public List<OnSegmentChange> Notifications { get; } = new();
+
         public ValueTask<ICollection<FlagReference>> GetAffectedFlagsAsync(Guid envId, OnSegmentChange notification)
         {
+            Notifications.Add(notification);
+
             // No related flags are seeded in these tests, so there are no affected flags to compute.
             // Returning empty keeps OnSegmentUpdatedAsync (the throwing app service) from being hit.
             return ValueTask.FromResult<ICollection<FlagReference>>([]);

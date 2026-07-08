@@ -19,8 +19,8 @@ param(
     [string]$MongoUsername = "admin",
     [string]$MongoPassword = "password",
     [string]$MongoAuthDatabase = "admin",
-    [string]$WestNodeIp = "172.19.0.10",
-    [string]$EastNodeIp = "172.19.0.20"
+    [string]$WestNodeIp = "172.31.0.10",
+    [string]$EastNodeIp = "172.31.0.20"
 )
 
 $ErrorActionPreference = "Stop"
