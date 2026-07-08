@@ -404,7 +404,10 @@ def seed(
 @click.option(
     "--control-plane-base-url",
     default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
-    help="Control-Plane admin endpoint URL (defaults to https://featbit-control-plane.{west|east}.local)",
+    help="Control-Plane admin endpoint URL for CP-08 (X-Api-Key auth). Must be "
+    "host-reachable: Start-PortForwards.ps1 exposes west on 127.0.0.1:5200, east "
+    "on 127.0.0.1:5201. Defaults to http://featbit-control-plane.{west|east}.local, "
+    "which requires the host-nginx proxy.",
 )
 @click.option(
     "--license-key",
@@ -814,6 +817,14 @@ class _null_context:
     "(e.g. committed-pointer polls; the first post-flip gated commit can take >60s)",
 )
 @click.option(
+    "--control-plane-base-url",
+    default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
+    help="Control-Plane admin endpoint URL for CP-08 (X-Api-Key auth). Must be "
+    "host-reachable: Start-PortForwards.ps1 exposes west on 127.0.0.1:5200, east "
+    "on 127.0.0.1:5201. Defaults to http://featbit-control-plane.{west|east}.local, "
+    "which requires the host-nginx proxy.",
+)
+@click.option(
     "--health-poll-interval-seconds",
     type=int,
     default=5,
@@ -951,6 +962,7 @@ def suite(
     stabilization_seconds: int,
     health_timeout_seconds: int,
     timeout_seconds: int,
+    control_plane_base_url: str,
     health_poll_interval_seconds: int,
     log_detail: str,
     env_id: Optional[str],
@@ -1173,6 +1185,7 @@ def suite(
                 flag_key=None,
                 target_status=True,
                 timeout_seconds=timeout_seconds,
+                control_plane_base_url=control_plane_base_url or None,
                 poll_interval_ms=1000,
                 disruption_hold_seconds=15,
                 start_disruption_command=start_cmd,

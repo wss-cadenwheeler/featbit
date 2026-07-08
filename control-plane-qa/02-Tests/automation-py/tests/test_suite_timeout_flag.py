@@ -28,3 +28,13 @@ def test_suite_timeout_default_honors_env(monkeypatch):
     assert param is not None, "suite command has no timeout_seconds option"
     default = param.default() if callable(param.default) else param.default
     assert default == 180
+
+
+def test_suite_exposes_control_plane_base_url(monkeypatch):
+    """cp08 in a suite run needs the admin URL; only the scenario command had it,
+    so suite cp08 always fell back to the .local proxy hostname (#113)."""
+    monkeypatch.setenv("CONTROL_PLANE_BASE_URL", "http://127.0.0.1:5200")
+    param = _suite_param("control_plane_base_url")
+    assert param is not None, "suite command has no control_plane_base_url option"
+    default = param.default() if callable(param.default) else param.default
+    assert default == "http://127.0.0.1:5200"
