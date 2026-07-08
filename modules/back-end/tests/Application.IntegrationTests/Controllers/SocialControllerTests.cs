@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using Api.Controllers;
+using Application.Identity;
 
 namespace Application.IntegrationTests.Controllers;
 
@@ -21,9 +23,9 @@ public class SocialControllerTests
         var response = await client.GetAsync("/api/v1/social/providers?redirectUri=https://example.com");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<ApiEnvelope<List<ProviderVm>>>();
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<List<OAuthProviderVm>>>();
         Assert.NotNull(body);
-        Assert.True(body!.Success);
+        Assert.True(body.Success);
         Assert.NotNull(body.Data);
         Assert.Empty(body.Data!);
     }
@@ -37,22 +39,9 @@ public class SocialControllerTests
             authenticated: false);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<ApiEnvelope<object>>();
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<object>>();
         Assert.NotNull(body);
-        Assert.False(body!.Success);
+        Assert.False(body.Success);
         Assert.Contains("does-not-exist", string.Join(',', body.Errors));
-    }
-
-    private sealed class ApiEnvelope<TData>
-    {
-        public bool Success { get; set; }
-        public IEnumerable<string> Errors { get; set; } = Array.Empty<string>();
-        public TData? Data { get; set; }
-    }
-
-    private sealed class ProviderVm
-    {
-        public string Name { get; set; } = string.Empty;
-        public string AuthorizeUrl { get; set; } = string.Empty;
     }
 }

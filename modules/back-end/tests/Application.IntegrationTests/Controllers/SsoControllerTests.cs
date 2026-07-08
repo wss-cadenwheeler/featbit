@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using Api.Controllers;
+using Application.Identity;
 
 namespace Application.IntegrationTests.Controllers;
 
@@ -20,13 +22,13 @@ public class SsoControllerTests
         var client = _app.CreateClient();
         var response = await client.GetAsync("/api/v1/sso/pre-check");
 
-        var body = await response.Content.ReadFromJsonAsync<PreCheckResponse>();
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<SsoPreCheck>>();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.NotNull(body);
         Assert.True(body!.Success);
         Assert.NotNull(body.Data);
-        Assert.False(body.Data!.Enabled);
+        Assert.False(body.Data!.IsEnabled);
         Assert.Equal(TestWorkspace.Key, body.Data.WorkspaceKey);
     }
 
@@ -51,28 +53,9 @@ public class SsoControllerTests
             authenticated: false);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<ApiEnvelope>();
+        var body = await response.Content.ReadFromJsonAsync<ApiResponse<object>>();
         Assert.NotNull(body);
         Assert.False(body!.Success);
         Assert.Contains("SSO is not enabled", string.Join(',', body.Errors));
-    }
-
-    private sealed class PreCheckResponse
-    {
-        public bool Success { get; set; }
-        public IEnumerable<string> Errors { get; set; } = Array.Empty<string>();
-        public PreCheckData? Data { get; set; }
-    }
-
-    private sealed class PreCheckData
-    {
-        public bool Enabled { get; set; }
-        public string WorkspaceKey { get; set; } = string.Empty;
-    }
-
-    private sealed class ApiEnvelope
-    {
-        public bool Success { get; set; }
-        public IEnumerable<string> Errors { get; set; } = Array.Empty<string>();
     }
 }
