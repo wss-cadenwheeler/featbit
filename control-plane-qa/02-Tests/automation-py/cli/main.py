@@ -891,7 +891,9 @@ class _null_context:
 )
 @click.option(
     "--chaos-mesh-manifest",
-    default=lambda: get_env("CHAOS_MESH_MANIFEST", "k8s/chaos-mesh/redis-network-loss.yaml"),
+    default=lambda: get_env(
+        "CHAOS_MESH_MANIFEST", "01-Infrastructure/chaos-mesh/redis-network-loss.yaml"
+    ),
     help="Path to the Chaos Mesh NetworkChaos manifest for Redis disruption (CP-03). Relative paths resolve from control-plane-qa/.",
 )
 @click.option(
@@ -1124,11 +1126,7 @@ def suite(
             heartbeat_stop_cmd = None
             heartbeat_resume_cmd = None
             if scenario_name.startswith("cp03"):
-                _manifest = Path(chaos_mesh_manifest)
-                if not _manifest.is_absolute():
-                    # Resolve relative to control-plane-qa/ (two levels up from cli/main.py).
-                    _manifest = Path(__file__).resolve().parents[2] / _manifest
-                manifest_path = str(_manifest.resolve())
+                manifest_path = _resolve_manifest(chaos_mesh_manifest)
                 if scenario_name == "cp03-west-with-east-redis-outage":
                     target_context = "east"
                 else:
