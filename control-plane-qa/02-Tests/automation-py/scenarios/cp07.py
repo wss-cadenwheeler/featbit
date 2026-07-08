@@ -120,7 +120,7 @@ class CP07Scenario(BaseScenario):
                     "No license key configured (set LICENSE_KEY or --license-key); "
                     "license-change propagation not asserted.",
                 )
-                self._notify_step("license-update", "ok")
+                self._notify_step("license-update", "skipped")
                 return self.assertions.all_passed()
 
             update_result = self._update_license(
