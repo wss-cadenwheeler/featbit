@@ -230,10 +230,11 @@ class CP09Scenario(BaseScenario):
 
             # Map west pod names to their PodId GUID via the heartbeats hash.
             # The hash field IS the PodId, but the pod name (e.g.
-            # evaluation-server-abc-xyz) is not directly recorded. We treat
-            # the union of west heartbeat keys as the "west pod ids" we
-            # want to see purged after delete.
-            pre_delete_west_pod_ids = set(west_resample.keys())
+            # evaluation-server-abc-xyz) is not directly recorded. On the
+            # composite-write topology the west hash also holds live EAST pods'
+            # heartbeats, so scope to west-owned entries (by DcId/Region) —
+            # only those should be purged after the west delete (#113).
+            pre_delete_west_pod_ids = self._west_owned_pod_ids(west_resample)
 
             # Guard against the empty-baseline footgun: if Redis returned no
             # west heartbeats (e.g. redis-cli/kubectl errored upstream), the
@@ -1319,6 +1320,30 @@ class CP09Scenario(BaseScenario):
                 return str(entry[key])
         return None
 
+    @staticmethod
+    def _west_owned_pod_ids(heartbeats: Dict[str, dict], dc_id: str = "west") -> set:
+        """Return PodIds whose heartbeat entry belongs to the given DC.
+
+        Heartbeat entries carry ``DcId`` (and ``Region``) since the consistency
+        work; on the composite-write topology the west hash also holds live east
+        pods, which must not be counted as west pods awaiting purge. Entries
+        lacking both fields predate DcId stamping and are treated as local
+        (west), preserving the legacy shared-redis behavior.
+        """
+        owned = set()
+        for pod_id, entry in heartbeats.items():
+            if not isinstance(entry, dict):
+                owned.add(pod_id)
+                continue
+            marker = None
+            for key in ("DcId", "dcId", "dcid", "Region", "region"):
+                if entry.get(key):
+                    marker = str(entry[key])
+                    break
+            if marker is None or marker.lower() == dc_id.lower():
+                owned.add(pod_id)
+        return owned
+
     def _assert_heartbeats_present(
         self, assertion_name: str, region: str, heartbeats: Dict[str, dict]
     ) -> None:
@@ -1494,7 +1519,7 @@ class CP09Scenario(BaseScenario):
 
         while time.time() < deadline:
             last_west = self._read_heartbeats("west")
-            new_ids = set(last_west.keys()) - pre_delete_pod_ids
+            new_ids = self._west_owned_pod_ids(last_west) - pre_delete_pod_ids
             self.add_timeline_event(
                 "recovery-poll",
                 west_pod_ids=sorted(last_west.keys()),
