@@ -181,6 +181,14 @@ public class Segment : AuditedEntity
         return json;
     }
 
+    public void MarkAsUpdated(Guid updatorId)
+    {
+        // We may change segment to `FullAuditedEntity` in the future, so keep unused `updatorId` parameter for now.
+        _ = updatorId;
+
+        UpdatedAt = DateTime.UtcNow;
+    }
+
     /// <summary>
     /// Stage <paramref name="pendingValue"/> as a pending (not-yet-committed) change.
     /// The committed value is left untouched, so a committed read still returns the
