@@ -542,6 +542,26 @@ class BaseScenario(ABC):
                     self._notify_step(assertion_name, "failed", "no keys found")
                     return (False, [], [])
 
+            # GatedCommit: at commit time the peer DC receives the committed
+            # pointer and the versioned key, but its legacy single-value key
+            # is NOT rewritten (eval reads are pointer-gated; the legacy key
+            # is the BestEffort transport). Sample the pointer's versioned
+            # key too, so value expectations see what the evaluation servers
+            # actually serve (#113). featbit:{res}:{id} -> featbit:{res}-committed:{id}
+            key_prefix, _, key_ident = redis_key.rpartition(":")
+            if key_prefix and key_ident:
+                pointer_key = f"{key_prefix}-committed:{key_ident}"
+                ptr_result = _redis_cli("GET", pointer_key)
+                ptr_value = (ptr_result.stdout + ptr_result.stderr).strip()
+                if (
+                    ptr_result.returncode == 0
+                    and ptr_value
+                    and "(nil)" not in ptr_value.lower()
+                ):
+                    versioned_key = f"{redis_key}:v{ptr_value}"
+                    if versioned_key not in keys:
+                        keys.append(versioned_key)
+
             for key in keys[:5]:
                 get_result = _redis_cli("GET", key)
                 text = (get_result.stdout + get_result.stderr).strip()
