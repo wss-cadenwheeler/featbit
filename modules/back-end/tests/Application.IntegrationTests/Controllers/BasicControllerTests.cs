@@ -1,6 +1,6 @@
 using Api.Controllers;
 
-namespace Application.IntegrationTests.Basics;
+namespace Application.IntegrationTests.Controllers;
 
 [Trait("Category", "Host")]
 [Collection(nameof(TestApp))]

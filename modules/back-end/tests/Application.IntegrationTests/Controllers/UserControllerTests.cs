@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
-namespace Application.IntegrationTests.Users;
+namespace Application.IntegrationTests.Controllers;
 
 [Trait("Category", "Host")]
 [Collection(nameof(TestApp))]

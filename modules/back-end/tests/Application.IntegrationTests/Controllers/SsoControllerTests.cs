@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 
-namespace Application.IntegrationTests.Sso;
+namespace Application.IntegrationTests.Controllers;
 
 [Trait("Category", "Host")]
 [Collection(nameof(TestApp))]

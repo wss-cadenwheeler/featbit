@@ -3,7 +3,7 @@ using System.Net.Http.Json;
 using Api.Controllers;
 using Application.Identity;
 
-namespace Application.IntegrationTests.Identity;
+namespace Application.IntegrationTests.Controllers;
 
 [Trait("Category", "Host")]
 [Collection(nameof(TestApp))]
