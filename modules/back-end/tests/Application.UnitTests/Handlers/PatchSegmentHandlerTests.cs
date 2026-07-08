@@ -2,6 +2,8 @@ using Application.Segments;
 using Application.Services;
 using Application.Users;
 using Domain.AuditLogs;
+using Domain.Policies;
+using Domain.Resources;
 using Domain.Segments;
 using Domain.Targeting;
 using MediatR;
@@ -24,6 +26,23 @@ public class PatchSegmentHandlerTests
         rules: new List<MatchRule>(),
         description: "desc");
 
+    private static PolicyStatement[] AllowAll() =>
+    [
+        new PolicyStatement
+        {
+            Effect = EffectType.Allow,
+            Actions = new[] { "*" },
+            Resources = new[] { "*" }
+        }
+    ];
+
+    private static Mock<IResourceService> ResourceServiceMock()
+    {
+        var mock = new Mock<IResourceService>();
+        mock.Setup(x => x.GetSegmentRnAsync(It.IsAny<Guid>(), It.IsAny<Guid>())).ReturnsAsync("segment/*");
+        return mock;
+    }
+
     [Fact]
     public async Task Handle_NonTargetingPatch_AppliesAndPublishesAsNonTargetingChange()
     {
@@ -34,11 +53,11 @@ public class PatchSegmentHandlerTests
         var operatorId = Guid.NewGuid();
         currentUser.SetupGet(x => x.Id).Returns(operatorId);
         var publisher = new Mock<IPublisher>();
-        var sut = new PatchSegmentHandler(service.Object, currentUser.Object, publisher.Object);
+        var sut = new PatchSegmentHandler(service.Object, ResourceServiceMock().Object, currentUser.Object, publisher.Object);
 
         var patch = new JsonPatchDocument<Segment>();
         patch.Replace(x => x.Description, "patched");
-        var request = new PatchSegment { Id = segment.Id, Patch = patch };
+        var request = new PatchSegment { Id = segment.Id, Patch = patch, Permissions = AllowAll() };
 
         var result = await sut.Handle(request, CancellationToken.None);
 
@@ -60,11 +79,11 @@ public class PatchSegmentHandlerTests
         var service = new Mock<ISegmentService>();
         service.Setup(x => x.GetAsync(It.IsAny<Guid>())).ReturnsAsync(segment);
         var publisher = new Mock<IPublisher>();
-        var sut = new PatchSegmentHandler(service.Object, Mock.Of<ICurrentUser>(), publisher.Object);
+        var sut = new PatchSegmentHandler(service.Object, ResourceServiceMock().Object, Mock.Of<ICurrentUser>(), publisher.Object);
 
         var patch = new JsonPatchDocument<Segment>();
         patch.Replace(x => x.Included, new[] { "user-1", "user-2" });
-        var request = new PatchSegment { Id = segment.Id, Patch = patch };
+        var request = new PatchSegment { Id = segment.Id, Patch = patch, Permissions = AllowAll() };
 
         var result = await sut.Handle(request, CancellationToken.None);
 
@@ -81,7 +100,7 @@ public class PatchSegmentHandlerTests
         var service = new Mock<ISegmentService>();
         service.Setup(x => x.GetAsync(It.IsAny<Guid>())).ReturnsAsync(segment);
         var publisher = new Mock<IPublisher>();
-        var sut = new PatchSegmentHandler(service.Object, Mock.Of<ICurrentUser>(), publisher.Object);
+        var sut = new PatchSegmentHandler(service.Object, Mock.Of<IResourceService>(), Mock.Of<ICurrentUser>(), publisher.Object);
 
         var patch = new JsonPatchDocument<Segment>();
         patch.Operations.Add(new Operation<Segment>

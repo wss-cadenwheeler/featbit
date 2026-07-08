@@ -3,6 +3,8 @@ using Application.Services;
 using Application.Users;
 using Domain.AuditLogs;
 using Domain.FeatureFlags;
+using Domain.Policies;
+using Domain.Resources;
 using MediatR;
 using Microsoft.AspNetCore.JsonPatch.SystemTextJson;
 using Microsoft.AspNetCore.JsonPatch.SystemTextJson.Operations;
@@ -29,6 +31,16 @@ public class PatchFeatureFlagHandlerTests
             currentUserId: Guid.NewGuid());
     }
 
+    private static PolicyStatement[] AllowAll() =>
+    [
+        new PolicyStatement
+        {
+            Effect = EffectType.Allow,
+            Actions = new[] { "*" },
+            Resources = new[] { "*" }
+        }
+    ];
+
     [Fact]
     public async Task Handle_ValidPatch_AppliesUpdatesAndPublishes()
     {
@@ -39,11 +51,13 @@ public class PatchFeatureFlagHandlerTests
         var operatorId = Guid.NewGuid();
         currentUser.SetupGet(x => x.Id).Returns(operatorId);
         var publisher = new Mock<IPublisher>();
-        var sut = new PatchFeatureFlagHandler(service.Object, currentUser.Object, publisher.Object);
+        var resourceService = new Mock<IResourceService>();
+        resourceService.Setup(x => x.GetFlagRnAsync(It.IsAny<Guid>(), It.IsAny<string>())).ReturnsAsync("flag/*");
+        var sut = new PatchFeatureFlagHandler(service.Object, resourceService.Object, currentUser.Object, publisher.Object);
 
         var patch = new JsonPatchDocument<FeatureFlag>();
         patch.Replace(x => x.Description, "patched");
-        var request = new PatchFeatureFlag { EnvId = Guid.NewGuid(), Key = "flag", Patch = patch };
+        var request = new PatchFeatureFlag { EnvId = Guid.NewGuid(), Key = "flag", Patch = patch, Permissions = AllowAll() };
 
         var result = await sut.Handle(request, CancellationToken.None);
 
@@ -67,7 +81,7 @@ public class PatchFeatureFlagHandlerTests
         var service = new Mock<IFeatureFlagService>();
         service.Setup(x => x.GetAsync(It.IsAny<Guid>(), It.IsAny<string>())).ReturnsAsync(flag);
         var publisher = new Mock<IPublisher>();
-        var sut = new PatchFeatureFlagHandler(service.Object, Mock.Of<ICurrentUser>(), publisher.Object);
+        var sut = new PatchFeatureFlagHandler(service.Object, Mock.Of<IResourceService>(), Mock.Of<ICurrentUser>(), publisher.Object);
 
         // op against a non-existent path produces a JsonPatchError when applied
         var patch = new JsonPatchDocument<FeatureFlag>();
