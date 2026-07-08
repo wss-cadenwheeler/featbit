@@ -718,6 +718,33 @@ class BaseScenario(ABC):
     _KAFKA_BOOTSTRAP = "kafka:9092"
     _KAFKA_AGGREGATE_BOOTSTRAP = "kafka-aggregate:9092"
 
+    def _discover_kafka_pod(self, context: str, namespace: str) -> Optional[str]:
+        """Discover the Kafka broker pod in the target cluster.
+
+        Several kafka-* pods run alongside the broker (kafka-ui,
+        kafka-aggregate, the mirrormakers); only the broker pod labeled
+        ``app=kafka`` carries kafka-console-consumer.sh, so match the label
+        exactly (#113 follow-up — the auto check used to reference an
+        undefined ``self._KAFKA_POD``).
+        """
+        all_pods = self._run_kubectl(
+            ["--context", context, "-n", namespace, "get", "pods", "-o", "json"]
+        )
+        if all_pods.returncode != 0:
+            return None
+        try:
+            items = json.loads(all_pods.stdout).get("items", [])
+        except json.JSONDecodeError:
+            return None
+        for item in items:
+            meta = item.get("metadata", {})
+            if (
+                (meta.get("labels") or {}).get("app") == "kafka"
+                and item.get("status", {}).get("phase") == "Running"
+            ):
+                return meta.get("name")
+        return None
+
     def run_kafka_topic_check(
         self,
         name: str,
@@ -745,11 +772,21 @@ class BaseScenario(ABC):
             return
 
         try:
+            kafka_pod = self._discover_kafka_pod(context, namespace)
+            if not kafka_pod:
+                self.assertions.add_fail(
+                    name,
+                    f"Kafka topic check found no running kafka broker pod "
+                    f"(label app=kafka) in context={context} namespace={namespace}.",
+                )
+                self._notify_step(name, "failed", "no kafka pod found")
+                return
+
             result = self._run_kubectl(
                 [
                     "--context", context,
                     "-n", namespace,
-                    "exec", self._KAFKA_POD, "--",
+                    "exec", kafka_pod, "--",
                     f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
                     "--bootstrap-server", bootstrap,
                     "--topic", topic,
