@@ -356,17 +356,25 @@ if (-not $eastReachableFromWest) {
 Write-Success "Cross-cluster MongoDB connectivity verified"
 Write-Host ""
 
-# Create replica set configuration using NodePort addresses
+# Create replica set configuration using NodePort addresses.
+# West is the PRIMARY DC: west-0 gets the highest priority so the primary lives
+# in west in steady state, and west (holding the 2/3 majority) keeps a writable
+# primary during a cross-DC partition — the premise of CP-11/CP-12 (west =
+# writable survivor, east = evicted DC). The previous config gave EAST
+# priority 2, parking the primary in the DC the partition isolates: west-side
+# writes (flag toggles, dc_leases renewals) then stall on server selection
+# until west's delayed priority-aware election completes, and commits stall
+# with them (#113).
 $members = @(
-    "    { _id: 0, host: '${westMongoAddress}', priority: 1 }"
+    "    { _id: 0, host: '${westMongoAddress}', priority: 2 }"
 )
 
 if ($westSecondaryService) {
     $members += "    { _id: 1, host: '$($westSecondaryService.Address)', priority: 1 }"
-    $members += "    { _id: 2, host: '${eastMongoAddress}', priority: 2 }"
+    $members += "    { _id: 2, host: '${eastMongoAddress}', priority: 1 }"
 }
 else {
-    $members += "    { _id: 1, host: '${eastMongoAddress}', priority: 2 }"
+    $members += "    { _id: 1, host: '${eastMongoAddress}', priority: 1 }"
 }
 
 $newLine = [Environment]::NewLine
