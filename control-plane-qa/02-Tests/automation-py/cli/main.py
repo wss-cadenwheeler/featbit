@@ -922,12 +922,23 @@ class _null_context:
     help="Mode the deployment runs in (CP-10 - CP-14). The suite does NOT flip cluster config.",
 )
 @click.option(
-    "--cross-dc-partition-manifest",
+    "--cross-dc-partition-manifest-west",
     default=lambda: get_env(
-        "CROSS_DC_PARTITION_MANIFEST", "01-Infrastructure/chaos-mesh/cross-dc-partition.yaml"
+        "CROSS_DC_PARTITION_MANIFEST_WEST",
+        "01-Infrastructure/chaos-mesh/cross-dc-partition-west.yaml",
     ),
-    help="NetworkChaos manifest severing the cross-DC link (CP-11/CP-12). Relative paths "
-    "resolve from control-plane-qa/.",
+    help="NetworkChaos manifest applied to the WEST cluster for CP-11/CP-12 (must not "
+    "target west's own node — see the manifest header). Relative paths resolve from "
+    "control-plane-qa/.",
+)
+@click.option(
+    "--cross-dc-partition-manifest-east",
+    default=lambda: get_env(
+        "CROSS_DC_PARTITION_MANIFEST_EAST",
+        "01-Infrastructure/chaos-mesh/cross-dc-partition-east.yaml",
+    ),
+    help="NetworkChaos manifest applied to the EAST cluster for CP-11/CP-12. Relative "
+    "paths resolve from control-plane-qa/.",
 )
 @click.option(
     "--eval-kafka-partition-manifest",
@@ -987,7 +998,8 @@ def suite(
     artifacts_root: str,
     chaos_mesh_manifest: str,
     consistency_mode: str,
-    cross_dc_partition_manifest: str,
+    cross_dc_partition_manifest_west: str,
+    cross_dc_partition_manifest_east: str,
     eval_kafka_partition_manifest: str,
     east_eval_readiness_url: str,
     heartbeat_staleness_threshold_seconds: int,
@@ -1155,14 +1167,18 @@ def suite(
                 start_cmd = f"kubectl apply -f {manifest_path} --context {target_context}"
                 stop_cmd = f"kubectl delete -f {manifest_path} --context {target_context} --ignore-not-found"
             elif scenario_name.startswith(("cp11", "cp12")):
-                # CP-11/CP-12: one cross-DC partition (apply/delete in both clusters).
-                _m = _resolve_manifest(cross_dc_partition_manifest)
+                # CP-11/CP-12: per-cluster cross-DC partition manifests — each side
+                # blocks the PEER only, never its own node (#113: a shared manifest
+                # listing both peer IPs severed each cluster's node->pod traffic,
+                # killing port-forwards to its own API mid-scenario).
+                _mw = _resolve_manifest(cross_dc_partition_manifest_west)
+                _me = _resolve_manifest(cross_dc_partition_manifest_east)
                 partition_start_cmd = (
-                    f"kubectl --context west apply -f {_m} && kubectl --context east apply -f {_m}"
+                    f"kubectl --context west apply -f {_mw} && kubectl --context east apply -f {_me}"
                 )
                 partition_stop_cmd = (
-                    f"kubectl --context west delete -f {_m} --ignore-not-found && "
-                    f"kubectl --context east delete -f {_m} --ignore-not-found"
+                    f"kubectl --context west delete -f {_mw} --ignore-not-found && "
+                    f"kubectl --context east delete -f {_me} --ignore-not-found"
                 )
             elif scenario_name.startswith("cp13"):
                 # CP-13: intra-east eval<->kafka partition (local heartbeat break).
