@@ -155,9 +155,14 @@ public sealed class RedisLeaderElectorTests : IntegrationTestBase, IAsyncLifetim
             timeout: TimeSpan.FromSeconds(2));
         Assert.True(oneBecameLeader, "One of the two electors should have become leader.");
 
-        // Give the loser a couple more renew ticks to (incorrectly) also claim leadership, if it were
-        // going to.
-        await Task.Delay(TimeSpan.FromSeconds(1));
+        // Negative assertion via bounded poll (§9): watch for the VIOLATION — both claiming
+        // leadership — across a couple more renew ticks, and expect the poll to time out.
+        var bothClaimedLeadership = await WaitUntilAsync(
+            () => electorA.IsLeader && electorB.IsLeader,
+            timeout: TimeSpan.FromSeconds(1));
+        Assert.False(
+            bothClaimedLeadership,
+            $"Expected exactly one leader; got A={electorA.IsLeader}, B={electorB.IsLeader}.");
 
         Assert.True(
             electorA.IsLeader ^ electorB.IsLeader,
@@ -180,9 +185,13 @@ public sealed class RedisLeaderElectorTests : IntegrationTestBase, IAsyncLifetim
         Assert.True(aBecameLeader, "Elector A should become leader first.");
 
         await electorB.StartAsync(CancellationToken.None);
-        // give B a chance to attempt (and fail, since A holds the lock) at least once
-        await Task.Delay(renewInterval + TimeSpan.FromMilliseconds(200));
-        Assert.False(electorB.IsLeader, "Elector B should not be leader while A holds the lock.");
+        // Negative assertion via bounded poll (§9): watch for the VIOLATION — B claiming
+        // leadership while A holds the lock — across at least one renew attempt, and expect
+        // the poll to time out.
+        var bClaimedLeadership = await WaitUntilAsync(
+            () => electorB.IsLeader,
+            timeout: renewInterval + TimeSpan.FromMilliseconds(200));
+        Assert.False(bClaimedLeadership, "Elector B should not be leader while A holds the lock.");
 
         // Graceful stop releases the lock immediately.
         await electorA.StopAsync(CancellationToken.None);

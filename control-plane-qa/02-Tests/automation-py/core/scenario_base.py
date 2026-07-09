@@ -336,32 +336,15 @@ class BaseScenario(ABC):
         )
 
     def _discover_redis_pod(self, context: str, namespace: str) -> Optional[str]:
-        """Discover a Redis pod name in the target cluster."""
-        by_label = self._run_kubectl(
-            [
-                "--context",
-                context,
-                "-n",
-                namespace,
-                "get",
-                "pods",
-                "-l",
-                "app=redis",
-                "-o",
-                "json",
-            ]
-        )
-        if by_label.returncode == 0:
-            try:
-                items = json.loads(by_label.stdout).get("items", [])
-                for item in items:
-                    name = item.get("metadata", {}).get("name")
-                    phase = item.get("status", {}).get("phase")
-                    if name and phase == "Running":
-                        return name
-            except json.JSONDecodeError:
-                pass
+        """Discover a Redis pod name in the target cluster.
 
+        The Sentinel statefulset (featbit-redis-node-*) is the authoritative
+        per-cluster cache whenever it is present: a fresh deploy also leaves a
+        legacy "redis" pod Running (labeled app=redis) that points at an empty
+        orphan Redis, so a label match must never win over a sentinel node
+        (#113 follow-up — the old label-first order sent every observation to
+        the orphan).
+        """
         all_pods = self._run_kubectl(
             ["--context", context, "-n", namespace, "get", "pods", "-o", "json"]
         )
@@ -370,15 +353,26 @@ class BaseScenario(ABC):
 
         try:
             items = json.loads(all_pods.stdout).get("items", [])
-            for item in items:
-                name = item.get("metadata", {}).get("name", "")
-                phase = item.get("status", {}).get("phase")
-                # "redis" covers the legacy single-pod topology; "featbit-redis-node"
-                # covers the bitnami Redis+Sentinel statefulset (per-cluster HA topology).
-                if (name.startswith("redis") or name.startswith("featbit-redis-node")) and phase == "Running":
-                    return name
         except json.JSONDecodeError:
             return None
+
+        running = [
+            item for item in items
+            if item.get("metadata", {}).get("name")
+            and item.get("status", {}).get("phase") == "Running"
+        ]
+        # 1. Sentinel statefulset nodes (per-cluster HA topology).
+        for item in running:
+            if item.get("metadata", {}).get("name", "").startswith("featbit-redis-node"):
+                return item["metadata"]["name"]
+        # 2. Pods labeled app=redis (legacy single-pod topology).
+        for item in running:
+            if (item.get("metadata", {}).get("labels") or {}).get("app") == "redis":
+                return item["metadata"]["name"]
+        # 3. Name-prefix fallback for unlabeled legacy pods.
+        for item in running:
+            if item.get("metadata", {}).get("name", "").startswith("redis"):
+                return item["metadata"]["name"]
 
         return None
 
@@ -548,6 +542,26 @@ class BaseScenario(ABC):
                     self._notify_step(assertion_name, "failed", "no keys found")
                     return (False, [], [])
 
+            # GatedCommit: at commit time the peer DC receives the committed
+            # pointer and the versioned key, but its legacy single-value key
+            # is NOT rewritten (eval reads are pointer-gated; the legacy key
+            # is the BestEffort transport). Sample the pointer's versioned
+            # key too, so value expectations see what the evaluation servers
+            # actually serve (#113). featbit:{res}:{id} -> featbit:{res}-committed:{id}
+            key_prefix, _, key_ident = redis_key.rpartition(":")
+            if key_prefix and key_ident:
+                pointer_key = f"{key_prefix}-committed:{key_ident}"
+                ptr_result = _redis_cli("GET", pointer_key)
+                ptr_value = (ptr_result.stdout + ptr_result.stderr).strip()
+                if (
+                    ptr_result.returncode == 0
+                    and ptr_value
+                    and "(nil)" not in ptr_value.lower()
+                ):
+                    versioned_key = f"{redis_key}:v{ptr_value}"
+                    if versioned_key not in keys:
+                        keys.append(versioned_key)
+
             for key in keys[:5]:
                 get_result = _redis_cli("GET", key)
                 text = (get_result.stdout + get_result.stderr).strip()
@@ -587,43 +601,62 @@ class BaseScenario(ABC):
         expected_status: Optional[bool] = None,
         context: Optional[str] = None,
     ) -> None:
-        """Run Redis check for flag via provided command or automatic Kubernetes discovery."""
+        """Run Redis check for flag via provided command or automatic Kubernetes discovery.
+
+        When ``expected_status`` is given, the value check POLLS until it
+        matches or ``config.timeout_seconds`` elapses: under GatedCommit the
+        legacy ``featbit:flag:{id}`` key only updates at commit time
+        (coordinator tick), while the management API converges instantly
+        (shared Mongo) — a single sample races the commit (#113).
+        """
         assertion_name = f"redis-{region}-check"
 
-        found, keys, sampled_values = self._run_redis_key_lookup(
-            assertion_name=assertion_name,
-            command=command,
-            redis_key=f"featbit:flag:{flag_id}" if flag_id else "",
-            identifier=flag_id or "",
-            identifier_label="flag_id",
-            region=region,
-            context=context,
-            diagnostics=True,
-            timeline_event="redis-auto-check",
-            timeline_extra={
-                "flag_key": flag_key,
-                "expected_status": expected_status,
-            },
-        )
-        if not found or command:
-            return
+        deadline = time.time() + (self.config.timeout_seconds or 60)
+        poll_interval = (self.config.poll_interval_ms or 1000) / 1000.0
 
-        expected_state_ok = True
-        if expected_status is not None:
-            expected_token = f'"isenabled":{str(expected_status).lower()}'
-            expected_state_ok = any(expected_token in value.lower() for value in sampled_values)
-
-        if expected_state_ok:
-            self.assertions.add_pass(
-                assertion_name,
-                f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context or region}.",
+        while True:
+            found, keys, sampled_values = self._run_redis_key_lookup(
+                assertion_name=assertion_name,
+                command=command,
+                redis_key=f"featbit:flag:{flag_id}" if flag_id else "",
+                identifier=flag_id or "",
+                identifier_label="flag_id",
+                region=region,
+                context=context,
+                diagnostics=True,
+                timeline_event="redis-auto-check",
+                timeline_extra={
+                    "flag_key": flag_key,
+                    "expected_status": expected_status,
+                },
             )
-            self._notify_step(assertion_name, "ok")
-            return
+            if not found or command:
+                return
+
+            expected_state_ok = True
+            if expected_status is not None:
+                expected_token = f'"isenabled":{str(expected_status).lower()}'
+                expected_state_ok = any(
+                    expected_token in value.lower() for value in sampled_values
+                )
+
+            if expected_state_ok:
+                self.assertions.add_pass(
+                    assertion_name,
+                    f"Redis contains {len(keys)} key(s) for flag_id={flag_id} in context={context or region}.",
+                )
+                self._notify_step(assertion_name, "ok")
+                return
+
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_interval)
 
         self.assertions.add_fail(
             assertion_name,
-            f"Redis contains keys for flag_key={flag_key} in context={context or region}, but sampled values did not include expected isEnabled={expected_status}.",
+            f"Redis contains keys for flag_key={flag_key} in context={context or region}, "
+            f"but sampled values did not include expected isEnabled={expected_status} "
+            f"within {self.config.timeout_seconds}s.",
         )
         self._notify_step(assertion_name, "failed", "isEnabled mismatch")
 
@@ -724,6 +757,33 @@ class BaseScenario(ABC):
     _KAFKA_BOOTSTRAP = "kafka:9092"
     _KAFKA_AGGREGATE_BOOTSTRAP = "kafka-aggregate:9092"
 
+    def _discover_kafka_pod(self, context: str, namespace: str) -> Optional[str]:
+        """Discover the Kafka broker pod in the target cluster.
+
+        Several kafka-* pods run alongside the broker (kafka-ui,
+        kafka-aggregate, the mirrormakers); only the broker pod labeled
+        ``app=kafka`` carries kafka-console-consumer.sh, so match the label
+        exactly (#113 follow-up — the auto check used to reference an
+        undefined ``self._KAFKA_POD``).
+        """
+        all_pods = self._run_kubectl(
+            ["--context", context, "-n", namespace, "get", "pods", "-o", "json"]
+        )
+        if all_pods.returncode != 0:
+            return None
+        try:
+            items = json.loads(all_pods.stdout).get("items", [])
+        except json.JSONDecodeError:
+            return None
+        for item in items:
+            meta = item.get("metadata", {})
+            if (
+                (meta.get("labels") or {}).get("app") == "kafka"
+                and item.get("status", {}).get("phase") == "Running"
+            ):
+                return meta.get("name")
+        return None
+
     def run_kafka_topic_check(
         self,
         name: str,
@@ -733,11 +793,17 @@ class BaseScenario(ABC):
         topic: str,
         flag_id: Optional[str] = None,
         namespace: str = "featbit",
+        fallback_context: Optional[str] = None,
     ) -> None:
         """Assert a flag-change message exists on a Kafka topic.
 
         Uses kubectl exec into the main kafka pod with kafka-console-consumer.sh.
         Delegates to a custom shell command when one is provided.
+
+        ``fallback_context``: under GatedCommit the evaluation-server publish
+        happens at commit time in the COMMITTING coordinator's DC — which may
+        be the peer, not the source region (#113). When given, a GUID miss in
+        the primary context consults the fallback context before failing.
         """
         if command:
             self.run_optional_check(name, command)
@@ -750,46 +816,77 @@ class BaseScenario(ABC):
             self._notify_step(name, "failed", "flag_id not resolved")
             return
 
+        contexts_to_check = [context]
+        if fallback_context and fallback_context != context:
+            contexts_to_check.append(fallback_context)
+
         try:
-            result = self._run_kubectl(
-                [
-                    "--context", context,
-                    "-n", namespace,
-                    "exec", self._KAFKA_POD, "--",
-                    f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
-                    "--bootstrap-server", bootstrap,
-                    "--topic", topic,
-                    "--from-beginning",
-                    "--timeout-ms", "5000",
-                ],
-                timeout=30,
+            checked: list[str] = []
+            for ctx in contexts_to_check:
+                kafka_pod = self._discover_kafka_pod(ctx, namespace)
+                if not kafka_pod:
+                    self.assertions.add_fail(
+                        name,
+                        f"Kafka topic check found no running kafka broker pod "
+                        f"(label app=kafka) in context={ctx} namespace={namespace}.",
+                    )
+                    self._notify_step(name, "failed", "no kafka pod found")
+                    return
+
+                result = self._run_kubectl(
+                    [
+                        "--context", ctx,
+                        "-n", namespace,
+                        "exec", kafka_pod, "--",
+                        f"{self._KAFKA_BIN}/kafka-console-consumer.sh",
+                        "--bootstrap-server", bootstrap,
+                        "--topic", topic,
+                        "--from-beginning",
+                        "--timeout-ms", "5000",
+                    ],
+                    timeout=30,
+                )
+
+                # kafka-console-consumer exits 1 on timeout even when messages were
+                # found; treat any output as potentially valid and rely on content
+                # search. A hard consumer failure in the PRIMARY context is an
+                # infrastructure error, not a miss — fail without the fallback.
+                output = result.stdout + result.stderr
+                if (
+                    result.returncode != 0
+                    and not result.stdout.strip()
+                    and ctx == context
+                    and "TimeoutException" not in output
+                ):
+                    self.assertions.add_fail(
+                        name,
+                        f"Kafka consumer failed for topic={topic} on bootstrap={bootstrap} "
+                        f"in context={ctx}. Output: {output.strip()[:200]}",
+                    )
+                    self._notify_step(name, "failed", "consumer error")
+                    return
+
+                checked.append(ctx)
+                if flag_id in output:
+                    where = (
+                        f"context={ctx}"
+                        if ctx == context
+                        else f"fallback context={ctx} (eval publish lands in the "
+                        f"committing coordinator's DC under GatedCommit)"
+                    )
+                    self.assertions.add_pass(
+                        name,
+                        f"Flag GUID found in topic={topic} on bootstrap={bootstrap} in {where}.",
+                    )
+                    self._notify_step(name, "ok")
+                    return
+
+            self.assertions.add_fail(
+                name,
+                f"Flag GUID not found in topic={topic} on bootstrap={bootstrap} "
+                f"in context(s)={', '.join(checked)}.",
             )
-
-            # kafka-console-consumer exits 1 on timeout even when messages were found;
-            # treat any output as potentially valid and rely on content search.
-            output = result.stdout + result.stderr
-            if result.returncode != 0 and not result.stdout.strip():
-                self.assertions.add_fail(
-                    name,
-                    f"Kafka consumer failed for topic={topic} on bootstrap={bootstrap} "
-                    f"in context={context}. Output: {output.strip()[:200]}",
-                )
-                self._notify_step(name, "failed", "consumer error")
-                return
-
-            if flag_id in output:
-                self.assertions.add_pass(
-                    name,
-                    f"Flag GUID found in topic={topic} on bootstrap={bootstrap} in context={context}.",
-                )
-                self._notify_step(name, "ok")
-            else:
-                self.assertions.add_fail(
-                    name,
-                    f"Flag GUID not found in topic={topic} on bootstrap={bootstrap} "
-                    f"in context={context}. Consumed {len(result.stdout.splitlines())} message(s).",
-                )
-                self._notify_step(name, "failed", "guid not in messages")
+            self._notify_step(name, "failed", "guid not in messages")
 
         except subprocess.TimeoutExpired:
             self.assertions.add_fail(name, f"Kafka topic check timed out for topic={topic} in context={context}.")
@@ -932,116 +1029,6 @@ class BaseScenario(ABC):
             time.sleep(self.config.poll_interval_ms / 1000.0)
 
         return False, None
-
-    def run_segment_redis_check(
-        self,
-        region: str,
-        segment_id: str,
-        context: Optional[str] = None,
-    ) -> None:
-        """Check that a segment exists in Redis via kubectl exec.
-
-        Looks up ``featbit:segment:{segment_id}`` in the target cluster Redis.
-        """
-        assertion_name = f"redis-segment-{region}-check"
-        self._notify_step(assertion_name, "running")
-        effective_context = context or region
-        namespace = "featbit"
-        service_name = "redis"
-
-        try:
-            svc_result = self._run_kubectl(
-                [
-                    "--context", effective_context,
-                    "-n", namespace,
-                    "get", "svc", service_name,
-                    "-o", "json",
-                ]
-            )
-            if svc_result.returncode != 0:
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Auto-discovery failed: could not read service '{service_name}' "
-                    f"in context '{effective_context}'. {svc_result.stderr.strip()}",
-                )
-                self._notify_step(assertion_name, "failed", "service discovery failed")
-                return
-
-            svc = json.loads(svc_result.stdout)
-            ports = svc.get("spec", {}).get("ports", [])
-            redis_port = ports[0].get("port") if ports else 6379
-
-            pod_name = self._discover_redis_pod(context=effective_context, namespace=namespace)
-            if not pod_name:
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Auto-discovery failed: no running redis pod found in "
-                    f"context '{effective_context}' namespace '{namespace}'.",
-                )
-                self._notify_step(assertion_name, "failed", "no redis pod found")
-                return
-
-            if not segment_id:
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Segment Redis check requires segment_id in context={effective_context}.",
-                )
-                self._notify_step(assertion_name, "failed", "segment_id not resolved")
-                return
-
-            primary_key = f"featbit:segment:{segment_id}"
-            get_result = self._run_kubectl(
-                [
-                    "--context", effective_context,
-                    "-n", namespace,
-                    "exec", pod_name, "--",
-                    "redis-cli",
-                    "-h", service_name,
-                    "-p", str(redis_port),
-                    "GET", primary_key,
-                ],
-                timeout=30,
-            )
-            value = (get_result.stdout + get_result.stderr).strip()
-
-            self.add_timeline_event(
-                "redis-auto-check",
-                check=assertion_name,
-                output=value,
-                source={
-                    "context": effective_context,
-                    "namespace": namespace,
-                    "service": service_name,
-                    "port": redis_port,
-                    "pod": pod_name,
-                    "segmentId": segment_id,
-                    "key": primary_key,
-                },
-            )
-
-            if get_result.returncode == 0 and value and "(nil)" not in value.lower():
-                self.assertions.add_pass(
-                    assertion_name,
-                    f"Segment key '{primary_key}' found in Redis context={effective_context}.",
-                )
-                self._notify_step(assertion_name, "ok")
-            else:
-                self.assertions.add_fail(
-                    assertion_name,
-                    f"Segment key '{primary_key}' not found in Redis context={effective_context}. "
-                    f"Value: {value}",
-                )
-                self._notify_step(assertion_name, "failed", "key not found")
-
-        except subprocess.TimeoutExpired:
-            self.assertions.add_fail(
-                assertion_name,
-                f"Segment Redis check timed out in context '{effective_context}'.",
-            )
-            self._notify_step(assertion_name, "failed", "timed out")
-        except Exception as e:
-            self.assertions.add_fail(assertion_name, f"Segment Redis check error: {e}")
-            self._notify_step(assertion_name, "failed", str(e)[:40])
 
     def run_disruption_command(
         self,

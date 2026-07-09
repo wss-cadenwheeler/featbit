@@ -113,11 +113,15 @@ class CP07Scenario(BaseScenario):
 
             license_key = self.config.license_key
             if not license_key:
-                self.assertions.add_fail(
+                # Environmental prerequisite, not a product failure: without a
+                # license key the propagation flow cannot be exercised at all.
+                self.assertions.add_skip(
                     "license-key-missing",
-                    "No license key provided in configuration.",
+                    "No license key configured (set LICENSE_KEY or --license-key); "
+                    "license-change propagation not asserted.",
                 )
-                return False
+                self._notify_step("license-update", "skipped")
+                return self.assertions.all_passed()
 
             update_result = self._update_license(
                 source_url,

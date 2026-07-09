@@ -202,13 +202,18 @@ export default function () {
       let runTimeout = null;
 
       // Centralised teardown: stop the ping pump and the RUN_DURATION timer.
-      // k6 v1.x exposes setInterval/clearInterval/setTimeout/clearTimeout as
-      // GLOBAL functions inside the ws callback (see benchmark/k6-scripts/
-      // data-sync.js for the canonical pattern). The legacy socket.setInterval
-      // and socket.clearInterval methods used by older revisions of this file
-      // throw TypeError on k6 v1.0.0+, which silently swallows every close
-      // event and is the root cause of cp09's `closes=0, reconnects=0`
-      // failure prior to this fix.
+      // Timer APIs differ by k6 version, so feature-detect (#113):
+      //   * k6 >= v0.56 (and v1.x) exposes setInterval/clearInterval/
+      //     setTimeout/clearTimeout as GLOBALS inside the ws callback, and the
+      //     legacy socket.setInterval/socket.clearInterval methods THROW
+      //     TypeError on v1.0.0+ (silently swallowing every close event —
+      //     cp09's old `closes=0, reconnects=0` failure).
+      //   * k6 < v0.56 (e.g. the v0.50 apt package) has NO global timers —
+      //     "setInterval is not defined" kills the handler and zero clients
+      //     ever connect — but the legacy socket methods work and are
+      //     auto-cleared when the socket closes.
+      const hasGlobalTimers = typeof setInterval === 'function';
+
       function clearSocketTimers() {
         if (pingInterval !== null) {
           try { clearInterval(pingInterval); } catch (_) {}
@@ -233,15 +238,25 @@ export default function () {
 
         socket.send(buildDataSyncHandshake(vu));
 
-        pingInterval = setInterval(function () {
+        const pingPump = function () {
           try { socket.send(PING_MESSAGE); } catch (_) {}
-        }, PING_INTERVAL_MS);
+        };
+        if (hasGlobalTimers) {
+          pingInterval = setInterval(pingPump, PING_INTERVAL_MS);
+        } else {
+          socket.setInterval(pingPump, PING_INTERVAL_MS);
+        }
 
         const remaining = remainingRunMs();
         if (remaining > 0) {
-          runTimeout = setTimeout(function () {
+          const closeSocket = function () {
             try { socket.close(); } catch (_) {}
-          }, remaining);
+          };
+          if (hasGlobalTimers) {
+            runTimeout = setTimeout(closeSocket, remaining);
+          } else {
+            socket.setTimeout(closeSocket, remaining);
+          }
         }
       });
 

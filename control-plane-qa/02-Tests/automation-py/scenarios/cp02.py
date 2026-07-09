@@ -144,6 +144,8 @@ class CP02Scenario(BaseScenario):
                 topic="featbit-control-plane-feature-flag-change",
                 flag_id=flag_id,
             )
+            # Under GatedCommit the commit-time eval publish lands in the
+            # committing coordinator's DC, which may be the peer (#113).
             self.run_kafka_topic_check(
                 "downstream-topic-check",
                 self.config.downstream_topic_check_command,
@@ -151,6 +153,7 @@ class CP02Scenario(BaseScenario):
                 bootstrap=self._KAFKA_BOOTSTRAP,
                 topic="featbit-feature-flag-change",
                 flag_id=flag_id,
+                fallback_context=definition.target_region,
             )
             self.run_kafka_topic_check(
                 "retry-log-check",

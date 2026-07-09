@@ -33,12 +33,15 @@ class ApiClient:
 
         self.session = requests.Session()
 
-        # Configure retry strategy: 3 retries with exponential backoff
+        # Configure retry strategy: 3 retries with exponential backoff.
+        # POST is deliberately NOT retried: creates are non-idempotent, and a
+        # retried POST after a real 5xx duplicates the resource and masks the
+        # first error (#113: cp06's env-create 500 became "KeyHasBeenUsed").
         retry_strategy = UrllibRetry(
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT"],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "PUT"],
         )
 
         adapter = HTTPAdapter(max_retries=retry_strategy)

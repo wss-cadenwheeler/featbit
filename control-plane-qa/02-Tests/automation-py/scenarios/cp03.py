@@ -203,10 +203,10 @@ class CP03Scenario(BaseScenario):
         )
         self._notify_step(f"{step_prefix}toggle", "ok")
 
-        # Step 3: Verify source updated, target unchanged during outage.
+        # Step 3: Verify source accepted the toggle; record (not assert) the
+        # target's during-outage state.
         self._notify_step(f"{step_prefix}outage-hold", "running")
         deadline = time.time() + self.config.disruption_hold_seconds
-        target_changed_during_outage = False
 
         while time.time() < deadline:
             source_state = self.get_flag_state(
@@ -221,13 +221,6 @@ class CP03Scenario(BaseScenario):
                 source=json.loads(source_state.json()),
                 target=json.loads(target_state.json()),
             )
-
-            # Detect if target has changed to the toggled state.
-            if (
-                target_state.error is None
-                and target_state.is_enabled == toggle_to
-            ):
-                target_changed_during_outage = True
 
             time.sleep(self.config.poll_interval_ms / 1000.0)
 
@@ -246,15 +239,22 @@ class CP03Scenario(BaseScenario):
             "evaluated",
         )
 
-        # Assert target region remained unchanged during disruption.
-        self.assertions.add(
+        # Target staleness during the outage is NOT assertable on this
+        # topology (#113): both regions' management APIs read the same shared
+        # Mongo replica set, so the target's API state converges instantly
+        # regardless of its Redis being disrupted; and under GatedCommit the
+        # target CACHE's during-outage state is timing-dependent (commit gate
+        # blocked vs lease eviction + survivor commit). The deterministic
+        # resilience signals are asserted after heal: API convergence
+        # (step 5) and both DCs' Redis reaching the expected value (step 6).
+        # The outage-poll timeline events above carry the observed states.
+        self.assertions.add_skip(
             f"{step_prefix}target-unchanged-during-outage",
-            not target_changed_during_outage,
-            (
-                f"Target region remained at "
-                f"isEnabled={baseline_target_enabled} during disruption."
-            ),
-            "evaluated",
+            "Not assertable: target API state is backed by the shared Mongo "
+            "replica set (converges instantly regardless of the Redis outage), "
+            "and GatedCommit cache staleness races lease eviction. Post-heal "
+            "convergence is asserted instead; during-outage observations are "
+            "in the timeline.",
         )
         self._notify_step(f"{step_prefix}outage-hold", "ok")
 
@@ -308,6 +308,8 @@ class CP03Scenario(BaseScenario):
             topic="featbit-control-plane-feature-flag-change",
             flag_id=flag_id,
         )
+        # Under GatedCommit the commit-time eval publish lands in the
+        # committing coordinator's DC, which may be the peer (#113).
         self.run_kafka_topic_check(
             f"{step_prefix}downstream-topic-check",
             self.config.downstream_topic_check_command,
@@ -315,6 +317,7 @@ class CP03Scenario(BaseScenario):
             bootstrap=self._KAFKA_BOOTSTRAP,
             topic="featbit-feature-flag-change",
             flag_id=flag_id,
+            fallback_context=definition.target_region,
         )
         self.run_kafka_topic_check(
             f"{step_prefix}retry-log-check",
