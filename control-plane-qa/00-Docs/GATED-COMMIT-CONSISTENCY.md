@@ -42,8 +42,9 @@ serve the old value while others serve the new one.
    before it rejoins. Secrets are not staged/gated in either mode; they are backfilled
    unconditionally so SDK auth recovers along with flag/segment values, not after them.
 
-Consistency model: **Model A** — the control plane gates on its *own* per-DC Redis writes plus
-lease liveness. A partitioned-but-alive DC keeps serving its last *committed* value
+Consistency model: the control plane gates on its *own* per-DC Redis writes plus
+lease liveness — it deliberately does **not** wait for evaluation-server acknowledgment
+(a stricter, eval-confirmed gate is a possible future extension; see the end of this doc). A partitioned-but-alive DC keeps serving its last *committed* value
 (consistent-but-stale) and reconverges on return; it is treated as "not live" while unreachable.
 
 ---
@@ -181,8 +182,9 @@ need literally zero skew can revisit that trade-off; nothing in the design precl
 
 Corollary recorded for the future: if the source of truth ever becomes async multi-master
 (active/active Postgres), the bounded-skew guarantee weakens further (the pointer is no longer
-majority-linearizable) and Option A degrades toward eventual consistency — that is Model B (#44)
-territory, not a config change.
+majority-linearizable) and this design degrades toward eventual consistency — recovering the
+guarantee would require the stronger eval-server-confirmed gate (a future extension), not a
+config change.
 
 ---
 
@@ -392,7 +394,7 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   full-sync (a per-DC client-refresh push is not yet implemented).
 - **Eval-server applied watermark** (#46/#69): the heartbeat watermark (now covering flags AND
   segments, #83) is persisted per-DC in `DcLease.AppliedWatermarks` and consumed by the
-  `applied_watermark_lag_ms` gauge (#84) — it is **not** used for commit gating (Model A remains
+  `applied_watermark_lag_ms` gauge (#84) — it is **not** used for commit gating (the gate remains
   staged-everywhere), only for the per-DC/per-env lag metric above.
 - **Self-fence (D5, #22):** implemented as a hard readiness fence — `HeartbeatFreshnessHealthCheck`
   fails `/health/readiness` (HTTP 503) once a pod has been unable to publish a heartbeat for longer
@@ -422,5 +424,6 @@ configured, so a run on a BestEffort cluster, or without Chaos Mesh, degrades gr
   gated to run only on the elected leader via the opt-in, default-off
   `ControlPlane:LeaderElection:Enabled` (§1a); left disabled, every replica runs — safe but
   redundant. `CacheReconciler` intentionally still runs on every replica regardless (§1b).
-- **Stronger model:** an eval-server-confirmed gate (Model B) is documented in #44 as a future
-  enhancement.
+- **Stronger model:** an eval-server-confirmed commit gate — the coordinator would wait for the
+  evaluation servers themselves to acknowledge applying a version, rather than for the value to
+  be present in each DC's Redis — is a possible future enhancement.
