@@ -75,7 +75,12 @@ function Invoke-WindowsK6Install {
 }
 
 function Invoke-UbuntuK6Install {
-    $preferredK6Version = "0.50.0"
+    # v0.56 is the floor for the GLOBAL setInterval/setTimeout that
+    # benchmark/k6-scripts/data-sync.js and smoke.js use unconditionally;
+    # 0.57.0 is the newest release validated live against the cp09 suite.
+    # (cp09/cp09-connections.js itself feature-detects the timer API and also
+    # runs on older k6, e.g. 0.50 — see #113.)
+    $preferredK6Version = "0.57.0"
 
     Write-Info "Adding the Grafana k6 apt repository..."
     if ($PSCmdlet.ShouldProcess("Grafana k6 apt repository", "configure")) {
