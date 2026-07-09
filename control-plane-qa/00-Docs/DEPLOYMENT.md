@@ -94,6 +94,8 @@ the matching Quickstart wizard:
 For manual installation, see [`benchmark\install-k6.md`](../../benchmark/install-k6.md).
 A sudo-less alternative that the harness picks up equally well: drop the
 [static k6 release binary](https://github.com/grafana/k6/releases) into `~/.local/bin`.
+Any k6 from v0.50 up works — the cp09 script feature-detects the timer API
+(global timers on v0.56+/v1.x, legacy socket timers on older releases).
 
 Without k6, run the suite with `--ws-disabled`: the heartbeat purge/recovery
 assertions still execute; only the WebSocket client phases are skipped.
