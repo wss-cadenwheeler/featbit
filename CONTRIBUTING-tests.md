@@ -139,8 +139,7 @@ If a test needs any of those, it belongs in `Application.IntegrationTests/` (in-
 - `Thread.Sleep` is **forbidden** in tests.
 - Bare `Task.Delay` is **forbidden** in tests.
 - For time-dependent code, inject `TimeProvider` and use `FakeTimeProvider` (`Microsoft.Extensions.TimeProvider.Testing`).
-- For "wait until condition" synchronization, use `TaskCompletionSource`, signal handles, or polling with a hard timeout (`Assert.True(await WaitForAsync(...))`).
-- **Real-infrastructure carve-out (integration tests only):** tests that exercise a *real* backing store's time semantics (Redis key TTL, lease expiry) may use bounded real-time waits where `FakeTimeProvider` cannot reach and a negative assertion ("X did NOT happen") cannot be expressed as a condition poll. Each such wait carries a comment naming the timing contract under test (e.g. "give the loser a couple more renew ticks"). `RedisLeaderElectorTests` is the canonical example.
+- For "wait until condition" synchronization, use `TaskCompletionSource`, signal handles, or polling with a hard timeout (`Assert.True(await WaitForAsync(...))`). The same pattern covers **negative** assertions: poll for the *violation* and assert the wait times out (`Assert.False(await WaitForAsync(...))`).
 
 ## 10. CI and coverage
 
