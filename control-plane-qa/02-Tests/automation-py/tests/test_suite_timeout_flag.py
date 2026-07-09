@@ -38,3 +38,13 @@ def test_suite_exposes_control_plane_base_url(monkeypatch):
     assert param is not None, "suite command has no control_plane_base_url option"
     default = param.default() if callable(param.default) else param.default
     assert default == "http://127.0.0.1:5200"
+
+
+def test_ws_lb_host_default_honors_env(monkeypatch):
+    """.env.example documents WS_LB_HOST for CP-09 LB-mode failover coverage;
+    the option must actually read it (it was a hardcoded default)."""
+    monkeypatch.setenv("WS_LB_HOST", "featbit-eval.127.0.0.1.sslip.io")
+    param = _suite_param("ws_lb_host")
+    assert param is not None
+    default = param.default() if callable(param.default) else param.default
+    assert default == "featbit-eval.127.0.0.1.sslip.io"

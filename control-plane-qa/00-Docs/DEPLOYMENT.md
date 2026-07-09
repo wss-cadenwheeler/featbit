@@ -92,6 +92,32 @@ the matching Quickstart wizard:
 - `pwsh -File .\01-Infrastructure\ubuntu\Quickstart-Ubuntu.ps1 -InstallK6` — native Ubuntu wizard
 
 For manual installation, see [`benchmark\install-k6.md`](../../benchmark/install-k6.md).
+A sudo-less alternative that the harness picks up equally well: drop the
+[static k6 release binary](https://github.com/grafana/k6/releases) into `~/.local/bin`.
+
+Without k6, run the suite with `--ws-disabled`: the heartbeat purge/recovery
+assertions still execute; only the WebSocket client phases are skipped.
+
+#### CP-09 failover: the load balancer is a prerequisite for the migration assertion
+
+CP-09's `west-clients-migrated-to-east` assertion is only meaningful when the
+WebSocket clients connect **through the active/active nginx LB**: west's eval
+pods are deleted, and the LB is what routes the reconnecting clients to east.
+Two things must line up:
+
+1. **The proxy must be running with the eval upstream.** Both proxy flavors
+   provide it, but under different hostnames — pass the one matching your proxy:
+   - host nginx (`Setup-FeatBitProxy.ps1`, needs sudo): the default
+     `--ws-lb-host featbit-eval.local` works as-is.
+   - rootless container (`Start-FeatBitProxyContainer.ps1`): pass
+     `--ws-lb-host featbit-eval.127.0.0.1.sslip.io` — the `.local` names are
+     not wired into the container's nginx.
+2. **Do not use `--ws-no-load-balancer` for failover coverage.** Pinned mode
+   connects each VU directly to a per-cluster port-forward slot; after the pod
+   delete, pinned clients reconnect to west's replacement pods and *cannot*
+   migrate — the migration assertion then fails by design, not because the
+   product misbehaved. Pinned mode is for per-cluster connection accounting,
+   not failover.
 
 ---
 

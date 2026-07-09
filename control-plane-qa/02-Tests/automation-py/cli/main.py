@@ -479,9 +479,11 @@ def seed(
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option(
     "--ws-lb-host",
-    default="featbit-eval.local",
-    show_default=True,
-    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+    default=lambda: get_env("WS_LB_HOST", "featbit-eval.local"),
+    show_default="featbit-eval.local",
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB). The "
+    ".local default requires the host-nginx proxy; with the rootless proxy "
+    "container use featbit-eval.127.0.0.1.sslip.io.",
 )
 @click.option(
     "--ws-lb-port",
@@ -888,9 +890,11 @@ class _null_context:
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option(
     "--ws-lb-host",
-    default="featbit-eval.local",
-    show_default=True,
-    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+    default=lambda: get_env("WS_LB_HOST", "featbit-eval.local"),
+    show_default="featbit-eval.local",
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB). The "
+    ".local default requires the host-nginx proxy; with the rootless proxy "
+    "container use featbit-eval.127.0.0.1.sslip.io.",
 )
 @click.option(
     "--ws-lb-port",
