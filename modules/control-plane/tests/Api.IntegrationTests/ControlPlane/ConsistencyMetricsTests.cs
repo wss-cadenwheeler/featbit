@@ -1,3 +1,4 @@
+using Api.IntegrationTests.Stubs;
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
 using Api.IntegrationTests.Fixtures;

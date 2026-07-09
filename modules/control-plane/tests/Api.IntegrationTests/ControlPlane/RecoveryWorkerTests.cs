@@ -1,3 +1,4 @@
+using Api.IntegrationTests.Stubs;
 using System.Reflection;
 using Api.Application.ControlPlane;
 using Api.Infrastructure.Caches;
