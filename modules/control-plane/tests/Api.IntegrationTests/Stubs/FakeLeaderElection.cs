@@ -1,6 +1,6 @@
 using Api.Application.ControlPlane;
 
-namespace Api.IntegrationTests.ControlPlane;
+namespace Api.IntegrationTests.Stubs;
 
 /// <summary>
 /// #71b test double: an <see cref="ILeaderElection"/> whose leadership state is fixed at

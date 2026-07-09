@@ -404,12 +404,16 @@ def seed(
 @click.option(
     "--control-plane-base-url",
     default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
-    help="Control-Plane admin endpoint URL (defaults to https://featbit-control-plane.{west|east}.local)",
+    help="Control-Plane admin endpoint URL for CP-08 (X-Api-Key auth). Must be "
+    "host-reachable: Start-PortForwards.ps1 exposes west on 127.0.0.1:5200, east "
+    "on 127.0.0.1:5201. Defaults to http://featbit-control-plane.{west|east}.local, "
+    "which requires the host-nginx proxy.",
 )
 @click.option(
     "--license-key",
     default=lambda: get_env("LICENSE_KEY", ""),
-    help="Valid FeatBit license key for CP-07 license change test",
+    help="Valid FeatBit license key for CP-07 license change test. "
+    "When unset, CP-07 records a skip instead of failing.",
 )
 @click.option(
     "--login-api-base-url",
@@ -475,9 +479,11 @@ def seed(
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option(
     "--ws-lb-host",
-    default="featbit-eval.local",
-    show_default=True,
-    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+    default=lambda: get_env("WS_LB_HOST", "featbit-eval.local"),
+    show_default="featbit-eval.local",
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB). The "
+    ".local default requires the host-nginx proxy; with the rootless proxy "
+    "container use featbit-eval.127.0.0.1.sslip.io.",
 )
 @click.option(
     "--ws-lb-port",
@@ -806,6 +812,21 @@ class _null_context:
     help="Max seconds to keep retrying post-reset health checks",
 )
 @click.option(
+    "--timeout-seconds",
+    type=int,
+    default=lambda: int(get_env("TIMEOUT_SECONDS", "60")),
+    help="Per-assertion convergence timeout for every scenario in the suite "
+    "(e.g. committed-pointer polls; the first post-flip gated commit can take >60s)",
+)
+@click.option(
+    "--control-plane-base-url",
+    default=lambda: get_env("CONTROL_PLANE_BASE_URL", ""),
+    help="Control-Plane admin endpoint URL for CP-08 (X-Api-Key auth). Must be "
+    "host-reachable: Start-PortForwards.ps1 exposes west on 127.0.0.1:5200, east "
+    "on 127.0.0.1:5201. Defaults to http://featbit-control-plane.{west|east}.local, "
+    "which requires the host-nginx proxy.",
+)
+@click.option(
     "--health-poll-interval-seconds",
     type=int,
     default=5,
@@ -869,9 +890,11 @@ class _null_context:
 @click.option("--ws-disabled", is_flag=True, default=False, help="Skip CP-09 WebSocket assertions")
 @click.option(
     "--ws-lb-host",
-    default="featbit-eval.local",
-    show_default=True,
-    help="CP-09 WebSocket load balancer hostname (nginx active/active LB)",
+    default=lambda: get_env("WS_LB_HOST", "featbit-eval.local"),
+    show_default="featbit-eval.local",
+    help="CP-09 WebSocket load balancer hostname (nginx active/active LB). The "
+    ".local default requires the host-nginx proxy; with the rootless proxy "
+    "container use featbit-eval.127.0.0.1.sslip.io.",
 )
 @click.option(
     "--ws-lb-port",
@@ -891,7 +914,9 @@ class _null_context:
 )
 @click.option(
     "--chaos-mesh-manifest",
-    default=lambda: get_env("CHAOS_MESH_MANIFEST", "k8s/chaos-mesh/redis-network-loss.yaml"),
+    default=lambda: get_env(
+        "CHAOS_MESH_MANIFEST", "01-Infrastructure/chaos-mesh/redis-network-loss.yaml"
+    ),
     help="Path to the Chaos Mesh NetworkChaos manifest for Redis disruption (CP-03). Relative paths resolve from control-plane-qa/.",
 )
 @click.option(
@@ -901,12 +926,23 @@ class _null_context:
     help="Mode the deployment runs in (CP-10 - CP-14). The suite does NOT flip cluster config.",
 )
 @click.option(
-    "--cross-dc-partition-manifest",
+    "--cross-dc-partition-manifest-west",
     default=lambda: get_env(
-        "CROSS_DC_PARTITION_MANIFEST", "01-Infrastructure/chaos-mesh/cross-dc-partition.yaml"
+        "CROSS_DC_PARTITION_MANIFEST_WEST",
+        "01-Infrastructure/chaos-mesh/cross-dc-partition-west.yaml",
     ),
-    help="NetworkChaos manifest severing the cross-DC link (CP-11/CP-12). Relative paths "
-    "resolve from control-plane-qa/.",
+    help="NetworkChaos manifest applied to the WEST cluster for CP-11/CP-12 (must not "
+    "target west's own node — see the manifest header). Relative paths resolve from "
+    "control-plane-qa/.",
+)
+@click.option(
+    "--cross-dc-partition-manifest-east",
+    default=lambda: get_env(
+        "CROSS_DC_PARTITION_MANIFEST_EAST",
+        "01-Infrastructure/chaos-mesh/cross-dc-partition-east.yaml",
+    ),
+    help="NetworkChaos manifest applied to the EAST cluster for CP-11/CP-12. Relative "
+    "paths resolve from control-plane-qa/.",
 )
 @click.option(
     "--eval-kafka-partition-manifest",
@@ -940,6 +976,8 @@ def suite(
     reset_env: bool,
     stabilization_seconds: int,
     health_timeout_seconds: int,
+    timeout_seconds: int,
+    control_plane_base_url: str,
     health_poll_interval_seconds: int,
     log_detail: str,
     env_id: Optional[str],
@@ -964,7 +1002,8 @@ def suite(
     artifacts_root: str,
     chaos_mesh_manifest: str,
     consistency_mode: str,
-    cross_dc_partition_manifest: str,
+    cross_dc_partition_manifest_west: str,
+    cross_dc_partition_manifest_east: str,
     eval_kafka_partition_manifest: str,
     east_eval_readiness_url: str,
     heartbeat_staleness_threshold_seconds: int,
@@ -1124,11 +1163,7 @@ def suite(
             heartbeat_stop_cmd = None
             heartbeat_resume_cmd = None
             if scenario_name.startswith("cp03"):
-                _manifest = Path(chaos_mesh_manifest)
-                if not _manifest.is_absolute():
-                    # Resolve relative to control-plane-qa/ (two levels up from cli/main.py).
-                    _manifest = Path(__file__).resolve().parents[2] / _manifest
-                manifest_path = str(_manifest.resolve())
+                manifest_path = _resolve_manifest(chaos_mesh_manifest)
                 if scenario_name == "cp03-west-with-east-redis-outage":
                     target_context = "east"
                 else:
@@ -1136,14 +1171,18 @@ def suite(
                 start_cmd = f"kubectl apply -f {manifest_path} --context {target_context}"
                 stop_cmd = f"kubectl delete -f {manifest_path} --context {target_context} --ignore-not-found"
             elif scenario_name.startswith(("cp11", "cp12")):
-                # CP-11/CP-12: one cross-DC partition (apply/delete in both clusters).
-                _m = _resolve_manifest(cross_dc_partition_manifest)
+                # CP-11/CP-12: per-cluster cross-DC partition manifests — each side
+                # blocks the PEER only, never its own node (#113: a shared manifest
+                # listing both peer IPs severed each cluster's node->pod traffic,
+                # killing port-forwards to its own API mid-scenario).
+                _mw = _resolve_manifest(cross_dc_partition_manifest_west)
+                _me = _resolve_manifest(cross_dc_partition_manifest_east)
                 partition_start_cmd = (
-                    f"kubectl --context west apply -f {_m} && kubectl --context east apply -f {_m}"
+                    f"kubectl --context west apply -f {_mw} && kubectl --context east apply -f {_me}"
                 )
                 partition_stop_cmd = (
-                    f"kubectl --context west delete -f {_m} --ignore-not-found && "
-                    f"kubectl --context east delete -f {_m} --ignore-not-found"
+                    f"kubectl --context west delete -f {_mw} --ignore-not-found && "
+                    f"kubectl --context east delete -f {_me} --ignore-not-found"
                 )
             elif scenario_name.startswith("cp13"):
                 # CP-13: intra-east eval<->kafka partition (local heartbeat break).
@@ -1165,7 +1204,8 @@ def suite(
                 skip_certificate_check=skip_cert_check,
                 flag_key=None,
                 target_status=True,
-                timeout_seconds=60,
+                timeout_seconds=timeout_seconds,
+                control_plane_base_url=control_plane_base_url or None,
                 poll_interval_ms=1000,
                 disruption_hold_seconds=15,
                 start_disruption_command=start_cmd,

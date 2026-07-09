@@ -1242,6 +1242,35 @@ if ($clusterInfraComponentSet.Contains("kafka")) {
     kubectl --context east rollout status deployment/kafka-aggregate -n featbit --timeout=120s | Out-Null
     Write-Info "kafka-aggregate rollout complete."
 
+    # Pre-create the featbit topics on every broker BEFORE the MirrorMakers (re)start.
+    # At first bring-up the MirrorMakers otherwise race topic auto-creation on their
+    # destination broker (UNKNOWN_TOPIC_OR_PARTITION warnings), and the deprecated
+    # MirrorMaker tool can silently drop records in that window (#113).
+    $featbitTopics = @(
+        "featbit-feature-flag-change", "featbit-segment-change",
+        "featbit-endusers", "featbit-insights",
+        "featbit-connection-made", "featbit-connection-closed",
+        "featbit-pod-heartbeat",
+        "featbit-control-plane-feature-flag-change", "featbit-control-plane-segment-change",
+        "featbit-control-plane-secret-change", "featbit-control-plane-license-change",
+        "featbit-control-plane-web-hooks", "featbit-control-plane-command",
+        "featbit-control-plane-push-full-sync-change"
+    ) -join " "
+    Write-Info "Pre-creating featbit topics on main + aggregate brokers (both clusters)..."
+    foreach ($topicCtx in @("west", "east")) {
+        foreach ($topicBootstrap in @("kafka:9092", "kafka-aggregate:9092")) {
+            kubectl --context $topicCtx -n featbit exec kafka -- bash -c `
+                "for t in $featbitTopics; do /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server $topicBootstrap --create --if-not-exists --topic `$t --partitions 1 --replication-factor 1 >/dev/null 2>&1; done" | Out-Null
+        }
+    }
+    Write-Success "featbit topics pre-created on all brokers (both clusters)"
+
+    # The local MirrorMakers started with the kafka group and may carry dead mirror
+    # threads from the pre-topic window; restart them now that topics exist. (The
+    # remote MirrorMakers restart anyway via the set env below.)
+    kubectl --context west -n featbit rollout restart deployment/kafka-mirrormaker-local | Out-Null
+    kubectl --context east -n featbit rollout restart deployment/kafka-mirrormaker-local | Out-Null
+
     Write-Info "Configuring west kafka-mirrormaker-remote -> east kafka-aggregate (${eastSharedClusterIp}:30094)..."
     kubectl --context west -n featbit set env deployment/kafka-mirrormaker-remote `
         "REMOTE_BOOTSTRAP_SERVERS=${eastSharedClusterIp}:30094" | Out-Null

@@ -164,7 +164,9 @@ class CP01Scenario(BaseScenario):
                 flag_id=flag_id,
             )
 
-            # Manual steps 17-21: Eval topic in source cluster.
+            # Manual steps 17-21: Eval topic in source cluster. Under GatedCommit
+            # the commit-time eval publish lands in the committing coordinator's
+            # DC, which may be the peer (#113) — allow the fallback.
             self.run_kafka_topic_check(
                 "downstream-topic-check",
                 self.config.downstream_topic_check_command,
@@ -172,6 +174,7 @@ class CP01Scenario(BaseScenario):
                 bootstrap=self._KAFKA_BOOTSTRAP,
                 topic="featbit-feature-flag-change",
                 flag_id=flag_id,
+                fallback_context=definition.target_region,
             )
 
             # Manual steps 22-27: Aggregate topic in source cluster.
