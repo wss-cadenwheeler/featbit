@@ -1,0 +1,267 @@
+using Domain.Bases;
+using Infrastructure.Persistence.EntityFrameworkCore;
+using Infrastructure.Persistence.MongoDb;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
+using MongoDB.Driver;
+using Npgsql;
+
+namespace MongoToPostgresMigrator;
+
+/// <summary>
+/// Shared services the entity steps operate against.
+/// </summary>
+public sealed class MigrationContext(
+    MongoDbClient mongo,
+    AppDbContext db,
+    NpgsqlDataSource dataSource,
+    int batchSize,
+    ILogger logger)
+{
+    private readonly Dictionary<string, int> _skippedByEntity = new();
+
+    public MongoDbClient Mongo { get; } = mongo;
+    public AppDbContext Db { get; } = db;
+
+    /// <summary>
+    /// The application's own <see cref="NpgsqlDataSource"/> (configured with
+    /// <c>EnableDynamicJson()</c> and the app's JSON options). High-volume steps
+    /// use it for a raw binary <c>COPY</c> that writes jsonb and timestamptz
+    /// byte-identically to the EF Core path.
+    /// </summary>
+    public NpgsqlDataSource DataSource { get; } = dataSource;
+
+    public int BatchSize { get; } = batchSize;
+    public ILogger Logger { get; } = logger;
+
+    /// <summary>
+    /// Count of source documents whose <c>_id</c> was not a UUID and was given a
+    /// fresh <see cref="Guid"/> during the copy. Surfaced in the run summary.
+    /// </summary>
+    public int ReassignedIds { get; set; }
+
+    /// <summary>
+    /// Rows skipped because they violated a target constraint (e.g. a value
+    /// longer than the column allows), keyed by entity name.
+    /// </summary>
+    public IReadOnlyDictionary<string, int> SkippedByEntity => _skippedByEntity;
+
+    public int TotalSkipped => _skippedByEntity.Values.Sum();
+
+    public int SkippedFor(string entity) => _skippedByEntity.GetValueOrDefault(entity);
+
+    /// <summary>
+    /// Records that a single row could not be written to PostgreSQL and was
+    /// skipped, logging enough to audit which row and why.
+    /// </summary>
+    public void RecordSkip(string entity, Guid id, Exception ex)
+    {
+        _skippedByEntity[entity] = _skippedByEntity.GetValueOrDefault(entity) + 1;
+        Logger.LogWarning(
+            "{Entity}: skipped row id {Id} — {Reason}",
+            entity, id, ex.InnerException?.Message ?? ex.Message);
+    }
+
+    /// <summary>
+    /// Records that a group of rows was skipped as a whole (for example, the
+    /// duplicate <c>(env_id, key_id)</c> rows collapsed by an in-database
+    /// <c>ON CONFLICT DO NOTHING</c> merge). Logs a single line with the count
+    /// instead of one line per row so a large dirty-data class stays auditable
+    /// without flooding the log.
+    /// </summary>
+    public void RecordBulkSkip(string entity, int count, string reason)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _skippedByEntity[entity] = _skippedByEntity.GetValueOrDefault(entity) + count;
+        Logger.LogWarning("{Entity}: skipped {Count} row(s) — {Reason}", entity, count, reason);
+    }
+}
+
+/// <summary>
+/// A single entity's migration behaviour: copy, count source, count target.
+/// The type list is declared exactly once (see <see cref="MigrationPipeline"/>);
+/// preflight, migrate, and verify all reuse the same steps.
+/// </summary>
+public interface IEntityStep
+{
+    string Name { get; }
+
+    Task<long> CopyAsync(MigrationContext ctx);
+
+    Task<long> CountSourceAsync(MigrationContext ctx);
+
+    Task<long> CountTargetAsync(MigrationContext ctx);
+}
+
+/// <summary>
+/// Generic entity step. Reads a MongoDB collection into the shared domain POCO
+/// and writes the same object through EF Core, inheriting every type conversion
+/// (snake_case, jsonb, text[]) from the application's own persistence config.
+/// </summary>
+public class EntityStep<T>(string name) : IEntityStep where T : Entity
+{
+    public string Name { get; } = name;
+
+    public virtual async Task<long> CopyAsync(MigrationContext ctx)
+    {
+        long n = 0;
+        var buffer = new List<T>(ctx.BatchSize);
+
+        await foreach (var entity in ReadEntitiesAsync(ctx))
+        {
+            buffer.Add(entity);
+            if (buffer.Count >= ctx.BatchSize)
+            {
+                n += await SaveChunkAsync(ctx, buffer.ToArray());
+                buffer.Clear();
+            }
+        }
+
+        if (buffer.Count > 0)
+        {
+            n += await SaveChunkAsync(ctx, buffer.ToArray());
+        }
+
+        ctx.Logger.LogInformation("{Entity}: migrated {Count}", Name, n);
+        return n;
+    }
+
+    /// <summary>
+    /// Streams the source collection as domain POCOs, one at a time. Reads raw
+    /// <see cref="BsonDocument"/>s (not the typed collection) so a document whose
+    /// <c>_id</c> is not a UUID doesn't abort the whole cursor during
+    /// deserialization: each <c>_id</c> is repaired (see
+    /// <see cref="RepairNonUuidId"/>) before the document is deserialized with the
+    /// application's own class maps. The cursor is streamed so high-volume
+    /// collections never load fully into memory. Shared by the EF Core path here
+    /// and the binary-COPY steps.
+    /// </summary>
+    protected async IAsyncEnumerable<T> ReadEntitiesAsync(MigrationContext ctx)
+    {
+        var collectionName = ctx.Mongo.CollectionNameOf<T>();
+        var raw = ctx.Mongo.CollectionOf(collectionName);
+
+        using var cursor = await raw.FindAsync(FilterDefinition<BsonDocument>.Empty);
+        while (await cursor.MoveNextAsync())
+        {
+            foreach (var doc in cursor.Current)
+            {
+                RepairNonUuidId(ctx, doc);
+                yield return BsonSerializer.Deserialize<T>(doc);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Saves a chunk in a single round-trip. If the chunk violates a target
+    /// constraint, isolates the offending row(s) by <b>binary-splitting</b> the
+    /// chunk and retrying each half, recursing only into halves that still fail.
+    /// A lone bad row is isolated in ~log2(chunk) steps instead of degrading the
+    /// whole chunk to one-row-at-a-time inserts, so sparse dirty rows cost almost
+    /// nothing. A single row that still fails is skipped (and logged). Returns the
+    /// number of rows successfully written.
+    /// </summary>
+    protected Task<long> SaveChunkAsync(MigrationContext ctx, T[] chunk) =>
+        SaveWithIsolationAsync(
+            chunk,
+            async batch =>
+            {
+                try
+                {
+                    ctx.Db.Set<T>().AddRange(batch);
+                    await ctx.Db.SaveChangesAsync();
+                }
+                finally
+                {
+                    // Clear the change tracker after every save — on success so
+                    // neither side accumulates memory, and on failure so the
+                    // rolled-back (Added) entities are not re-saved on the retry.
+                    ctx.Db.ChangeTracker.Clear();
+                }
+            },
+            (row, ex) => ctx.RecordSkip(Name, row.Id, ex));
+
+    /// <summary>
+    /// The binary-split isolation algorithm behind <see cref="SaveChunkAsync"/>,
+    /// separated from EF Core so it can be exercised without a database. Attempts
+    /// to save the whole chunk via <paramref name="saveAsync"/> in one round-trip;
+    /// if that throws a <see cref="DbUpdateException"/> (e.g. one row violates a
+    /// target constraint such as a value longer than the column allows), the chunk
+    /// is split in half and each half retried, recursing only into halves that
+    /// still fail. A lone row that still fails is skipped via
+    /// <paramref name="onSkip"/> and excluded from the returned count. So a sparse
+    /// bad row is isolated in ~log2(chunk) steps instead of degrading the whole
+    /// chunk to one-row-at-a-time inserts. Returns the number of rows saved.
+    /// </summary>
+    protected static async Task<long> SaveWithIsolationAsync(
+        T[] chunk, Func<T[], Task> saveAsync, Action<T, Exception> onSkip)
+    {
+        if (chunk.Length == 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            await saveAsync(chunk);
+            return chunk.Length;
+        }
+        catch (DbUpdateException ex)
+        {
+            if (chunk.Length == 1)
+            {
+                onSkip(chunk[0], ex);
+                return 0;
+            }
+
+            var mid = chunk.Length / 2;
+            var written = await SaveWithIsolationAsync(chunk[..mid], saveAsync, onSkip);
+            written += await SaveWithIsolationAsync(chunk[mid..], saveAsync, onSkip);
+            return written;
+        }
+    }
+
+    /// <summary>
+    /// FeatBit domain entities always key on a <see cref="Guid"/> (stored as a
+    /// BSON UUID). If a source document's <c>_id</c> is anything else (e.g. a
+    /// stray <c>ObjectId</c>), assign a fresh <see cref="Guid"/> so the row can be
+    /// written to PostgreSQL's uuid primary key. The surrogate id is not a
+    /// foreign-key target, so regenerating it preserves the row and its
+    /// relationships. Each reassignment is logged for audit.
+    /// </summary>
+    protected void RepairNonUuidId(MigrationContext ctx, BsonDocument doc)
+    {
+        if (!doc.TryGetValue("_id", out var id))
+        {
+            return;
+        }
+
+        var isUuid = id.BsonType == BsonType.Binary &&
+                     id.AsBsonBinaryData.SubType is BsonBinarySubType.UuidStandard
+                         or BsonBinarySubType.UuidLegacy;
+        if (isUuid)
+        {
+            return;
+        }
+
+        var newId = Guid.NewGuid();
+        ctx.Logger.LogWarning(
+            "{Entity}: source _id '{OldId}' is a {Type}, not a UUID; reassigned new id {NewId}.",
+            Name, id.ToString(), id.BsonType, newId);
+
+        doc["_id"] = new BsonBinaryData(newId, GuidRepresentation.Standard);
+        ctx.ReassignedIds++;
+    }
+
+    public Task<long> CountSourceAsync(MigrationContext ctx) =>
+        ctx.Mongo.CollectionOf<T>().CountDocumentsAsync(FilterDefinition<T>.Empty);
+
+    public Task<long> CountTargetAsync(MigrationContext ctx) =>
+        ctx.Db.Set<T>().LongCountAsync();
+}
